@@ -1,0 +1,3 @@
+.help-block { margin-top: 28rpx; }
+.help-title { display: block; color: #26272a; font-size: 28rpx; font-weight: 600; }
+.help-text { display: block; margin-top: 8rpx; color: #5f6369; font-size: 25rpx; line-height: 1.7; }

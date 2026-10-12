@@ -1,0 +1,83 @@
+# --- 依赖与构建产物 ---
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+apps/admin/.npm-cache/
+apps/miniapp/miniprogram_npm/
+apps/ocr-service/__pycache__/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# --- 本机工具缓存与历史（不随源码公开发布） ---
+/.npm-cache/
+/.workbuddy/
+/.zcode/
+
+# --- 测试与报告 ---
+test-results/
+playwright-report/
+tests/.tmp/
+*.snap.png
+
+# --- 密钥、凭据与敏感文件（任何环境） ---
+.env
+.env.*
+!.env.example
+!.env*.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.sts.json
+*credentials*.json
+*secrets*.json
+*.identity.json
+*.token.json
+*.tokens.json
+cos-sts-*
+sts-*.json
+!tests/fixtures/**/*.json
+
+# --- 本地磁盘存储（STORAGE_PROVIDER=local 的持久化目录；含用户上传证据，绝不入 Git） ---
+.local-storage/
+
+# --- 数据库与备份 ---
+*.dump
+*.dump.enc
+*.sql.gz
+*.sql.bak
+*.backup
+*.pg_dump
+*.pgbkp
+db/*.sqlite*
+db/*.db
+
+# --- OCR 原图样本与压测身份 ---
+tests/ocr-baseline/images/
+tests/load/plans/
+tests/load/*.json
+
+# --- 日志与缓存 ---
+*.log
+.DS_Store
+.idea/
+*.swp
+*~
+.cache/
+.tmp/
+
+# --- 微信开发者工具私有配置与缓存 ---
+project.private.config.json
+apps/miniapp/project.private.config.json
+apps/miniapp/.eslintrc.js
+apps/miniapp/miniprogram/pages/**/*.wxs
+
+# --- 代码索引 ---
+.codegraph/

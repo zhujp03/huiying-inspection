@@ -1,0 +1,169 @@
+{
+  "passed": 23,
+  "results": [
+    {
+      "name": "00-login",
+      "route": "/pages/login/index",
+      "screenshot": "/Users/michaelzhu/Documents/点评小程序/tests/visual/wechat-2026-07-24/00-login.png",
+      "loading": null,
+      "error": ""
+    },
+    {
+      "name": "00a-login-hidden-entries",
+      "route": "/pages/login/index",
+      "screenshot": "/Users/michaelzhu/Documents/点评小程序/tests/visual/wechat-2026-07-24/00a-login-hidden-entries.png",
+      "loading": null,
+      "error": ""
+    },
+    {
+      "name": "01-location",
+      "route": "/pages/location/index",
+      "screenshot": "/Users/michaelzhu/Documents/点评小程序/tests/visual/wechat-2026-07-24/01-location.png",
+      "loading": null,
+      "error": ""
+    },
+    {
+      "name": "01a-location-blocked",
+      "route": "/pages/location/index",
+      "screenshot": "/Users/michaelzhu/Documents/点评小程序/tests/visual/wechat-2026-07-24/01a-location-blocked.png",
+      "loading": null,
+      "error": ""
+    },
+    {
+      "name": "02-home",
+      "route": "/pages/home/index",
+      "screenshot": "/Users/michaelzhu/Documents/点评小程序/tests/visual/wechat-2026-07-24/02-home.png",
+      "loading": false,
+      "error": ""
+    },
+    {
+      "name": "03-schedule",
+      "route": "/pages/schedule/index",
+      "screenshot": "/Users/michaelzhu/Documents/点评小程序/tests/visual/wechat-2026-07-24/03-schedule.png",
+      "loading": false,
+      "error": ""
+    },
+    {
+      "name": "04-profile",
+      "route": "/pages/profile/index",
+      "screenshot": "/Users/michaelzhu/Documents/点评小程序/tests/visual/wechat-2026-07-24/04-profile.png",
+      "loading": null,
+      "error": ""
+    },
+    {
+      "name": "06-task",
+      "route": "/pages/task/index",
+      "screenshot": "/Users/michaelzhu/Documents/点评小程序/tests/visual/wechat-2026-07-24/06-task.png",
+      "loading": false,
+      "error": ""
+    },
+    {
+      "name": "06a-task-submitted-readonly",
+      "route": "/pages/task/index",
+      "screenshot": "/Users/michaelzhu/Documents/点评小程序/tests/visual/wechat-2026-07-24/06a-task-submitted-readonly.png",
+      "loading": false,
+      "error": ""
+    },
+    {
+      "name": "07-survey",
+      "route": "/pages/survey/index",
+      "screenshot": "/Users/michaelzhu/Documents/点评小程序/tests/visual/wechat-2026-07-24/07-survey.png",
+      "loading": false,
+      "error": ""
+    },
+    {
+      "name": "08-issue",
+      "route": "/pages/issue/index",
+      "screenshot": "/Users/michaelzhu/Documents/点评小程序/tests/visual/wechat-2026-07-24/08-issue.png",
+      "loading": false,
+      "error": ""
+    },
+    {
+      "name": "08a-evidence-states",
+      "route": "/pages/issue/index",
+      "screenshot": "/Users/michaelzhu/Documents/点评小程序/tests/visual/wechat-2026-07-24/08a-evidence-states.png",
+      "loading": false,
+      "error": ""
+    },
+    {
+      "name": "09-dishes",
+      "route": "/pages/dishes/index",
+      "screenshot": "/Users/michaelzhu/Documents/点评小程序/tests/visual/wechat-2026-07-24/09-dishes.png",
+      "loading": false,
+      "error": ""
+    },
+    {
+      "name": "09b-receipt-uploading",
+      "route": "/pages/dishes/index",
+      "screenshot": "/Users/michaelzhu/Documents/点评小程序/tests/visual/wechat-2026-07-24/09b-receipt-uploading.png",
+      "loading": false,
+      "error": ""
+    },
+    {
+      "name": "09c-ocr-partial-review",
+      "route": "/pages/dishes/index",
+      "screenshot": "/Users/michaelzhu/Documents/点评小程序/tests/visual/wechat-2026-07-24/09c-ocr-partial-review.png",
+      "loading": false,
+      "error": ""
+    },
+    {
+      "name": "09a-dishes-lower",
+      "route": "/pages/dishes/index",
+      "screenshot": "/Users/michaelzhu/Documents/点评小程序/tests/visual/wechat-2026-07-24/09a-dishes-lower.png",
+      "loading": false,
+      "error": ""
+    },
+    {
+      "name": "10-other",
+      "route": "/pages/other/index",
+      "screenshot": "/Users/michaelzhu/Documents/点评小程序/tests/visual/wechat-2026-07-24/10-other.png",
+      "loading": false,
+      "error": ""
+    },
+    {
+      "name": "10a-submit-confirmation",
+      "route": "/pages/other/index",
+      "screenshot": "/Users/michaelzhu/Documents/点评小程序/tests/visual/wechat-2026-07-24/10a-submit-confirmation.png",
+      "loading": false,
+      "error": ""
+    },
+    {
+      "name": "10b-other-reloaded",
+      "route": "/pages/other/index",
+      "screenshot": "/Users/michaelzhu/Documents/点评小程序/tests/visual/wechat-2026-07-24/10b-other-reloaded.png",
+      "loading": false,
+      "error": ""
+    },
+    {
+      "name": "10b-submit-processing",
+      "route": "/pages/other/index",
+      "screenshot": "/Users/michaelzhu/Documents/点评小程序/tests/visual/wechat-2026-07-24/10b-submit-processing.png",
+      "loading": false,
+      "error": ""
+    },
+    {
+      "name": "10c-submit-retryable",
+      "route": "/pages/other/index",
+      "screenshot": "/Users/michaelzhu/Documents/点评小程序/tests/visual/wechat-2026-07-24/10c-submit-retryable.png",
+      "loading": false,
+      "error": ""
+    },
+    {
+      "name": "10d-submit-terminal-failure",
+      "route": "/pages/other/index",
+      "screenshot": "/Users/michaelzhu/Documents/点评小程序/tests/visual/wechat-2026-07-24/10d-submit-terminal-failure.png",
+      "loading": false,
+      "error": ""
+    },
+    {
+      "name": "10e-submit-success",
+      "route": "/pages/other/index",
+      "screenshot": "/Users/michaelzhu/Documents/点评小程序/tests/visual/wechat-2026-07-24/10e-submit-success.png",
+      "loading": false,
+      "error": ""
+    }
+  ],
+  "exceptions": [],
+  "applicationExceptions": [],
+  "runtimeEvents": []
+}

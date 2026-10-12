@@ -1,0 +1,81 @@
+/* 汇盈探店 · 探员端 H5 设计 token
+ * 来源：apps/miniapp/miniprogram/app.wxss 与各页 wxss 逐值提取（rpx→px 按 2:1，375px 基准）。
+ * 命名与取值以 docs/web/design.md 为契约；改动必须先改文档。
+ */
+
+:root {
+  /* ---------- 色彩 ---------- */
+  /* 品牌 */
+  --hy-primary: #f25f42;          /* 主色（tab 选中/主按钮/强调） */
+  --hy-primary-disabled: #f2a18f; /* 主按钮禁用 */
+  --hy-primary-tint: #fff0ec;     /* 主色浅底（标签） */
+  --hy-on-primary: #ffffff;
+
+  /* 中性 */
+  --hy-ink: #26272a;              /* 主文本/深色徽标底/首页 Hero 底 */
+  --hy-ink-secondary: #5f6369;    /* 次级文本（neutral 徽标） */
+  --hy-ink-tertiary: #70747b;     /* 弱文本（muted） */
+  --hy-ink-hint: #9a9da3;         /* 流程条未激活 */
+  --hy-ink-faint: #c8c9cc;        /* Hero 副文案 */
+  --hy-body: #26272a;
+
+  /* 背景 */
+  --hy-bg-page: #f6f7f8;          /* 页面底（app.wxss page） */
+  --hy-bg-input: #f7f7f7;         /* 输入控件底（app.json window 亦用） */
+  --hy-bg-card: #ffffff;
+  --hy-bg-neutral: #eef0f2;       /* neutral 徽标底 */
+  --hy-bg-muted: #f0f1f2;         /* muted 徽标底 */
+  --hy-bg-secondary: #eceeef;     /* 次按钮底 */
+
+  /* 边框 */
+  --hy-border-card: #ededed;
+  --hy-border-input: #dedfe2;
+  --hy-border-light: #e6e7ea;
+  --hy-border-hairline: #e8e9eb;  /* 分隔线（亦骨架色） */
+
+  /* 语义 */
+  --hy-danger: #c83e2b;           /* 行内错误 */
+  --hy-danger-strong: #d9482f;    /* 标签文字（tag） */
+  --hy-warning: #b45309;          /* 警示文字（逾期/审核中） */
+  --hy-warning-bg: #fdf1e3;
+  --hy-skeleton: #e8e9eb;
+  --hy-chevron: #b7bac0;
+  --hy-tab-inactive: #8a8d92;     /* tabBar 未选中（app.json） */
+  --hy-mask: rgba(38, 39, 42, 0.55);
+
+  /* ---------- 字体 ---------- */
+  --hy-font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", Arial, sans-serif;
+  --hy-font-title: 21px;   /* 42rpx 页面主标题 */
+  --hy-font-section: 16px; /* 32rpx 区块标题/空态标题 */
+  --hy-font-body: 14px;    /* 28rpx 正文/按钮 */
+  --hy-font-md: 13px;      /* 26rpx 输入/说明 */
+  --hy-font-sm: 12px;      /* 24rpx 辅助说明 */
+  --hy-font-xs: 11px;      /* 22rpx eyebrow/徽标 */
+  --hy-line-height: 1.6;
+
+  /* ---------- 圆角 ---------- */
+  --hy-radius-card: 10px;   /* 20rpx 卡片 */
+  --hy-radius-btn: 6px;     /* 12rpx 按钮 */
+  --hy-radius-badge: 4px;   /* 8rpx 徽标 */
+  --hy-radius-input: 6px;   /* 与按钮一致 */
+  --hy-radius-pill: 999px;  /* 999rpx 筛选 chip */
+
+  /* ---------- 间距 ---------- */
+  --hy-space-page: 12px;   /* 24rpx 页面左右 */
+  --hy-space-card: 15px;   /* 30rpx 卡片内边距（页面用 16px 上取整见 base.css） */
+  --hy-gap-card: 9px;      /* 18rpx 卡片间距 */
+  --hy-gap-field: 13px;    /* 26rpx 表单项间距 */
+
+  /* ---------- 尺寸 ---------- */
+  --hy-touch: 44px;               /* 最小命中区（88rpx 主按钮高度，Web 触控底线） */
+  --hy-btn-height: 44px;          /* 88rpx primary/outline/secondary */
+  --hy-chip-height: 28px;         /* 56rpx 筛选 chip */
+  --hy-tabbar-height: 50px;       /* 底部导航 */
+  --hy-avatar: 52px;              /* 104rpx 头像 */
+  --hy-safe-bottom: env(safe-area-inset-bottom, 0px);
+  --hy-page-bottom: calc(80px + var(--hy-safe-bottom)); /* 160rpx 内容避让 tabbar */
+
+  /* ---------- 动效 ---------- */
+  --hy-transition: 120ms ease;
+  --hy-toast-duration: 2400ms;
+}

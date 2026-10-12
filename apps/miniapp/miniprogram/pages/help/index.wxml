@@ -1,0 +1,10 @@
+<view class="page">
+  <view class="card">
+    <text class="eyebrow">填写说明</text>
+    <view class="help-block"><text class="help-title">1. 开始任务</text><text class="help-text">在任务详情页点击「开始探店」，系统会重新获取当前位置并确认是否在门店范围内；通过后才能开始填写问卷。</text></view>
+    <view class="help-block"><text class="help-title">2. 答题规则</text><text class="help-text">问卷题目按分类逐部分完成，以任务实际下发的题目为准。每题选择「得分」或「不得分」；选择不得分时必须填写问题说明，并按提示上传照片或录音。</text></view>
+    <view class="help-block"><text class="help-title">3. 菜品与消费小票</text><text class="help-text">按要求填写实际点到的菜品和评价。任务要求消费小票时，需上传至少 1 张成功的原图；上传后可识别小票辅助填写菜品，识别结果请务必逐项核对。</text></view>
+    <view class="help-block"><text class="help-title">4. 提交前检查</text><text class="help-text">闪光点为必填项。提交后无法回看或修改，请确认全部内容后再提交。</text></view>
+    <view class="help-block"><text class="help-title">5. 定位与隐私</text><text class="help-text">位置仅用于判断是否到店打卡，不会持续记录行动轨迹。拒绝授权时可以查看任务说明，但不能开始探店。</text></view>
+  </view>
+</view>

@@ -1,0 +1,4 @@
+.issue-question { display: flex; flex-direction: column; gap: 18rpx; line-height: 1.7; }
+.evidence-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14rpx; margin-top: 18rpx; }
+.evidence-ready, .evidence-add { min-height: 120rpx; display: flex; align-items: center; justify-content: center; border: 1rpx solid #dfe1e3; background: #f7f7f7; color: #777b81; font-size: 22rpx; }
+.evidence-ready { color: #2c8b66; background: #eff8f4; }

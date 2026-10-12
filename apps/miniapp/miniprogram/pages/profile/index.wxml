@@ -1,0 +1,39 @@
+<view class="page profile-page">
+  <!-- 用户信息卡 -->
+  <view class="surface-card profile-card">
+    <view class="avatar">{{avatarInitial}}</view>
+    <view class="profile-info">
+      <text class="profile-name">{{displayName}}</text>
+      <view class="profile-role-row">
+        <text class="profile-role">探店员</text>
+        <text class="status-badge {{statusTone}}">{{statusText}}</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- 功能入口列表行 -->
+  <view class="surface-card profile-links">
+    <!-- 策略（2026-08-13）：忘记密码 UI 已隐藏，「账号安全」入口不再展示；openSecurity 逻辑保留。 -->
+    <view wx:if="{{false}}" class="profile-link-row" hover-class="tap-feedback" hover-stay-time="80" bindtap="openSecurity">
+      <view class="link-copy">
+        <text class="link-title">账号安全</text>
+      </view>
+      <text class="list-chevron">›</text>
+    </view>
+    <view class="profile-link-row" hover-class="tap-feedback" hover-stay-time="80" bindtap="openPrivacy">
+      <view class="link-copy">
+        <text class="link-title">定位与隐私</text>
+      </view>
+      <text class="list-chevron">›</text>
+    </view>
+    <view class="profile-link-row" hover-class="tap-feedback" hover-stay-time="80" bindtap="openHelp">
+      <view class="link-copy">
+        <text class="link-title">填写帮助</text>
+      </view>
+      <text class="list-chevron">›</text>
+    </view>
+  </view>
+
+  <!-- 退出登录：白底错误色描边，不是灰色 disabled 外观 -->
+  <button class="logout-btn" loading="{{loggingOut}}" disabled="{{loggingOut}}" bindtap="confirmLogout">{{loggingOut ? '正在退出…' : '退出登录'}}</button>
+</view>

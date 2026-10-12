@@ -1,0 +1,71 @@
+<view class="page schedule-page">
+  <view class="schedule-head">
+    <text class="schedule-title">我的日程</text>
+    <text class="schedule-count">{{totalCount}} 项任务</text>
+  </view>
+
+  <!-- 状态筛选（承接原问卷入口页的分段视图） -->
+  <scroll-view wx:if="{{filterChips.length > 1}}" class="schedule-filter" scroll-x enable-flex enhanced show-scrollbar="{{false}}">
+    <button wx:for="{{filterChips}}" wx:key="value" class="schedule-chip {{statusFilter === item.value ? 'schedule-chip--active' : ''}}" data-status="{{item.value}}" bindtap="filterStatus">{{item.label}} {{item.count}}</button>
+  </scroll-view>
+
+  <!-- 非阻塞错误条（已有内容时保留内容） -->
+  <view wx:if="{{error && !errorBlocking}}" class="schedule-error-bar">
+    <text class="inline-error">{{error}}</text>
+    <text class="schedule-error-retry" bindtap="retry">{{refreshing ? '正在加载' : '重新加载'}}</text>
+  </view>
+
+  <!-- 首次加载骨架（与任务卡同形状） -->
+  <block wx:if="{{loading}}">
+    <view class="skeleton skeleton-date"></view>
+    <view class="surface-card task-card skeleton-card">
+      <view class="skeleton skeleton-line short"></view>
+      <view class="skeleton skeleton-line mid"></view>
+      <view class="skeleton skeleton-line"></view>
+      <view class="skeleton skeleton-line short"></view>
+    </view>
+    <view class="surface-card task-card skeleton-card">
+      <view class="skeleton skeleton-line short"></view>
+      <view class="skeleton skeleton-line mid"></view>
+      <view class="skeleton skeleton-line"></view>
+    </view>
+  </block>
+
+  <!-- 完整错误态（无内容） -->
+  <view wx:elif="{{errorBlocking}}" class="surface-card schedule-error">
+    <text class="empty-title">暂时无法加载日程</text>
+    <text class="inline-error">{{error}}</text>
+    <button class="primary" loading="{{refreshing}}" disabled="{{refreshing}}" bindtap="retry">重新加载</button>
+  </view>
+
+  <!-- 空态 -->
+  <view wx:elif="{{!groups.length}}" class="empty-state">
+    <text class="empty-title">{{statusFilter ? '当前筛选下没有任务' : '当前没有已分配任务'}}</text>
+    <button wx:if="{{statusFilter}}" class="schedule-filter-reset" bindtap="filterStatus" data-status="">查看全部任务</button>
+  </view>
+
+  <!-- 按日期分组 -->
+  <view wx:for="{{groups}}" wx:key="dateHeading" wx:for-item="group" class="schedule-group">
+    <text class="schedule-date">{{group.dateHeading}}</text>
+    <view
+      wx:for="{{group.items}}" wx:key="id" wx:for-item="item"
+      class="surface-card task-card" hover-class="tap-feedback" hover-stay-time="80"
+      data-id="{{item.id}}" bindtap="goTask"
+    >
+      <view class="task-card-top">
+        <text class="status-badge {{item.statusTone}}">{{item.statusText}}</text>
+        <text class="task-type">{{item.taskTypeText}}</text>
+      </view>
+      <text class="task-store">{{item.storeName}}</text>
+      <text class="task-name">{{item.name}}</text>
+      <view class="task-time">
+        <text>{{item.displayDate}} {{item.displayTime}}</text>
+        <text wx:if="{{item.displayDueDate}}" class="task-due">截止 {{item.displayDueDate}}</text>
+      </view>
+      <view class="task-card-foot">
+        <text class="task-action">{{navigatingId === item.id ? '正在打开…' : item.actionText}}</text>
+        <text class="list-chevron">›</text>
+      </view>
+    </view>
+  </view>
+</view>

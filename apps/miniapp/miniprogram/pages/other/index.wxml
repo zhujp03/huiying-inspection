@@ -1,0 +1,76 @@
+<view class="other-page">
+  <view wx:if="{{submitState !== 'submitted'}}" class="app-nav" style="padding-top: {{statusBarHeight}}px;">
+    <view class="app-nav__bar" style="height: {{navBarHeight}}px;">
+      <button class="app-nav__back" aria-label="保存并返回菜品记录" disabled="{{saving || submitState === 'submitting' || submitState === 'processing'}}" bindtap="back">‹</button>
+      <text class="app-nav__title">其他记录</text>
+    </view>
+  </view>
+
+  <view wx:if="{{submitState !== 'submitted'}}" class="flow-steps" aria-label="填写流程共三步，当前第三步：其他记录"><view class="flow-step flow-step--done"><text class="flow-step__num">✓</text><text class="flow-step__label">答题</text></view><view class="flow-step__bar flow-step__bar--done"></view><view class="flow-step flow-step--done"><text class="flow-step__num">✓</text><text class="flow-step__label">菜品与小票</text></view><view class="flow-step__bar flow-step__bar--done"></view><view class="flow-step flow-step--active"><text class="flow-step__num">3</text><text class="flow-step__label">其他记录</text></view></view>
+
+  <view wx:if="{{loading}}" class="state-panel muted">正在加载其他记录…</view>
+
+  <view wx:elif="{{submitState === 'submitted'}}" class="success-page">
+    <view class="success-mark">✓</view>
+    <text class="success-title">提交成功</text>
+    <text wx:if="{{submittedAt}}" class="success-time">提交时间：{{submittedAt}}</text>
+    <text class="success-copy">本次问卷已锁定，不能回看或修改。如需说明，请联系管理员。</text>
+    <button class="primary-action success-action" bindtap="done">确定</button>
+  </view>
+
+  <view wx:else class="other-content {{keyboardOpen ? 'other-content--keyboard' : ''}}">
+    <label id="highlight-field" class="record-field">
+      <text class="record-label"><text class="required">*</text>闪光点</text>
+      <textarea
+        class="record-textarea {{highlightError ? 'record-textarea--error' : ''}}"
+        data-field="highlight"
+        value="{{highlight}}"
+        focus="{{focusField === 'highlight'}}"
+        adjust-position="{{true}}"
+        cursor-spacing="130"
+        maxlength="-1"
+        bindinput="input"
+        bindkeyboardheightchange="keyboard"
+        placeholder="输入闪光点"
+        aria-label="闪光点，必填"
+      />
+      <text wx:if="{{highlightError}}" class="field-error" aria-role="alert">{{highlightError}}</text>
+    </label>
+
+    <label class="record-field record-field--suggestion">
+      <text class="record-label">其他建议</text>
+      <textarea
+        class="record-textarea"
+        data-field="suggestion"
+        value="{{suggestion}}"
+        adjust-position="{{true}}"
+        cursor-spacing="130"
+        maxlength="-1"
+        bindinput="input"
+        bindkeyboardheightchange="keyboard"
+        placeholder="请填写问卷中未列出但您认为可以改进的地方"
+        aria-label="其他建议，选填"
+      />
+    </label>
+
+    <view wx:if="{{message}}" class="submit-message {{submitState === 'terminal_failed' ? 'submit-message--error' : ''}}" aria-role="status">
+      <text>{{message}}</text>
+      <button wx:if="{{!meta && message}}" class="retry-button" bindtap="retryLoad">重新加载</button>
+      <button wx:if="{{submitState === 'retryable_failed' || submitState === 'processing'}}" class="retry-button" bindtap="retrySubmit">重试提交</button>
+    </view>
+
+    <view class="other-actions">
+      <button
+        class="primary-action"
+        loading="{{saving || submitState === 'submitting' || submitState === 'processing'}}"
+        disabled="{{saving || submitState === 'submitting' || submitState === 'processing'}}"
+        bindtap="confirm"
+      >提交问卷</button>
+      <button
+        class="secondary-action"
+        disabled="{{saving || submitState === 'submitting' || submitState === 'processing'}}"
+        bindtap="back"
+      >上一步：菜品</button>
+    </view>
+  </view>
+</view>

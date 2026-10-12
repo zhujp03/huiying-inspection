@@ -1,0 +1,48 @@
+page { background: #f6f7f8; color: #26272a; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; font-size: 28rpx; }
+button { border-radius: 12rpx; font-size: 28rpx; }
+button::after { border: 0; }
+.page { min-height: 100vh; padding: 24rpx; box-sizing: border-box; }
+.page--safe { padding-bottom: calc(160rpx + env(safe-area-inset-bottom)); }
+.card { background: #fff; padding: 30rpx; margin-bottom: 18rpx; border: 1rpx solid #ededed; border-radius: 20rpx; }
+.title { margin: 0; font-size: 42rpx; font-weight: 700; line-height: 1.35; }
+.muted { color: #70747b; font-size: 24rpx; line-height: 1.6; }
+.eyebrow { color: #f25f42; font-size: 22rpx; }
+.primary { height: 88rpx; color: #fff; background: #f25f42; font-weight: 600; }
+.primary[disabled] { background: #f2a18f; color: #fff; }
+.secondary { height: 88rpx; color: #5f6369; background: #eceeef; }
+.field { display: block; margin-top: 26rpx; }
+.field__label { display: block; margin-bottom: 12rpx; font-size: 25rpx; font-weight: 600; }
+.required { color: #f25f42; }
+.input, .textarea { width: 100%; padding: 22rpx; border: 1rpx solid #dedfe2; background: #f7f7f7; box-sizing: border-box; font-size: 26rpx; }
+.textarea { min-height: 190rpx; }
+.sticky-actions { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; display: grid; grid-template-columns: 1fr 1.5fr; gap: 16rpx; padding: 18rpx 24rpx calc(18rpx + env(safe-area-inset-bottom)); background: rgba(255,255,255,.97); border-top: 1rpx solid #e8e9eb; }
+.tag { display: inline-flex; padding: 6rpx 12rpx; color: #d9482f; background: #fff0ec; font-size: 20rpx; }
+
+/* ---------- 公共视觉契约（工作型小程序） ---------- */
+.surface-card { background: #fff; border-radius: 20rpx; box-sizing: border-box; }
+.section-heading { display: block; margin: 8rpx 0 16rpx; font-size: 32rpx; font-weight: 700; color: #26272a; }
+.status-badge { display: inline-flex; align-items: center; padding: 4rpx 14rpx; border-radius: 8rpx; font-size: 22rpx; line-height: 1.5; }
+.status-badge.primary { color: #fff; background: #f25f42; }
+.status-badge.dark { color: #fff; background: #26272a; }
+.status-badge.warning { color: #b45309; background: #fdf1e3; }
+.status-badge.neutral { color: #5f6369; background: #eef0f2; }
+.status-badge.muted { color: #70747b; background: #f0f1f2; }
+.tap-feedback { opacity: 0.82; transform: scale(0.985); }
+.skeleton { background: #e8e9eb; border-radius: 12rpx; }
+.inline-error { display: block; color: #c83e2b; font-size: 24rpx; line-height: 1.6; }
+.empty-state { padding: 60rpx 32rpx; text-align: center; }
+.empty-state .empty-title { display: block; font-size: 32rpx; font-weight: 700; color: #26272a; }
+.empty-state .empty-desc { display: block; margin-top: 12rpx; font-size: 26rpx; color: #70747b; line-height: 1.6; }
+.list-chevron { color: #b7bac0; font-size: 36rpx; line-height: 1; }
+
+/* ---------- 填写流程进度条（答题 → 菜品与小票 → 其他记录） ---------- */
+.flow-steps { display: flex; align-items: center; padding: 20rpx 30rpx 22rpx; background: #ffffff; }
+.flow-step { display: flex; align-items: center; gap: 10rpx; flex: none; }
+.flow-step__num { width: 36rpx; height: 36rpx; border-radius: 50%; color: #ffffff; background: #d4d5d9; font-size: 22rpx; font-weight: 600; line-height: 36rpx; text-align: center; }
+.flow-step__label { color: #9a9da3; font-size: 24rpx; line-height: 1.4; }
+.flow-step--active .flow-step__num { background: #f25f42; }
+.flow-step--active .flow-step__label { color: #26272a; font-weight: 600; }
+.flow-step--done .flow-step__num { background: #f25f42; }
+.flow-step--done .flow-step__label { color: #5a5d63; }
+.flow-step__bar { flex: 1; min-width: 24rpx; height: 4rpx; margin: 0 14rpx; border-radius: 2rpx; background: #e6e7ea; }
+.flow-step__bar--done { background: #f25f42; }

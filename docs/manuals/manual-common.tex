@@ -1,0 +1,78 @@
+% 共享排版样式：管理员手册 / 探店员手册 通用前言（xelatex + ctex 编译）
+\usepackage[margin=2.2cm,headheight=14pt]{geometry}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{needspace}
+\usepackage{colortbl}
+
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue,pdftitle=\manualtitle}
+
+% 字体（macOS 中文字体）
+\setCJKmainfont{Songti SC}[BoldFont={Songti SC Bold}]
+\setCJKsansfont{Hiragino Sans GB}[BoldFont={Hiragino Sans GB W6}]
+\setCJKmonofont{Menlo}
+\setmainfont{Times New Roman}
+
+% 品牌色
+\definecolor{brand}{RGB}{242,95,66}
+\definecolor{brandlight}{RGB}{255,240,236}
+\definecolor{graytext}{RGB}{138,141,146}
+
+% 标题样式：黑体 + 品牌色
+\ctexset{
+  section/format={\Large\bfseries\sffamily\color{brand}},
+  subsection/format={\large\bfseries\sffamily\color{black}},
+  subsubsection/format={\normalsize\bfseries\sffamily},
+}
+
+% 页眉页脚
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\sffamily\color{graytext}\manualtitle}
+\fancyhead[R]{\small\sffamily\color{graytext}\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\headrule}{\color{brand!60}\hrule width\headwidth height 0.4pt}
+
+% 提示框：\tipbox{标题}{内容}
+\newcommand{\tipbox}[2]{%
+  \par\vspace{0.5em}\noindent
+  \fcolorbox{brand}{brandlight}{\begin{minipage}{\dimexpr\linewidth-2\fboxsep-2\fboxrule\relax}
+    \textbf{\color{brand}#1}\par\smallskip #2
+  \end{minipage}}\par\vspace{0.5em}}
+
+% 警示框（红色）：\warnbox{内容}
+\newcommand{\warnbox}[1]{%
+  \par\vspace{0.5em}\noindent
+  \fcolorbox{red!70}{red!8}{\begin{minipage}{\dimexpr\linewidth-2\fboxsep-2\fboxrule\relax}
+    \textbf{\color{red!70!black}注意}\par\smallskip #1
+  \end{minipage}}\par\vspace{0.5em}}
+
+% 步骤列表：紧凑
+\setlist[enumerate]{itemsep=2pt,topsep=4pt,leftmargin=2.2em}
+\setlist[itemize]{itemsep=2pt,topsep=4pt,leftmargin=1.8em}
+
+% 表格默认样式
+\renewcommand{\arraystretch}{1.25}
+
+% 封面
+\newcommand{\manualcover}[4]{%
+  \begin{titlepage}
+    \centering
+    \vspace*{2.5cm}
+    {\color{brand}\rule{6cm}{2.5pt}}\\[1.2cm]
+    {\Huge\bfseries\sffamily #1\par}
+    \vspace{0.8cm}
+    {\LARGE\sffamily #2\par}
+    \vspace{2.5cm}
+    {\large\color{graytext} 汇盈探店 · 门店服务品质暗访系统\par}
+    \vspace{0.4cm}
+    {\large\color{graytext} #3\par}
+    \vfill
+    {\color{brand}\rule{6cm}{2.5pt}}\\[0.6cm]
+    {\normalsize\color{graytext} #4\par}
+  \end{titlepage}}

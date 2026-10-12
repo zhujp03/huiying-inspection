@@ -1,0 +1,67 @@
+{
+  "name": "junde-audit",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "preinstall": "node scripts/check-runtime.mjs",
+    "check:runtime": "node scripts/check-runtime.mjs",
+    "dev:api": "node --env-file=.env --watch apps/api/src/server.js",
+    "start:api": "node --env-file=.env apps/api/src/server.js",
+    "start:worker": "node --env-file=.env apps/worker/src/worker.js",
+    "start:render": "node scripts/start-render.mjs",
+    "build:render": "node scripts/build-render.mjs",
+    "verify:render": "node scripts/verify-render.mjs",
+    "dev:up": "node scripts/dev-up.mjs",
+    "contracts:generate": "node packages/contracts/scripts/generate.mjs",
+    "contracts:check": "node scripts/check-contracts.mjs",
+    "verify:release": "node scripts/verify-release.mjs",
+    "db:migrate": "node db/migrate.mjs",
+    "ops:backup": "node ops/backup-database.mjs",
+    "db:seed": "node db/seeds/run.mjs",
+    "admin:bootstrap": "node apps/api/src/admin/bootstrap.js",
+    "dev:admin": "npm --prefix apps/admin run dev",
+    "build:admin": "npm --prefix apps/admin run build",
+    "test:frontend": "npm run check:runtime && npm run test:production-source && node tests/frontend-contract.mjs && vitest run tests/unit && npm run build:admin && node tests/bundle-contract.mjs",
+    "test:web": "vitest run --config apps/web/vitest.config.js && npm --prefix apps/web run build && node apps/web/scripts/scan-dist.mjs",
+    "test:production-source": "node tests/production-source-scan.mjs",
+    "test:backend": "vitest run --no-file-parallelism --maxWorkers=1 tests/integration tests/contract",
+    "test:backend:postgres": "vitest run --no-file-parallelism --maxWorkers=1 --maxConcurrency=1 tests/integration/*.postgres.test.js",
+    "preflight:p1": "node tests/load/p1-preflight.mjs",
+    "test:admin:e2e": "playwright test",
+    "test:miniapp:native": "node tests/e2e/miniapp-native.cjs",
+    "test:miniapp:receipt-native": "node tests/e2e/miniapp-receipt-native.cjs",
+    "test:miniapp:real-api": "node tests/e2e/miniapp-real-api.mjs",
+    "release:prepare": "node scripts/release-prepare.mjs",
+    "release:prepare:check": "node scripts/release-prepare.mjs --check-example",
+    "generate:miniapp-config": "node scripts/generate-miniapp-runtime-config.mjs",
+    "icons:tabbar": "node scripts/generate-tabbar-icons.mjs",
+    "verify:offline": "node scripts/verify-offline.mjs",
+    "preflight:production": "node scripts/preflight-production.mjs",
+    "deploy:production": "node scripts/deploy-production.mjs",
+    "verify:external": "node scripts/verify-external.mjs",
+    "test:wechat-project": "node scripts/check-wechat-project.mjs"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/cors": "^11.1.0",
+    "@fastify/multipart": "9.4.0",
+    "@playwright/test": "^1.61.1",
+    "argon2": "^0.44.0",
+    "cos-nodejs-sdk-v5": "^3.0.0",
+    "drizzle-orm": "^0.44.7",
+    "fastify": "^5.8.2",
+    "pg": "^8.16.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "miniprogram-automator": "^0.12.1",
+    "vitest": "^4.1.10"
+  }
+}

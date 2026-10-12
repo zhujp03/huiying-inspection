@@ -1,0 +1,1219 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Junde Audit API",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/admin/assignments/{id}": {
+      "delete": {
+        "operationId": "admin_deleteAssignment",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "admin_assignment",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/assignments/{id}/cancel": {
+      "post": {
+        "operationId": "admin_cancelAssignment",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/assignments/{id}/check-in-exemptions": {
+      "get": {
+        "operationId": "admin_exemptions",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      },
+      "post": {
+        "operationId": "admin_createExemption",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/assignments/{id}/check-in-exemptions/{exemptionId}/revoke": {
+      "post": {
+        "operationId": "admin_revokeExemption",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/assignments/{id}/dish-requirements": {
+      "put": {
+        "operationId": "admin_dishRequirements",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/assignments/{id}/extend": {
+      "post": {
+        "operationId": "admin_extendAssignment",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/audit-logs": {
+      "get": {
+        "operationId": "admin_audits",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/auth/login": {
+      "post": {
+        "operationId": "auth_adminLogin",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/auth/logout": {
+      "post": {
+        "operationId": "auth_adminLogout",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/brands": {
+      "get": {
+        "operationId": "admin_brands",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      },
+      "post": {
+        "operationId": "admin_createBrand",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/brands/{id}": {
+      "delete": {
+        "operationId": "admin_deleteBrand",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "admin_brand",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/campaigns": {
+      "get": {
+        "operationId": "admin_campaigns",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      },
+      "post": {
+        "operationId": "admin_createCampaign",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/campaigns/{id}": {
+      "delete": {
+        "operationId": "admin_deleteCampaign",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      },
+      "get": {
+        "operationId": "admin_campaign",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "admin_updateCampaign",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/campaigns/{id}/assignments": {
+      "post": {
+        "operationId": "admin_campaignAssignments",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/campaigns/{id}/cancel": {
+      "post": {
+        "operationId": "admin_cancelCampaign",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/campaigns/{id}/publish": {
+      "post": {
+        "operationId": "admin_publishCampaign",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/exports": {
+      "get": {
+        "operationId": "admin_exportList",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      },
+      "post": {
+        "operationId": "admin_exports",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/exports/{id}": {
+      "get": {
+        "operationId": "admin_export",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/exports/{id}/reexport": {
+      "post": {
+        "operationId": "admin_reexportExport",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/inspector-registrations": {
+      "get": {
+        "operationId": "admin_registrations",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/inspector-registrations/{id}/approve": {
+      "post": {
+        "operationId": "admin_approveRegistration",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/inspector-registrations/{id}/reject": {
+      "post": {
+        "operationId": "admin_rejectRegistration",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/inspector-registrations/{id}/reopen": {
+      "post": {
+        "operationId": "admin_reopenRegistration",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/question-categories": {
+      "get": {
+        "operationId": "admin_questionCategories",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      },
+      "post": {
+        "operationId": "admin_createQuestionCategory",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/question-categories/{id}": {
+      "delete": {
+        "operationId": "admin_deleteQuestionCategory",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "admin_questionCategory",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/questionnaire-versions": {
+      "get": {
+        "operationId": "admin_questionnaireVersions",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      },
+      "post": {
+        "operationId": "admin_createQuestionnaireVersion",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/questionnaire-versions/{id}": {
+      "delete": {
+        "operationId": "admin_deleteQuestionnaireVersion",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      },
+      "get": {
+        "operationId": "admin_questionnaireVersion",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/questionnaire-versions/{id}/copy": {
+      "post": {
+        "operationId": "admin_copyQuestionnaireVersion",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/questionnaire-versions/{id}/publish": {
+      "post": {
+        "operationId": "admin_publishQuestionnaireVersion",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/questionnaire-versions/{id}/questions": {
+      "get": {
+        "operationId": "admin_questions",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      },
+      "post": {
+        "operationId": "admin_createQuestion",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/questionnaire-versions/{id}/questions/{questionId}": {
+      "delete": {
+        "operationId": "admin_deleteQuestion",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "admin_question",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/questionnaire-versions/{id}/questions/{questionId}/move": {
+      "post": {
+        "operationId": "admin_moveQuestion",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/regions": {
+      "get": {
+        "operationId": "admin_regions",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      },
+      "post": {
+        "operationId": "admin_createRegion",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/stats/dashboard": {
+      "get": {
+        "operationId": "admin_dashboardStats",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/stores": {
+      "get": {
+        "operationId": "admin_stores",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      },
+      "post": {
+        "operationId": "admin_createStore",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/stores/{id}": {
+      "delete": {
+        "operationId": "admin_deleteStore",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "admin_store",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/submissions": {
+      "get": {
+        "operationId": "admin_submissions",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/submissions/{id}": {
+      "get": {
+        "operationId": "admin_submission",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/submissions/{id}/attachments/{attachmentId}/restore": {
+      "post": {
+        "operationId": "admin_restoreAttachment",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/users": {
+      "get": {
+        "operationId": "admin_users",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      },
+      "post": {
+        "operationId": "admin_createUser",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/users/{id}": {
+      "delete": {
+        "operationId": "admin_deleteUser",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "admin_user",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/users/{id}/disable": {
+      "post": {
+        "operationId": "admin_disableUser",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/users/{id}/enable": {
+      "post": {
+        "operationId": "admin_enableUser",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/assignments/{id}": {
+      "get": {
+        "operationId": "assignments_byId",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/assignments/{id}/check-in": {
+      "post": {
+        "operationId": "assignments_checkIn",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/assignments/{id}/questionnaire": {
+      "get": {
+        "operationId": "assignments_questionnaire",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/assignments/{id}/start": {
+      "post": {
+        "operationId": "assignments_start",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/assignments/mine": {
+      "get": {
+        "operationId": "assignments_mine",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "operationId": "auth_login",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "operationId": "auth_logout",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/auth/password-resets/code": {
+      "post": {
+        "operationId": "auth_passwordCode",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/auth/password-resets/complete": {
+      "post": {
+        "operationId": "auth_passwordComplete",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/auth/password-resets/verify": {
+      "post": {
+        "operationId": "auth_passwordVerify",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/auth/register": {
+      "post": {
+        "operationId": "auth_register",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/auth/register/phone-code": {
+      "post": {
+        "operationId": "auth_registerPhoneCode",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/auth/registration/resubmit": {
+      "post": {
+        "operationId": "auth_registrationResubmit",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/me": {
+      "get": {
+        "operationId": "auth_me",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/public/client-config": {
+      "get": {
+        "operationId": "public_clientConfig",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/questionnaires/secret/{id}/submit": {
+      "post": {
+        "operationId": "drafts_submit",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/questionnaires/secret/drafts/{id}": {
+      "get": {
+        "operationId": "drafts_byId",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/questionnaires/secret/drafts/{id}/answers/{questionId}": {
+      "put": {
+        "operationId": "drafts_answer",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/questionnaires/secret/drafts/{id}/dishes": {
+      "put": {
+        "operationId": "drafts_dishes",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/questionnaires/secret/drafts/{id}/other-records": {
+      "put": {
+        "operationId": "drafts_otherRecords",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/questionnaires/secret/drafts/{id}/questions/{questionId}/edit-sessions": {
+      "post": {
+        "operationId": "drafts_editSessions",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/questionnaires/secret/drafts/{id}/questions/{questionId}/edit-sessions/{editSessionId}": {
+      "patch": {
+        "operationId": "drafts_editSession",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/questionnaires/secret/drafts/{id}/questions/{questionId}/edit-sessions/{editSessionId}/cancel": {
+      "post": {
+        "operationId": "drafts_cancelEdit",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/questionnaires/secret/drafts/{id}/questions/{questionId}/edit-sessions/{editSessionId}/confirm": {
+      "post": {
+        "operationId": "drafts_confirmEdit",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/questionnaires/secret/drafts/{id}/questions/{questionId}/edit-sessions/{editSessionId}/evidence-uploads": {
+      "post": {
+        "operationId": "drafts_evidenceUploads",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/questionnaires/secret/drafts/{id}/questions/{questionId}/edit-sessions/{editSessionId}/evidence-uploads/{attachmentId}/complete": {
+      "post": {
+        "operationId": "drafts_evidenceComplete",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/questionnaires/secret/drafts/{id}/questions/{questionId}/edit-sessions/{editSessionId}/evidence/{attachmentId}": {
+      "delete": {
+        "operationId": "drafts_evidence",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/questionnaires/secret/drafts/{id}/receipt-attachments": {
+      "get": {
+        "operationId": "drafts_receiptAttachments",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/questionnaires/secret/drafts/{id}/receipt-attachments/{attachmentId}": {
+      "delete": {
+        "operationId": "drafts_receiptAttachment",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/questionnaires/secret/drafts/{id}/receipt-attachments/{attachmentId}/complete": {
+      "post": {
+        "operationId": "drafts_receiptComplete",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/questionnaires/secret/drafts/{id}/receipt-attachments/uploads": {
+      "post": {
+        "operationId": "drafts_receiptUploads",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/questionnaires/secret/drafts/{id}/receipt-ocr-jobs": {
+      "post": {
+        "operationId": "drafts_receiptOcrJobs",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/questionnaires/secret/drafts/{id}/receipt-ocr-jobs/{jobId}": {
+      "get": {
+        "operationId": "drafts_receiptOcrJob",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/questionnaires/secret/drafts/{id}/receipt-ocr-jobs/{jobId}/apply": {
+      "post": {
+        "operationId": "drafts_receiptOcrApply",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    }
+  }
+}

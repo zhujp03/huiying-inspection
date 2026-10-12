@@ -1,0 +1,61 @@
+.profile-page { padding-left: 32rpx; padding-right: 32rpx; }
+
+/* 用户信息卡 */
+.profile-card {
+  display: flex;
+  align-items: center;
+  gap: 26rpx;
+  padding: 36rpx 32rpx;
+  margin-bottom: 18rpx;
+}
+.avatar {
+  width: 104rpx;
+  height: 104rpx;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: #fff;
+  background: #f25f42;
+  font-size: 40rpx;
+  font-weight: 700;
+}
+.profile-info { min-width: 0; display: flex; flex-direction: column; gap: 10rpx; }
+.profile-name { font-size: 34rpx; font-weight: 700; color: #26272a; }
+.profile-role-row { display: flex; align-items: center; gap: 12rpx; }
+.profile-role { font-size: 25rpx; color: #70747b; }
+
+/* 功能入口列表行 */
+.profile-links { padding: 0 32rpx; margin-bottom: 24rpx; overflow: hidden; }
+.profile-link-row {
+  min-height: 112rpx;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20rpx;
+  padding: 18rpx 0;
+  border-bottom: 1rpx solid #e8e9eb;
+}
+.profile-link-row:last-child { border-bottom: 0; }
+.link-copy { min-width: 0; display: flex; flex-direction: column; gap: 6rpx; }
+.link-title { font-size: 29rpx; font-weight: 600; color: #26272a; }
+.link-desc { font-size: 23rpx; color: #70747b; line-height: 1.5; }
+
+/* 退出登录：白底 + 错误色文字/描边 */
+.logout-btn {
+  width: 100%;
+  height: 88rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #fff;
+  border: 1rpx solid #c83e2b;
+  border-radius: 12rpx;
+  color: #c83e2b;
+  font-size: 28rpx;
+  font-weight: 600;
+  box-sizing: border-box;
+}
+.logout-btn::after { border: none; }
+.logout-btn[disabled] { color: #e5a49a; border-color: #e5a49a; background: #fff; }

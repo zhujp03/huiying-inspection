@@ -1,0 +1,126 @@
+<view class="auth-page">
+  <!-- 品牌区（居中） -->
+  <view class="auth-brand">
+    <view class="auth-mark">汇</view>
+    <text class="auth-name">汇盈探店</text>
+  </view>
+
+  <!-- 账号状态页（居中，非弹窗） -->
+  <view wx:if="{{step === 'status'}}" class="auth-status">
+    <text class="status-title">{{statusTitle}}</text>
+    <text class="status-desc">{{statusDesc}}</text>
+    <!-- 自助入口由服务端开关（features.authSelfService）驱动；关闭时只提示联系管理员，不留死按钮 -->
+    <button wx:if="{{accountStatus === 'rejected' && selfServiceEnabled}}" class="btn-primary" loading="{{pending}}" disabled="{{pending}}" bindtap="resubmit">修改并重新提交</button>
+    <text wx:if="{{accountStatus === 'rejected' && !selfServiceEnabled}}" class="status-desc">资料需修改，请联系管理员重新开放提交。</text>
+    <button class="btn-outline btn-status-back" bindtap="goLogin">返回登录</button>
+  </view>
+
+  <block wx:else>
+    <!-- 顶部返回登录（非登录模式） -->
+    <view wx:if="{{mode !== 'login'}}" class="auth-top">
+      <button class="btn-back" bindtap="goLogin">返回登录</button>
+    </view>
+
+    <!-- 标题区 -->
+    <view class="auth-head">
+      <text class="head-title">{{headTitle}}</text>
+      <text class="head-sub">{{headSub}}</text>
+    </view>
+
+    <!-- 登录表单 -->
+    <view wx:if="{{mode === 'login'}}" class="auth-form">
+      <label class="field">
+        <text class="field__label">用户名</text>
+        <view class="{{focusField === 'username' ? 'input-shell focus' : 'input-shell'}}">
+          <input class="input" data-field="username" value="{{username}}" bindinput="onInput" bindfocus="onInputFocus" bindblur="onInputBlur" adjust-position="{{true}}" cursor-spacing="40" placeholder="请输入用户名" placeholder-class="input-placeholder" />
+        </view>
+      </label>
+      <label class="field">
+        <text class="field__label">密码</text>
+        <view class="{{focusField === 'password' ? 'input-shell focus' : 'input-shell'}}">
+          <input class="input input--password" data-field="password" value="{{password}}" bindinput="onInput" bindfocus="onInputFocus" bindblur="onInputBlur" password="{{!showPassword}}" adjust-position="{{true}}" cursor-spacing="40" placeholder="请输入密码" placeholder-class="input-placeholder" />
+          <view class="password-visibility-button" role="button" aria-label="{{showPassword ? '隐藏密码' : '显示密码'}}" bindtap="togglePassword">
+            <view class="eye-icon {{showPassword ? 'eye-icon--off' : ''}}"></view>
+          </view>
+        </view>
+      </label>
+      <button class="btn-primary btn-login" loading="{{pending}}" disabled="{{pending}}" bindtap="submit">登录</button>
+      <!-- 自助注册/忘记密码入口：由 client-config 的 features.authSelfService 下发开关驱动；
+           开关关闭（AUTH_SELF_SERVICE=disabled）时整体隐藏，后端接口与本页 JS 处理逻辑保留。 -->
+      <view wx:if="{{selfServiceEnabled}}" class="auth-secondary">
+        <button class="btn-outline" data-mode="forgot" bindtap="setMode">忘记密码</button>
+        <button class="btn-outline" data-mode="register" bindtap="setMode">注册探店员账号</button>
+      </view>
+    </view>
+
+    <!-- 注册 / 重新提交 / 忘记密码表单（仅自助开放时可达；JS 与后端链路完整保留） -->
+    <view wx:if="{{mode !== 'login' && selfServiceEnabled}}" class="auth-form">
+      <label wx:if="{{mode === 'register' && step === 'form'}}" class="field">
+        <text class="field__label">用户名</text>
+        <view class="{{focusField === 'username' ? 'input-shell focus' : 'input-shell'}}">
+          <input class="input" data-field="username" value="{{username}}" bindinput="onInput" bindfocus="onInputFocus" bindblur="onInputBlur" adjust-position="{{true}}" cursor-spacing="40" placeholder="4–32 个文字、数字或下划线" placeholder-class="input-placeholder" />
+        </view>
+      </label>
+      <label wx:if="{{step !== 'sms' && step !== 'password'}}" class="field">
+        <text class="field__label">手机号</text>
+        <view class="{{focusField === 'phone' ? 'input-shell focus' : 'input-shell'}}">
+          <input class="input" data-field="phone" value="{{phone}}" bindinput="onInput" bindfocus="onInputFocus" bindblur="onInputBlur" type="number" adjust-position="{{true}}" cursor-spacing="40" placeholder="请输入手机号" placeholder-class="input-placeholder" />
+        </view>
+      </label>
+      <label wx:if="{{step === 'sms'}}" class="field">
+        <text class="field__label">短信验证码</text>
+        <view class="{{focusField === 'smsCode' ? 'input-shell focus' : 'input-shell'}}">
+          <input class="input input-code" data-field="smsCode" value="{{smsCode}}" bindinput="onInput" bindfocus="onInputFocus" bindblur="onInputBlur" type="number" maxlength="6" adjust-position="{{true}}" cursor-spacing="40" placeholder="请输入 6 位验证码" placeholder-class="input-placeholder" />
+        </view>
+      </label>
+      <label wx:if="{{mode === 'register' && step === 'form'}}" class="field">
+        <text class="field__label">密码</text>
+        <view class="{{focusField === 'password' ? 'input-shell focus' : 'input-shell'}}">
+          <input class="input" data-field="password" value="{{password}}" bindinput="onInput" bindfocus="onInputFocus" bindblur="onInputBlur" password="{{!showPassword}}" adjust-position="{{true}}" cursor-spacing="40" placeholder="10–64 个字符" placeholder-class="input-placeholder" />
+          <button class="btn-eye" bindtap="togglePassword">{{showPassword ? '隐藏' : '显示'}}</button>
+        </view>
+      </label>
+      <label wx:if="{{mode === 'register' && step === 'form'}}" class="field">
+        <text class="field__label">确认密码</text>
+        <view class="{{focusField === 'confirmPassword' ? 'input-shell focus' : 'input-shell'}}">
+          <input class="input" data-field="confirmPassword" value="{{confirmPassword}}" bindinput="onInput" bindfocus="onInputFocus" bindblur="onInputBlur" password="{{!showPassword}}" adjust-position="{{true}}" cursor-spacing="40" placeholder="请再次输入密码" placeholder-class="input-placeholder" />
+          <button class="btn-eye" bindtap="togglePassword">{{showPassword ? '隐藏' : '显示'}}</button>
+        </view>
+      </label>
+      <label wx:if="{{step === 'password'}}" class="field">
+        <text class="field__label">新密码</text>
+        <view class="{{focusField === 'password' ? 'input-shell focus' : 'input-shell'}}">
+          <input class="input" data-field="password" value="{{password}}" bindinput="onInput" bindfocus="onInputFocus" bindblur="onInputBlur" password="{{!showPassword}}" adjust-position="{{true}}" cursor-spacing="40" placeholder="10–64 个字符" placeholder-class="input-placeholder" />
+          <button class="btn-eye" bindtap="togglePassword">{{showPassword ? '隐藏' : '显示'}}</button>
+        </view>
+      </label>
+      <label wx:if="{{step === 'password'}}" class="field">
+        <text class="field__label">确认密码</text>
+        <view class="{{focusField === 'confirmPassword' ? 'input-shell focus' : 'input-shell'}}">
+          <input class="input" data-field="confirmPassword" value="{{confirmPassword}}" bindinput="onInput" bindfocus="onInputFocus" bindblur="onInputBlur" password="{{!showPassword}}" adjust-position="{{true}}" cursor-spacing="40" placeholder="请再次输入密码" placeholder-class="input-placeholder" />
+          <button class="btn-eye" bindtap="togglePassword">{{showPassword ? '隐藏' : '显示'}}</button>
+        </view>
+      </label>
+      <text wx:if="{{step === 'sms' && countdown > 0}}" class="form-hint">{{countdown}} 秒后可重新发送</text>
+
+      <!-- 行为验证状态区：不可用时显示明确终态，不得永久显示加载中 -->
+      <view wx:if="{{!captchaAppId && captchaUnavailable}}" class="captcha-unavailable">
+        <text class="cu-title">行为验证暂不可用</text>
+        <text class="cu-desc">当前环境尚未开通行为验证，暂时不能发送验证码。你仍可返回登录测试已有账号。</text>
+        <view class="cu-actions">
+          <button class="btn-outline btn-cu" bindtap="retryPublicConfig">重新加载</button>
+          <button class="btn-outline btn-cu" bindtap="goLogin">返回登录</button>
+        </view>
+      </view>
+      <text wx:elif="{{!captchaAppId}}" class="form-hint">行为验证加载中…</text>
+
+      <button class="btn-primary" loading="{{pending}}" disabled="{{pending}}" bindtap="submit">{{submitText}}</button>
+      <button wx:if="{{step === 'sms' && countdown === 0}}" class="btn-link" bindtap="resend">重新发送验证码</button>
+      <button wx:if="{{step === 'sms'}}" class="btn-link" bindtap="changePhone">更换手机号</button>
+      <button wx:if="{{step !== 'sms'}}" class="btn-link" bindtap="goLogin">返回登录</button>
+    </view>
+  </block>
+
+  <!-- 腾讯验证码插件组件：仅非登录模式渲染；登录流程不展示验证码加载区 -->
+  <t-captcha wx:if="{{mode !== 'login' && captchaAppId}}" id="tcaptcha" app-id="{{captchaAppId}}" bind:ready="onCaptchaReady" bind:verify="onCaptchaVerify" bind:close="onCaptchaClose" bind:error="onCaptchaError" />
+</view>

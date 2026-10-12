@@ -1,0 +1,65 @@
+# 汇盈探店：Render 单实例部署 Blueprint（新加坡 Starter + 免费托管 PostgreSQL 17）。
+# 说明与逐命令操作见 docs/RENDER.md；本文件不含任何真实密钥（sync:false 项在控制台/CLI 填写）。
+# 形态：STORAGE_PROVIDER=local（持久磁盘 /var/data）+ OCR 关闭 + 自助注册/找回休眠；
+# 生产 + 本地存储的唯一合法形态是显式 DEPLOYMENT_TARGET=render（apps/api/src/config.js 强制校验）。
+services:
+  - type: web
+    name: junde-app
+    runtime: node          # 旧版别名 env: node 等价
+    plan: starter          # 0.5C / 512MB（legacy alias：standard 免费层之外的最低付费档）
+    region: singapore
+    healthCheckPath: /health/ready
+    # --include=dev：NODE_ENV=production 下 npm ci 默认跳过 devDependencies，而 vite 在 devDeps。
+    buildCommand: npm ci --include=dev && npm run build:render
+    preDeployCommand: npm run db:migrate
+    startCommand: npm run start:render
+    disk:
+      name: junde-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: "24"
+      - key: NODE_ENV
+        value: production
+      - key: DEPLOYMENT_TARGET
+        value: render
+      - key: HOST
+        value: 0.0.0.0
+      # PORT 由 Render 注入（服务端 config 读取），无需配置。
+      - key: STORAGE_PROVIDER
+        value: local
+      - key: LOCAL_STORAGE_DIR
+        value: /var/data/storage
+      - key: OCR_PROVIDER
+        value: none
+      - key: AUTH_SELF_SERVICE
+        value: disabled
+      # 512MB 内存约束：argon2 并发降到 1，API 连接池收敛到 4（worker 进程内部自限 5）。
+      - key: AUTH_HASH_MAX_CONCURRENCY
+        value: 1
+      - key: DATABASE_POOL_MAX
+        value: 4
+      # 公开 Origin（PUBLIC_API_ORIGIN / MINIAPP_API_BASE_URL / ADMIN_ORIGIN / WEB_ORIGIN）
+      # 由服务端从平台注入的 RENDER_EXTERNAL_URL 派生（https 同源），故无需在此配置；
+      # 如需覆盖，可加 sync:false 的显式键。
+      # ---------- Secrets（在控制台或 CLI 填写真实值，绝不入库入 Git） ----------
+      - key: AUTH_TOKEN_HMAC_KEY
+        sync: false
+      - key: PHONE_ENCRYPTION_KEY_BASE64
+        sync: false
+      - key: TENCENT_MAP_KEY
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: junde-db
+          property: connectionString
+
+databases:
+  # 免费层 PostgreSQL 17：自创建日起 30 天整体过期（与活跃度无关），之后进入 14 天宽限期可恢复，
+  # 逾期删除。到期前用 pg_dump 导出并迁移（见 docs/RENDER.md「免费库 30 天到期」）。
+  - name: junde-db
+    databaseName: junde
+    postgresMajorVersion: "17"
+    plan: free
+    region: singapore

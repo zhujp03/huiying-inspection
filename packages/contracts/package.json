@@ -1,0 +1,6 @@
+{
+  "name": "@junde/contracts",
+  "private": true,
+  "type": "module",
+  "exports": "./index.js"
+}

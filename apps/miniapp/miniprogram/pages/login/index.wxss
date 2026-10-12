@@ -1,0 +1,326 @@
+/* 认证页：方案 2 唯一文字视觉契约（390×844 基准，统一 rpx） */
+page { background: #ffffff; }
+
+.auth-page {
+  min-height: 100vh;
+  box-sizing: border-box;
+  padding: 80rpx 48rpx calc(48rpx + env(safe-area-inset-bottom));
+  background: #ffffff;
+}
+
+/* ---------- 品牌区（居中） ---------- */
+.auth-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.auth-mark {
+  width: 92rpx;
+  height: 92rpx;
+  border-radius: 16rpx;
+  background: #F25F42;
+  color: #ffffff;
+  font-size: 40rpx;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.auth-name {
+  margin-top: 18rpx;
+  font-size: 36rpx;
+  font-weight: 700;
+  color: #26272A;
+}
+
+/* ---------- 标题区 ---------- */
+.auth-head {
+  margin-top: 64rpx;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.head-title {
+  font-size: 52rpx;
+  font-weight: 700;
+  color: #26272A;
+  text-align: center;
+}
+.head-sub {
+  margin-top: 16rpx;
+  font-size: 28rpx;
+  color: #85888E;
+  text-align: center;
+}
+
+/* ---------- 表单 ---------- */
+.auth-form { margin-top: 64rpx; }
+.auth-form .field { display: block; margin-bottom: 32rpx; }
+.field__label {
+  display: block;
+  margin-bottom: 12rpx;
+  font-size: 28rpx;
+  font-weight: 600;
+  color: #26272A;
+}
+
+/* 输入框外壳：唯一视觉容器（单层边框/圆角/统一背景）。
+   不设左右 padding —— 文字间距由内部 input 自己控制，input 必须完整覆盖外壳，
+   杜绝「外壳白底 + input 灰底」拼块和左右白条。 */
+.input-shell {
+  width: 100%;
+  height: 96rpx;
+  min-height: 96rpx;
+  border: 1rpx solid #DADDE2;
+  border-radius: 12rpx;
+  background: #ffffff;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  position: relative;
+  overflow: hidden;
+}
+.input-shell.focus { border-color: #F25F42; }
+
+/* 原生 input：占满外壳、完全透明、无边框。
+   border:none + background:transparent 覆盖 app.wxss 全局 .input 的
+   background:#f7f7f7 / border:#dedfe2（那是其它页面的浅灰输入样式，
+   泄漏到登录页就是「浅灰区域 + 双层边框 + 左右白条」的根因）。 */
+.input-shell .input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0 20rpx;
+  margin: 0;
+  border: none;
+  background: transparent;
+  line-height: normal;
+  font-size: 28rpx;
+  color: #26272A;
+  box-sizing: border-box;
+}
+/* 仅密码输入框右侧预留眼睛图标空间（≈50px），用户名框不受影响 */
+.input-shell .input--password {
+  padding: 0 100rpx 0 20rpx;
+}
+.input-placeholder { color: #A1A5AB; }
+.input-shell .input-code {
+  font-size: 34rpx;
+  letter-spacing: 4rpx;
+}
+
+/* 密码可见性开关：40px 透明点击热区（背景完全透明，不制造独立白色区域），
+   绝对定位嵌入输入框最右侧、垂直居中；无文字、无分隔线 */
+.password-visibility-button {
+  position: absolute;
+  right: 12rpx;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 80rpx;
+  height: 80rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  z-index: 2;
+}
+/* 眼睛矢量图标（纯 CSS 绘制，可视约 21px；隐藏态=睁眼，显示态=闭眼+斜线） */
+.eye-icon {
+  position: relative;
+  width: 42rpx;
+  height: 28rpx;
+  border: 3rpx solid #7D8086;
+  border-radius: 50%;
+  box-sizing: border-box;
+}
+.eye-icon::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 10rpx;
+  height: 10rpx;
+  border-radius: 50%;
+  background: #7D8086;
+  transform: translate(-50%, -50%);
+}
+.eye-icon--off::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 56rpx;
+  height: 3rpx;
+  background: #7D8086;
+  transform: translate(-50%, -50%) rotate(-45deg);
+  z-index: 1;
+}
+
+/* 显示/隐藏密码：旧文字按钮样式，仅隐藏中的注册/找回表单仍引用（登录页已改用眼睛图标） */
+.btn-eye {
+  width: auto;
+  min-width: 64rpx;
+  height: 64rpx;
+  margin: 0;
+  padding: 0 6rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  font-size: 22rpx;
+  color: #7D8086;
+  border: none;
+  line-height: normal;
+  flex-shrink: 0;
+}
+.btn-eye::after { border: none; }
+
+/* ---------- 主按钮 ---------- */
+.btn-primary {
+  margin-top: 48rpx;
+  width: 100%;
+  height: 96rpx;
+  border-radius: 12rpx;
+  background: #F25F42;
+  color: #ffffff;
+  font-size: 32rpx;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: normal;
+  padding: 0;
+}
+.btn-primary::after { border: none; }
+.btn-primary[disabled] { background: #F2A18F; color: #ffffff; }
+.btn-login { margin-top: 48rpx; }
+
+/* ---------- 次级操作区（登录页双列） ---------- */
+.auth-secondary {
+  margin-top: 28rpx;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20rpx;
+}
+.btn-outline {
+  min-height: 80rpx;
+  background: #ffffff;
+  border: 1rpx solid #F25F42;
+  border-radius: 10rpx;
+  color: #F25F42;
+  font-size: 26rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: normal;
+  padding: 0 12rpx;
+  margin: 0;
+}
+.btn-outline::after { border: none; }
+@media (max-width: 340px) {
+  .auth-secondary { grid-template-columns: 1fr; }
+}
+
+/* ---------- 底部说明 ---------- */
+.auth-note {
+  margin-top: 32rpx;
+  display: block;
+  text-align: center;
+  font-size: 24rpx;
+  line-height: 1.5;
+  color: #7D8086;
+}
+
+/* ---------- 顶部返回登录 ---------- */
+.auth-top { margin-bottom: 40rpx; }
+.btn-back {
+  min-width: 160rpx;
+  min-height: 80rpx;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  background: transparent;
+  color: #F25F42;
+  font-size: 28rpx;
+  font-weight: 600;
+  line-height: normal;
+}
+.btn-back::after { border: none; }
+
+/* ---------- 表单辅助说明 / 次级文字按钮 ---------- */
+.form-hint {
+  display: block;
+  margin-top: 8rpx;
+  font-size: 24rpx;
+  color: #7D8086;
+  line-height: 1.5;
+}
+.btn-link {
+  margin: 24rpx auto 0;
+  padding: 0;
+  background: transparent;
+  color: #F25F42;
+  font-size: 26rpx;
+  line-height: normal;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 72rpx;
+}
+.btn-link::after { border: none; }
+
+/* ---------- 行为验证不可用终态区（浅灰） ---------- */
+.captcha-unavailable {
+  margin-top: 24rpx;
+  padding: 24rpx 24rpx 12rpx;
+  background: #F5F6F7;
+  border: 1rpx solid #ECEDEF;
+  border-radius: 12rpx;
+  box-sizing: border-box;
+}
+.cu-title {
+  display: block;
+  font-size: 28rpx;
+  font-weight: 600;
+  color: #26272A;
+}
+.cu-desc {
+  display: block;
+  margin-top: 8rpx;
+  font-size: 24rpx;
+  line-height: 1.5;
+  color: #7D8086;
+}
+.cu-actions {
+  margin-top: 16rpx;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16rpx;
+}
+.btn-cu { font-size: 24rpx; min-height: 72rpx; }
+
+/* ---------- 账号状态页（居中） ---------- */
+.auth-status {
+  margin-top: 96rpx;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.status-title {
+  font-size: 40rpx;
+  font-weight: 700;
+  color: #26272A;
+  text-align: center;
+}
+.status-desc {
+  margin-top: 16rpx;
+  font-size: 28rpx;
+  color: #85888E;
+  text-align: center;
+  line-height: 1.5;
+}
+.btn-status-back { margin-top: 24rpx; width: 100%; }

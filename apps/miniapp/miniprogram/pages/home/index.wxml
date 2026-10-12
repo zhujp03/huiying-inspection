@@ -1,0 +1,62 @@
+<view class="page home-page">
+  <!-- 顶部主色标题区（不超过 220rpx） -->
+  <view class="home-hero">
+    <text class="home-hero-title">汇盈探店</text>
+    <text class="home-hero-sub">探店员工作台</text>
+  </view>
+
+  <!-- 错误且无内容 -->
+  <view wx:if="{{error && !task}}" class="surface-card home-task-card">
+    <text class="empty-title">暂时无法加载任务</text>
+    <text class="inline-error">{{error}}</text>
+    <button class="primary" loading="{{refreshing}}" disabled="{{refreshing}}" bindtap="retry">重新加载</button>
+  </view>
+
+  <!-- 首次加载骨架（与任务卡同形状） -->
+  <view wx:elif="{{loading}}" class="surface-card home-task-card">
+    <view class="skeleton skeleton-tag"></view>
+    <view class="skeleton skeleton-line short"></view>
+    <view class="skeleton skeleton-line mid"></view>
+    <view class="skeleton skeleton-line"></view>
+    <view class="skeleton skeleton-btn"></view>
+  </view>
+
+  <!-- 空任务 -->
+  <view wx:elif="{{!task}}" class="surface-card home-task-card">
+    <text class="empty-title">当前没有待执行任务</text>
+    <button class="btn-outline" bindtap="goSchedule">查看全部日程</button>
+  </view>
+
+  <!-- 有可执行任务：整卡可进入详情，按钮也进入详情 -->
+  <view wx:else class="surface-card home-task-card" hover-class="tap-feedback" hover-stay-time="80" bindtap="goTask">
+    <view class="home-task-meta">
+      <text class="status-badge {{task.statusTone}}">{{task.statusText}}</text>
+      <text class="home-task-type">{{task.taskTypeText}}</text>
+    </view>
+    <text class="home-task-store">{{task.storeName}}</text>
+    <text class="home-task-name">{{task.name}}</text>
+    <text class="home-task-time">{{task.displayDate}} {{task.displayTime}}</text>
+    <text wx:if="{{task.draftProgressText}}" class="home-task-progress">{{task.draftProgressText}}</text>
+    <button class="primary home-task-btn" catchtap="goTask" loading="{{navigating}}" disabled="{{navigating}}">{{navigating ? '正在打开…' : task.actionText}}</button>
+  </view>
+
+  <!-- 刷新失败但已有内容：非阻塞错误条 -->
+  <view wx:if="{{error && task}}" class="home-error-bar">
+    <text class="inline-error">{{error}}</text>
+    <text class="home-error-retry" bindtap="retry">{{refreshing ? '正在加载' : '重新加载'}}</text>
+  </view>
+
+  <!-- 执行提醒（缩短，降低视觉优先级） -->
+  <view class="surface-card home-remind">
+    <text class="section-heading">执行提醒</text>
+    <text class="remind-line">保持普通顾客身份</text>
+    <text class="remind-line">到店后重新定位</text>
+  </view>
+
+  <!-- 只读统计（紧凑三格） -->
+  <view class="home-stats">
+    <view class="stat"><text class="stat-num">{{counts.assigned}}</text><text class="stat-label">待开始</text></view>
+    <view class="stat"><text class="stat-num">{{counts.inProgress}}</text><text class="stat-label">进行中</text></view>
+    <view class="stat"><text class="stat-num">{{counts.overdue}}</text><text class="stat-label">逾期</text></view>
+  </view>
+</view>

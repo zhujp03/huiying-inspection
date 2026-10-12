@@ -1,0 +1,207 @@
+# 汇盈探店 production Compose：PostgreSQL + API + Worker + Caddy HTTPS；OCR（私网）按需启用。
+# 前置条件：
+#   1. 已创建根目录 .env（cp .env.example .env 并填写全部生产字段）；
+#   2. PostgreSQL 17 由本编排的 postgres 服务在同一台机器上自建（DATABASE_URL 指向
+#      postgres:5432；宿主机脚本用 DATABASE_HOST_URL 指向 127.0.0.1:5432）——不暴露数据库公网；
+#   3. OCR_PROVIDER=none（默认，纯手动填写，无需 OCR 资源）时无需 junde-ocr 镜像；
+#      OCR_PROVIDER=paddle 时需先按 linux/amd64 构建 junde-ocr:amd64-verify
+#      （见 apps/ocr-service/README.md）并以 --profile ocr 启动（需 4C8G+）；
+#   4. Admin 与 Web(H5) 静态产物已构建（apps/admin/dist 与 apps/web/dist，本编排挂载给 Caddy；
+#      caddy healthcheck 会校验两份 index.html 存在，任一缺失即 unhealthy）；
+#   5. paddle 形态下宿主机 /etc/hosts 增加 `127.0.0.1 ocr`，供宿主机脚本（preflight/deploy）探活 OCR /ready。
+# 部署前先运行：npm run release:prepare && npm run preflight:production
+# 部署命令：DEPLOY_CONFIRM=yes npm run deploy:production（脚本自动向 compose 传入 --env-file 根目录 .env；
+# 手动执行 docker compose 时必须自带 `--env-file ../../.env`，否则 Caddy 域名/证书邮箱为空并失败关闭）。
+# 首次部署后按提示在安全 TTY 执行 npm run admin:bootstrap。
+#
+# 安全边界：数据库与 OCR 只走 compose 内部网络；postgres 仅绑定宿主机 127.0.0.1:5432
+# 供备份/迁移等宿主机脚本使用；Caddy 是唯一公网入口；API/Worker 不暴露宿主端口。
+# 环境分层：同一编排文件支持 开发/生产 两套 .env（将来 staging 同理）。
+#   - 根目录 .env（默认）＝当前活跃环境；--env-file 可指向其它环境文件；
+#   - 服务 env_file 路径由 .env 内的 ENV_FILE 决定（默认 ../../.env）；
+#   - NODE_ENV 随同一 .env 注入：production 失败关闭，development 供应商缺省优雅降级；
+#   - COMPOSE_PROJECT_NAME 默认 junde-audit，多环境共存时用项目名隔离。
+name: ${COMPOSE_PROJECT_NAME:-junde-audit}
+
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: ops/docker/Dockerfile.api
+      target: api
+    env_file:
+      - path: ${ENV_FILE:-../../.env}
+        required: true
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      # 容器内固定监听 8787（与 expose/healthcheck 一致），与 .env 的 PORT 解耦
+      # （.env 的 PORT 仅用于本机直跑，如 3000）。
+      PORT: "8787"
+    expose:
+      - "8787"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health/live').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 768M
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    networks: [front, back]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: ops/docker/Dockerfile.api
+      target: worker
+    env_file:
+      - path: ${ENV_FILE:-../../.env}
+        required: true
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+    healthcheck:
+      test: ["CMD", "node", "-e", "process.exit(0)"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    networks: [back]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # 同机自建 PostgreSQL 17：2C2G 单机拓扑的数据库；仅 back 内网，
+  # 5432 只绑定宿主机回环地址供备份/迁移/preflight 等宿主机脚本使用（DATABASE_HOST_URL）。
+  # 如改用外部托管数据库：删除本服务块并同步移除 api/worker 的 depends_on。
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER:-postgres}\" -d \"$${POSTGRES_DB:-postgres}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    networks: [back]
+
+  # PaddleOCR sidecar（逃生舱）：仅在 OCR_PROVIDER=paddle 时需要。
+  # --profile ocr 启用：docker compose --env-file ../../.env --profile ocr up -d
+  # none/tencent 形态完全不启动本服务，也不需要 junde-ocr 镜像。
+  ocr:
+    image: junde-ocr:amd64-verify
+    platform: linux/amd64
+    profiles: ["ocr"]
+    environment:
+      OCR_DEVICE: cpu
+    # 8080 仅绑定宿主机回环地址：宿主机脚本（preflight:production / deploy:production）
+    # 通过 /etc/hosts 的 `ocr` 条目探活 /ready；不暴露任何公网端口。
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/ready', timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 8G
+        reservations:
+          cpus: "2"
+          memory: 4G
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    networks: [back]
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # release:prepare 构建的 Admin 静态产物（apps/admin/dist）由本卷只读提供；
+      # 部署前必须先构建，否则 preflight:production 会失败关闭。
+      - ../../apps/admin/dist:/srv/admin:ro
+      # npm --prefix apps/web run build 构建的探员端 H5 静态产物（apps/web/dist）由本卷只读提供；
+      # 部署前必须先构建（Docker 会为不存在的挂载源静默创建空目录），缺失时 caddy healthcheck 判 unhealthy。
+      - ../../apps/web/dist:/srv/web:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    environment:
+      # 值来自 deploy:production 传入的 --env-file（根目录 .env）。
+      # 留空时 Caddy 启动即失败关闭，不会回退到占位域名。
+      PUBLIC_API_ORIGIN: ${PUBLIC_API_ORIGIN:-}
+      ADMIN_ORIGIN: ${ADMIN_ORIGIN:-}
+      MINIAPP_API_BASE_URL: ${MINIAPP_API_BASE_URL:-}
+      CADDY_EMAIL: ${CADDY_EMAIL:-}
+      WEB_ORIGIN: ${WEB_ORIGIN:-}
+    # 同时校验 Admin 与 Web 两份静态产物的 index.html 存在：任一产物缺失（未先构建）即 unhealthy，
+    # 使 docker compose up --wait / docker compose ps 明确暴露该错误，弥补 Docker 静默建空目录的盲区。
+    healthcheck:
+      test: ["CMD", "sh", "-c", "test -f /srv/admin/index.html && test -f /srv/web/index.html"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks: [front]
+    depends_on:
+      api:
+        condition: service_healthy
+
+networks:
+  front: {}
+  back: {}
+
+volumes:
+  caddy-data:
+  caddy-config:
+  postgres-data:

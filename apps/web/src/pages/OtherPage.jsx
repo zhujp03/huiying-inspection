@@ -1,0 +1,433 @@
+// OtherPage — other 其他记录与提交·第三步（inventory §1.10；rules R31/R32/R76-R85）。
+// 语义真源：apps/miniapp/miniprogram/pages/other/index.js（240 行）逐函数移植。
+// 区块 ↔ inventory §1.10 a 对照：自定义导航（保存并回菜品，submitted 时隐藏）/ 三步流程条（第三步 active）/
+// 加载中 / 成功页（✓+提交时间+锁定文案+确定）/ 表单区（闪光点必填+建议选填+消息区[重新加载/重试提交]）/
+// 提交/上一步按钮。
+// PM 钉定 Web 适配点（本页）：
+// 4) wx.showModal 确认 → window.confirm（R80 提交前不可逆确认）；wx.switchTab → context.navigate（日程 Tab）；
+//    wx.navigateBack/redirectTo → context.back(fallback)/replace（§4.3 返回栈兜底）；
+//    bindkeyboardheightchange → Web 无键盘高度事件，keyboardOpen 底部留白不适配（省略，不影响语义）。
+// 5) 401：捕获 kind=session → toast + redirectToLogin()。
+import React, { useEffect, useRef, useState } from "react";
+import { Button, Card, Field, FlowSteps, Muted, PageNav, TextArea } from "../design/components.jsx";
+import { useApp } from "./app-context.jsx";
+import { getAssignment } from "../services/assignments.js";
+import { getDraft, saveOtherRecords, submitQuestionnaire } from "../services/drafts.js";
+import { clearDraft, getDraft as getLocalDraft, markDraftSynced, saveDraft } from "../store/survey.js";
+import { secureUuid } from "../utils/business.js";
+import { formatSubmittedAt } from "../utils/presentation.js";
+
+// hash 路由查询参数（Web 适配：页面自读，等价 miniapp onLoad(options)）。
+function routeQuery() {
+  const raw = String((typeof window !== "undefined" ? window.location.hash : "") || "").replace(/^#/, "");
+  return new URLSearchParams(raw.split("?")[1] || "");
+}
+
+export function OtherPage() {
+  const { navigate, back, replace, toast, redirectToLogin } = useApp();
+  const [meta, setMeta] = useState(null);
+  const [highlight, setHighlight] = useState("");
+  const [suggestion, setSuggestion] = useState("");
+  const [submitState, setSubmitState] = useState("draft");
+  const [message, setMessage] = useState("");
+  const [submittedAt, setSubmittedAt] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [highlightError, setHighlightError] = useState("");
+  // 异步闭包内读取最新值（等价 miniapp this.data）；卸载后异步回调不再写状态。
+  const latestRef = useRef({});
+  const routeMetaRef = useRef(null);
+  const assignmentRevisionRef = useRef(null);
+  const submitTokenRef = useRef(null);
+  const pollTimerRef = useRef(null);
+  const dirtyRef = useRef(false);
+  const unloadedRef = useRef(false);
+
+  latestRef.current = { meta, highlight, suggestion, submitState, saving };
+
+  const persistLocal = () => {
+    if (!routeMetaRef.current) return;
+    try {
+      saveDraft(routeMetaRef.current, { highlight: latestRef.current.highlight, suggestion: latestRef.current.suggestion });
+    } catch { /* 存储异常静默：会话丢失由下一次鉴权请求处理 */ }
+  };
+
+  const handleSessionError = (loadError) => {
+    if (loadError?.kind !== "session" || unloadedRef.current) return false;
+    toast(loadError.message);
+    redirectToLogin();
+    return true;
+  };
+
+  // ---------- 加载（等价 miniapp load，js:37-78） ----------
+
+  const load = async () => {
+    setLoading(true);
+    setMessage("");
+    try {
+      const assignment = await getAssignment(routeMetaRef.current.assignmentId);
+      if (unloadedRef.current) return;
+      // R31：任务已提交终态 → toast + 任务详情。
+      if (assignment.status === "submitted") {
+        toast("该任务已提交");
+        replace(`/task?assignmentId=${encodeURIComponent(routeMetaRef.current.assignmentId)}`);
+        return;
+      }
+      const result = await getDraft(routeMetaRef.current.attemptId);
+      if (unloadedRef.current) return;
+      // R32：attempt/版本与路由不一致。
+      if (result.attempt.id !== routeMetaRef.current.attemptId || result.questionnaireVersion.id !== routeMetaRef.current.questionnaireVersionId) {
+        throw new Error("问卷信息已更新，请从任务详情重新进入");
+      }
+      // R76：提交中/已提交终态关闭编辑（按状态区分 toast 文案）。
+      if (["submitting", "processing", "submitted"].includes(result.attempt.status)) {
+        toast(result.attempt.status === "submitted" ? "该任务已提交" : "问卷正在提交");
+        replace(`/task?assignmentId=${encodeURIComponent(routeMetaRef.current.assignmentId)}`);
+        return;
+      }
+      const nextMeta = { ...routeMetaRef.current, revision: result.attempt.revision };
+      const local = getLocalDraft(nextMeta);
+      // R77：本地未同步优先，否则采用服务端 otherRecords 并 markDraftSynced。
+      const useLocal = local.synced === false;
+      const records = useLocal ? local : (result.otherRecords || {});
+      if (!useLocal) {
+        saveDraft(nextMeta, { highlight: records.highlight || "", suggestion: records.suggestion || "" });
+        markDraftSynced(nextMeta, nextMeta.revision);
+      }
+      routeMetaRef.current = nextMeta;
+      // assignmentRevision 取任务（audit_assignments）revision：提交 409 以它校验；attempt revision 绝不能兜底。
+      if (!Number.isInteger(assignment.revision)) throw new Error("任务信息已过期，请刷新后重试");
+      assignmentRevisionRef.current = assignment.revision;
+      dirtyRef.current = useLocal;
+      if (unloadedRef.current) return;
+      setMeta(nextMeta);
+      setHighlight(records.highlight || "");
+      setSuggestion(records.suggestion || "");
+      // R83：提交状态固定初始化 draft（重开草稿即重置）；failed 给恢复提示但仍可编辑。
+      setSubmitState("draft");
+      setMessage(result.attempt.status === "failed" ? "上次提交未完成，请检查内容后重新提交" : "");
+      setSubmittedAt(result.attempt.submittedAt || "");
+      setLoading(false);
+    } catch (loadError) {
+      if (unloadedRef.current) return;
+      if (handleSessionError(loadError)) return;
+      setMessage(loadError?.message || "暂时无法加载其他记录，请重试");
+      setLoading(false);
+    }
+  };
+
+  const retryLoad = () => { load(); };
+
+  // ---------- 输入（R78：失败态再编辑弃 token 回 draft） ----------
+
+  const input = (field, value) => {
+    if (["retryable_failed", "terminal_failed"].includes(latestRef.current.submitState)) submitTokenRef.current = null;
+    dirtyRef.current = true;
+    if (field === "highlight") {
+      setHighlight(value);
+      setSubmitState("draft");
+      setHighlightError("");
+      setMessage("");
+    } else {
+      setSuggestion(value);
+      setSubmitState("draft");
+    }
+    persistLocal();
+  };
+
+  // ---------- 保存其他记录（等价 miniapp saveRecords，js:125-147） ----------
+
+  const saveRecords = async () => {
+    if (latestRef.current.saving) return null;
+    const nextHighlight = latestRef.current.highlight.trim();
+    const nextSuggestion = latestRef.current.suggestion.trim();
+    setSaving(true);
+    setMessage("");
+    saveDraft(routeMetaRef.current, { highlight: nextHighlight, suggestion: nextSuggestion });
+    try {
+      const saved = await saveOtherRecords(routeMetaRef.current.attemptId, { highlight: nextHighlight, suggestion: nextSuggestion, revision: routeMetaRef.current.revision });
+      if (unloadedRef.current) return null;
+      const nextMeta = { ...routeMetaRef.current, revision: saved.revision };
+      markDraftSynced(nextMeta, saved.revision);
+      routeMetaRef.current = nextMeta;
+      assignmentRevisionRef.current = saved.assignmentRevision ?? assignmentRevisionRef.current;
+      dirtyRef.current = false;
+      setMeta(nextMeta);
+      setHighlight(nextHighlight);
+      setSuggestion(nextSuggestion);
+      return saved;
+    } catch (saveError) {
+      if (unloadedRef.current) return null;
+      if (handleSessionError(saveError)) return null;
+      setMessage(`${saveError?.message || "暂时无法保存"}，请重试`);
+      toast(saveError?.message || "暂时无法保存");
+      return null;
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // ---------- 提交链（R79-R82/R84） ----------
+
+  const complete = (result) => {
+    if (pollTimerRef.current) {
+      clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+    // R85：清本地草稿 + 清脏 + 成功终态页。
+    clearDraft(routeMetaRef.current);
+    dirtyRef.current = false;
+    setSubmitState("submitted");
+    setSubmittedAt(result?.submittedAt || "");
+    setMessage("提交成功");
+  };
+
+  // 任务 revision 守卫：非整数绝不发提交请求，也绝不回退问卷 attempt revision（本批次 T2 修订）。
+  const requireFreshAssignment = () => {
+    if (Number.isInteger(assignmentRevisionRef.current)) return true;
+    submitTokenRef.current = null;
+    setSubmitState("refresh_required");
+    setMessage("任务信息已过期，请刷新后重试");
+    return false;
+  };
+
+  // 提交错误三态映射（session 已在 handleSessionError 优先处理）。
+  // 优先级：已提交终态 > 可重试（保 token）> 需刷新换 token（清 token，手动刷新）> 终态失败（清 token）。
+  const handleSubmitError = (submitError) => {
+    if (submitError?.kind === "questionnaire_submitted") {
+      // 任务其实已提交成功过（不同 token 重放）：清草稿与 token，回任务详情（R31 同跳法），不作为失败展示。
+      clearDraft(routeMetaRef.current);
+      submitTokenRef.current = null;
+      toast("该任务已提交");
+      replace(`/task?assignmentId=${encodeURIComponent(routeMetaRef.current.assignmentId)}`);
+      return;
+    }
+    if (submitError?.retryable === true) {
+      // R82：可重试失败保留 token，同 token 续试。
+      setSubmitState("retryable_failed");
+      setMessage(`${submitError.message}，可以重试提交`);
+      return;
+    }
+    if (submitError?.requiresNewToken === true) {
+      // R84：任务已逾期/状态已更新，旧 token 作废：清 token，等用户手动点「刷新」（retryLoad 成功后回 draft 重新提交）。
+      submitTokenRef.current = null;
+      setSubmitState("refresh_required");
+      setMessage(submitError.message || "任务信息已更新，请刷新后重试");
+      return;
+    }
+    submitTokenRef.current = null;
+    setSubmitState("terminal_failed");
+    setMessage(submitError?.message || "提交未完成");
+  };
+
+  const submitWithExistingToken = async () => {
+    if (!submitTokenRef.current) {
+      setSubmitState("draft");
+      return;
+    }
+    if (!requireFreshAssignment()) return;
+    setSubmitState("submitting");
+    setMessage("正在确认提交结果…");
+    try {
+      const result = await submitQuestionnaire(routeMetaRef.current.attemptId, {
+        submitToken: submitTokenRef.current,
+        assignmentRevision: assignmentRevisionRef.current,
+        confirmation: true,
+      });
+      if (unloadedRef.current) return;
+      if (result.status === "processing") {
+        setSubmitState("processing");
+        setMessage("问卷正在处理，请稍候");
+        poll();
+        return;
+      }
+      complete(result);
+    } catch (submitError) {
+      if (unloadedRef.current) return;
+      if (handleSessionError(submitError)) return;
+      handleSubmitError(submitError);
+    }
+  };
+
+  const submit = async () => {
+    if (locked()) return;
+    if (!requireFreshAssignment()) return;
+    // R79：无 token 生成一次性提交 token（生成失败中止）。
+    if (!submitTokenRef.current) {
+      try {
+        submitTokenRef.current = secureUuid();
+      } catch {
+        setMessage("当前环境不支持安全提交");
+        return;
+      }
+    }
+    setSubmitState("submitting");
+    setMessage("正在安全提交，请勿关闭页面");
+    try {
+      const result = await submitQuestionnaire(routeMetaRef.current.attemptId, {
+        submitToken: submitTokenRef.current,
+        assignmentRevision: assignmentRevisionRef.current,
+        confirmation: true,
+      });
+      if (unloadedRef.current) return;
+      if (result.status === "processing") {
+        // R81：processing → 轮询同 token 直至终态。
+        setSubmitState("processing");
+        setMessage("问卷正在处理，请稍候");
+        poll();
+        return;
+      }
+      complete(result);
+    } catch (submitError) {
+      if (unloadedRef.current) return;
+      if (handleSessionError(submitError)) return;
+      handleSubmitError(submitError);
+    }
+  };
+
+  // R81：2500ms 后同 token 重查提交结果。
+  const poll = () => {
+    if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+    pollTimerRef.current = setTimeout(() => submitWithExistingToken(), 2500);
+  };
+
+  const retrySubmit = () => {
+    if (latestRef.current.submitState === "retryable_failed" || latestRef.current.submitState === "processing") submitWithExistingToken();
+  };
+
+  // ---------- 返回与提交确认（R80） ----------
+
+  const locked = () => ["submitting", "processing", "submitted"].includes(latestRef.current.submitState);
+
+  const goBackToDishes = async () => {
+    if (locked()) return;
+    const saved = await saveRecords();
+    if (!saved) return;
+    // §4.3 返回栈兜底：有历史则 back，否则 replace 到菜品页。
+    if (window.history.length > 1) back(routeUrl("/dishes", routeMetaRef.current));
+    else replace(routeUrl("/dishes", routeMetaRef.current));
+  };
+
+  const confirm = async () => {
+    if (locked()) return;
+    // 重试路径：有 token 的可重试失败直接重放，跳过必填校验与确认框。
+    if (latestRef.current.submitState === "retryable_failed" && submitTokenRef.current) {
+      await submitWithExistingToken();
+      return;
+    }
+    if (!latestRef.current.highlight.trim()) {
+      setHighlightError("请填写闪光点");
+      setMessage("");
+      setTimeout(() => document.getElementById("highlight-field")?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
+      return;
+    }
+    const saved = await saveRecords();
+    if (!saved) return;
+    // R80：保存成功后才弹不可逆确认（PM 适配点 4：wx.showModal → window.confirm）。
+    if (window.confirm("提交后将无法回看或修改本次问卷，请确认所有内容已经完成。")) submit();
+  };
+
+  // R85：成功页确定 → 日程 Tab。
+  const done = () => { navigate("/schedule"); };
+
+  // ---------- 生命周期（onLoad 四参数 / onUnload 清理，PM 适配点 4） ----------
+
+  useEffect(() => {
+    // StrictMode 双挂载：重挂载恢复 false；真实卸载仍由 cleanup 置 true。
+    unloadedRef.current = false;
+    const params = routeQuery();
+    const assignmentId = params.get("assignmentId") || "";
+    const attemptId = params.get("attemptId") || "";
+    const questionnaireVersionId = params.get("questionnaireVersionId") || "";
+    if (!assignmentId || !attemptId || !questionnaireVersionId) {
+      setLoading(false);
+      setMessage("未找到当前问卷，请从任务详情重新进入");
+      return () => { unloadedRef.current = true; };
+    }
+    routeMetaRef.current = {
+      assignmentId,
+      attemptId,
+      questionnaireVersionId,
+      revision: Number(params.get("revision") || 0),
+    };
+    load();
+    return () => {
+      // onUnload 等价：清轮询定时器；未提交且脏时持久化本地。
+      unloadedRef.current = true;
+      if (pollTimerRef.current) {
+        clearTimeout(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+      if (dirtyRef.current && latestRef.current.submitState !== "submitted") persistLocal();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const busy = saving || ["submitting", "processing"].includes(submitState);
+  const viewState = loading ? "loading" : submitState === "submitted" ? "submitted" : "ready";
+
+  return (
+    <div className="app-page app-page--flat" data-page="other" data-state={viewState} data-submit-state={submitState}>
+      {submitState !== "submitted" ? <PageNav title="其他记录" onBack={goBackToDishes} /> : null}
+      {submitState !== "submitted" ? <FlowSteps current="other" /> : null}
+
+      {loading ? (
+        <Card><Muted>正在加载其他记录…</Muted></Card>
+      ) : submitState === "submitted" ? (
+        <Card style={{ textAlign: "center" }}>
+          <div style={{ fontSize: 40, color: "#f25f42" }}>✓</div>
+          <div style={{ marginTop: 8, fontSize: 18, fontWeight: 700 }}>提交成功</div>
+          {/* R85 边注：submittedAt 缺失时不渲染时间行。 */}
+          {submittedAt ? <div style={{ marginTop: 6 }}><Muted>提交时间：{formatSubmittedAt(submittedAt)}</Muted></div> : null}
+          <div style={{ marginTop: 8 }}><Muted>本次问卷已锁定，不能回看或修改。如需说明，请联系管理员。</Muted></div>
+          <div style={{ marginTop: 16 }}><Button onClick={done}>确定</Button></div>
+        </Card>
+      ) : (
+        <>
+          <Card>
+            <Field label="闪光点" required error={highlightError || undefined}>
+              <TextArea
+                id="highlight-field"
+                value={highlight}
+                placeholder="输入闪光点"
+                aria-label="闪光点，必填"
+                onChange={(event) => input("highlight", event.target.value)}
+              />
+            </Field>
+            <Field label="其他建议">
+              <TextArea
+                value={suggestion}
+                placeholder="请填写问卷中未列出但您认为可以改进的地方"
+                aria-label="其他建议，选填"
+                onChange={(event) => input("suggestion", event.target.value)}
+              />
+            </Field>
+          </Card>
+
+          {/* 消息区：加载失败（无 meta）→ 重新加载；可重试失败/处理中 → 重试提交；需刷新换 token → 手动刷新 */}
+          {message ? (
+            <div className={`error-bar ${submitState === "terminal_failed" ? "error-bar--alert" : ""}`} role="status" style={{ marginTop: 8 }}>
+              <span>{message}</span>
+              {!meta ? <button type="button" className="error-bar__retry" onClick={retryLoad}>重新加载</button> : null}
+              {submitState === "retryable_failed" || submitState === "processing" ? (
+                <button type="button" className="error-bar__retry" onClick={retrySubmit}>重试提交</button>
+              ) : null}
+              {submitState === "refresh_required" ? (
+                <button type="button" className="error-bar__retry" onClick={retryLoad}>刷新</button>
+              ) : null}
+            </div>
+          ) : null}
+
+          <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+            <Button disabled={busy || locked()} onClick={confirm}>提交问卷</Button>
+            <Button variant="outline" disabled={busy || locked()} onClick={goBackToDishes}>上一步：菜品</Button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function routeUrl(path, meta) {
+  return `${path}?assignmentId=${encodeURIComponent(meta.assignmentId)}&attemptId=${encodeURIComponent(meta.attemptId)}&questionnaireVersionId=${encodeURIComponent(meta.questionnaireVersionId)}&revision=${meta.revision}`;
+}

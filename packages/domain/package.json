@@ -1,0 +1,6 @@
+{
+  "name": "@junde/domain",
+  "private": true,
+  "type": "module",
+  "exports": "./index.js"
+}

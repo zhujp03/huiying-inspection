@@ -1,0 +1,55 @@
+# 汇盈探店 Caddy HTTPS 反向代理：唯一公网入口。
+# API / Admin / 探员端 H5 分别使用 {$PUBLIC_API_ORIGIN} / {$ADMIN_ORIGIN} / {$WEB_ORIGIN} 三个域名（与根目录 .env 一致）。
+# Admin 静态文件由 compose 把 apps/admin/dist 只读挂载到 /srv/admin 提供。
+# 证书：Caddy 自动申请；{$CADDY_EMAIL} 由 compose 从根目录 .env 注入（留空则 Caddy 启动失败关闭）。
+{
+	email {$CADDY_EMAIL}
+}
+
+# API（含 /api/*、/health/*、/metrics 仅内网场景见下）
+{$PUBLIC_API_ORIGIN} {
+	encode gzip
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+	}
+	reverse_proxy api:8787
+}
+
+# Admin 静态托管（compose 已将 apps/admin/dist 挂载到 /srv/admin）
+{$ADMIN_ORIGIN} {
+	encode gzip
+	root * /srv/admin
+	try_files {path} /index.html
+	file_server
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+	}
+}
+
+# 探员端 H5（web 与 API 同源契约）：/api/* 反代 + 静态托管同一站点。
+# web 静态文件由 compose 把 apps/web/dist 只读挂载到 /srv/web 提供（compose 已接入：
+# 含 WEB_ORIGIN 注入与产物存在性 healthcheck，见 ops/docker/docker-compose.production.yml）。
+# route 块内指令严格按书写顺序执行：/api/* 反代必须先于 try_files——
+# Caddy 默认指令序会把 try_files 排到 reverse_proxy 之前，SPA 回退将先吞掉 API 路径。
+# 不为 web 在 apps/api 加任何 CORS origin：API 走同源相对路径，apps/api 保持零改动。
+{$WEB_ORIGIN} {
+	encode gzip
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		# 各指令理由见 docs/web/deployment.md 第 5.3 节。
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src 'self' https:; object-src 'none'; base-uri 'self'; form-action 'self'"
+	}
+	route {
+		reverse_proxy /api/* api:8787
+		root * /srv/web
+		try_files {path} /index.html
+		file_server
+	}
+}

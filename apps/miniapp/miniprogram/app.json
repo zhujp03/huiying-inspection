@@ -1,0 +1,63 @@
+{
+  "pages": [
+    "pages/login/index",
+    "pages/location/index",
+    "pages/home/index",
+    "pages/schedule/index",
+    "pages/profile/index",
+    "pages/task/index",
+    "pages/survey/index",
+    "pages/issue/index",
+    "pages/dishes/index",
+    "pages/other/index",
+    "pages/help/index"
+  ],
+  "window": {
+    "navigationBarTitleText": "汇盈探店",
+    "navigationBarBackgroundColor": "#ffffff",
+    "navigationBarTextStyle": "black",
+    "backgroundColor": "#f7f7f7"
+  },
+  "tabBar": {
+    "color": "#8a8d92",
+    "selectedColor": "#f25f42",
+    "backgroundColor": "#ffffff",
+    "borderStyle": "black",
+    "list": [
+      {
+        "pagePath": "pages/home/index",
+        "text": "首页",
+        "iconPath": "assets/tabbar/home.png",
+        "selectedIconPath": "assets/tabbar/home-active.png"
+      },
+      {
+        "pagePath": "pages/schedule/index",
+        "text": "日程",
+        "iconPath": "assets/tabbar/schedule.png",
+        "selectedIconPath": "assets/tabbar/schedule-active.png"
+      },
+      {
+        "pagePath": "pages/profile/index",
+        "text": "我的",
+        "iconPath": "assets/tabbar/profile.png",
+        "selectedIconPath": "assets/tabbar/profile-active.png"
+      }
+    ]
+  },
+  "permission": {
+    "scope.userLocation": {
+      "desc": "用于判断是否到达本次任务门店，不会持续记录行动轨迹"
+    }
+  },
+  "requiredPrivateInfos": [
+    "getLocation"
+  ],
+  "plugins": {
+    "captcha": {
+      "version": "2.1.4",
+      "provider": "wx1fe8d9a3cb067a75"
+    }
+  },
+  "style": "v2",
+  "sitemapLocation": "sitemap.json"
+}

@@ -1,0 +1,11 @@
+FROM python:3.12-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PADDLE_PDX_MODEL_SOURCE=BOS
+WORKDIR /app
+COPY apps/ocr-service/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+RUN apt-get update && apt-get install --no-install-recommends -y libgl1 libglib2.0-0 libgomp1 && rm -rf /var/lib/apt/lists/*
+COPY apps/ocr-service ./
+ARG TARGETARCH
+RUN test "$TARGETARCH" = "amd64" || (echo "OCR CPU sidecar requires linux/amd64" >&2; exit 1)
+EXPOSE 8080
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]

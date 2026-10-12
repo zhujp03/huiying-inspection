@@ -1,0 +1,103 @@
+<view class="dish-page">
+  <view class="app-nav" style="padding-top: {{statusBarHeight}}px;">
+    <view class="app-nav__bar" style="height: {{navBarHeight}}px;">
+      <button class="app-nav__back" aria-label="保存并返回产品品质题目" disabled="{{saving}}" bindtap="back">‹</button>
+      <text class="app-nav__title">菜品记录</text>
+    </view>
+  </view>
+
+  <view class="flow-steps" aria-label="填写流程共三步，当前第二步：菜品与小票"><view class="flow-step flow-step--done"><text class="flow-step__num">✓</text><text class="flow-step__label">答题</text></view><view class="flow-step__bar flow-step__bar--done"></view><view class="flow-step flow-step--active"><text class="flow-step__num">2</text><text class="flow-step__label">菜品与小票</text></view><view class="flow-step__bar"></view><view class="flow-step"><text class="flow-step__num">3</text><text class="flow-step__label">其他记录</text></view></view>
+
+  <view wx:if="{{loading}}" class="state-panel muted">正在加载菜品要求…</view>
+  <view wx:elif="{{error}}" class="state-panel"><text>{{error}}</text><button class="state-retry" bindtap="retry">重新加载</button></view>
+  <view wx:else class="dish-content">
+    <view class="receipt-section">
+      <view class="section-heading">
+        <view><text class="section-title"><text wx:if="{{receiptRequired}}" class="required">*</text> 消费小票</text><text class="section-caption">最多 9 张图片，每张不超过 10MB</text></view>
+        <text class="receipt-count">{{readyCount}} 张已完成</text>
+      </view>
+
+      <view wx:if="{{receiptLoading}}" class="receipt-notice">正在加载消费小票…</view>
+      <view wx:if="{{receiptError}}" class="receipt-notice receipt-notice--error" aria-role="alert"><text>{{receiptError}}</text><button wx:if="{{!receiptLocked}}" bindtap="retryReceipts">重试</button></view>
+
+      <view class="receipt-grid">
+        <view wx:for="{{receipts}}" wx:key="id" class="receipt-tile receipt-tile--{{item.status}}">
+          <button class="receipt-preview" data-url="{{item.previewUrl}}" bindtap="previewReceipt" disabled="{{!item.previewUrl}}" aria-label="查看第{{index + 1}}张消费小票">
+            <image wx:if="{{item.previewUrl}}" src="{{item.previewUrl}}" mode="aspectFill" />
+            <view wx:else class="receipt-placeholder">{{item.status === 'failed' ? '上传失败' : '正在处理'}}</view>
+          </button>
+          <view class="receipt-state"><text>{{item.statusLabel}}</text><text wx:if="{{item.status === 'uploading'}}">{{item.progressText}}</text></view>
+          <button wx:if="{{item.status === 'failed' && item.canRetry}}" class="receipt-retry" data-id="{{item.id}}" disabled="{{receiptBusy}}" bindtap="replaceFailedReceipt">重新选择</button>
+          <button wx:if="{{item.canDelete}}" class="receipt-delete" data-id="{{item.id}}" disabled="{{receiptBusy}}" bindtap="deleteReceipt" aria-label="删除第{{index + 1}}张消费小票">×</button>
+        </view>
+
+        <view wx:for="{{pendingReceipts}}" wx:key="clientFileId" class="receipt-tile receipt-tile--{{item.status}}">
+          <button class="receipt-preview" data-url="{{item.localPath}}" bindtap="previewReceipt" aria-label="查看待上传消费小票"><image src="{{item.localPath}}" mode="aspectFill" /></button>
+          <view class="receipt-state"><text>{{item.statusLabel}}</text><text>{{item.progressText}}</text></view>
+          <view wx:if="{{item.status === 'uploading' || item.status === 'confirming'}}" class="receipt-progress"><view style="width: {{item.progressPercent}}%;"></view></view>
+          <view wx:if="{{item.status === 'failed'}}" class="receipt-failure"><text>{{item.message}}</text><button data-id="{{item.clientFileId}}" bindtap="retryUpload">重试</button></view>
+          <button class="receipt-delete" data-id="{{item.clientFileId}}" disabled="{{item.status === 'uploading' || item.status === 'confirming'}}" bindtap="removePending" aria-label="移除待上传消费小票">×</button>
+        </view>
+
+        <button wx:if="{{canAddReceipt}}" class="receipt-add" disabled="{{receiptBusy}}" bindtap="chooseReceipts" aria-label="选择消费小票图片"><text>＋</text><text class="receipt-add__label">添加小票</text></button>
+      </view>
+
+      <!-- OCR 入口显隐由 client-config 动态下发（features.receiptOcr）；关闭时只保留手工填写。 -->
+      <view wx:if="{{ocrEnabled}}" class="ocr-panel ocr-panel--{{ocrView.tone}}">
+        <view><text class="ocr-title">小票菜品识别</text><text class="ocr-status">{{ocrView.label}}</text></view>
+        <button wx:if="{{!ocrJob || ocrJob.status === 'failed'}}" class="ocr-action" disabled="{{ocrBusy || readyCount === 0}}" loading="{{ocrBusy}}" bindtap="startOcr">{{ocrJob && ocrJob.status === 'failed' ? '重新识别' : '识别并带入菜品'}}</button>
+        <button wx:elif="{{ocrError}}" class="ocr-action" disabled="{{ocrBusy}}" bindtap="restoreOcr">恢复识别</button>
+      </view>
+      <view wx:if="{{ocrError}}" class="ocr-error" aria-role="alert"><text>{{ocrError}}</text><button bindtap="continueManual">继续手工填写</button></view>
+    </view>
+
+    <view class="dish-list">
+      <view wx:for="{{dishes}}" wx:key="id" id="dish-{{item.id}}" class="dish-block {{item.error ? 'dish-block--error' : ''}}">
+        <view class="dish-primary-row">
+          <view class="dish-order">第{{index + 1}}道菜</view>
+          <view class="dish-main">
+            <input wx:if="{{item.active}}" class="dish-name-input" data-id="{{item.id}}" data-field="actualName" value="{{item.actualName}}" focus="{{focusDishId === item.id}}" adjust-position="{{true}}" cursor-spacing="32" bindinput="input" bindblur="blur" placeholder="输入菜品名称" aria-label="第{{index + 1}}道菜的实际菜名" />
+            <view wx:else class="dish-name-input dish-name-input--disabled">{{item.fulfillmentStatus === 'unavailable' ? '售罄，不填写实际菜名' : '未点，不填写实际菜名'}}</view>
+            <view class="dish-meta-row">
+              <picker class="dish-status-picker" data-id="{{item.id}}" range="{{item.statusOptions}}" range-key="label" value="{{item.statusIndex}}" disabled="{{!item.requirementId}}" bindchange="status"><view class="dish-status">{{item.statusLabel}}<text wx:if="{{item.requirementId}}" class="dish-status__arrow">⌄</text></view></picker>
+              <text class="dish-requirement">{{item.requirementLabel}}</text>
+            </view>
+          </view>
+          <button wx:if="{{item.active}}" class="satisfaction {{item.fullySatisfied ? 'satisfaction--active' : ''}}" data-id="{{item.id}}" aria-label="第{{index + 1}}道菜，{{item.satisfactionText}}，点击切换" bindtap="satisfied"><text class="satisfaction__face">{{item.fullySatisfied ? '☺' : '☹'}}</text><text class="satisfaction__label">{{item.fullySatisfied ? '满意' : '未满意'}}</text></button>
+        </view>
+
+        <view class="business-tags">
+          <text wx:if="{{item.fromReceipt}}" class="business-tag business-tag--receipt">来自小票</text>
+          <text wx:if="{{item.needsReview}}" class="business-tag business-tag--review">请核对</text>
+          <text wx:if="{{item.priceDerived}}" class="business-tag">系统推算</text>
+          <text wx:if="{{item.manuallyModified}}" class="business-tag">已人工修改</text>
+        </view>
+
+        <view wx:if="{{item.plannedName}}" class="planned-row"><text>任务菜品：{{item.plannedName}}</text><text wx:if="{{item.instruction}}" class="planned-note">{{item.instruction}}</text></view>
+
+        <label wx:if="{{item.fulfillmentStatus === 'substituted'}}" class="conditional-field"><text class="conditional-field__label"><text class="required">*</text> 替代原因</text><textarea class="conditional-input" data-id="{{item.id}}" data-field="substitutionReason" value="{{item.substitutionReason}}" adjust-position="{{true}}" cursor-spacing="32" auto-height="{{true}}" bindinput="input" placeholder="说明原菜品和替代原因" aria-label="第{{index + 1}}道菜的替代原因" /></label>
+        <label wx:if="{{item.fulfillmentStatus === 'unavailable'}}" class="conditional-field"><text class="conditional-field__label"><text class="required">*</text> 售罄原因</text><textarea class="conditional-input" data-id="{{item.id}}" data-field="unavailableReason" value="{{item.unavailableReason}}" adjust-position="{{true}}" cursor-spacing="32" auto-height="{{true}}" bindinput="input" placeholder="记录现场告知的售罄原因" aria-label="第{{index + 1}}道菜的售罄原因" /></label>
+
+        <block wx:if="{{item.foldOpen}}">
+          <view wx:if="{{item.active}}" class="amount-grid">
+            <label><text>数量</text><input type="number" data-id="{{item.id}}" value="{{item.quantityInput}}" bindinput="quantityInput" bindblur="quantityBlur" adjust-position="{{true}}" cursor-spacing="38" aria-label="第{{index + 1}}道菜的数量" /></label>
+            <label><text>单价（元）</text><input type="digit" data-id="{{item.id}}" data-field="unitPriceYuan" value="{{item.unitPriceYuan}}" bindinput="moneyInput" bindblur="moneyBlur" adjust-position="{{true}}" cursor-spacing="38" placeholder="选填" aria-label="第{{index + 1}}道菜的单价" /></label>
+            <label><text>行总价（元）</text><input type="digit" data-id="{{item.id}}" data-field="lineTotalYuan" value="{{item.lineTotalYuan}}" bindinput="moneyInput" bindblur="moneyBlur" adjust-position="{{true}}" cursor-spacing="38" placeholder="选填" aria-label="第{{index + 1}}道菜的行总价" /></label>
+          </view>
+
+          <textarea wx:if="{{item.active}}" class="dish-evaluation" data-id="{{item.id}}" data-field="evaluation" value="{{item.evaluation}}" adjust-position="{{true}}" cursor-spacing="40" maxlength="-1" bindinput="input" placeholder="记录上菜时间、外观、温度、味道、份量、口感和其他现场观察" aria-label="第{{index + 1}}道菜的评价" />
+        </block>
+        <button wx:if="{{item.active && !item.foldOpen}}" class="dish-fold" data-id="{{item.id}}" bindtap="toggleFold" aria-label="展开第{{index + 1}}道菜的数量价格与评价">
+          <text class="dish-fold__summary">数量 ×{{item.quantity}} · 单价 ¥{{item.unitPriceYuan}} · 合计 ¥{{item.lineTotalYuan}}</text>
+          <text class="dish-fold__action">核对修改 ⌄</text>
+        </button>
+        <view wx:if="{{item.error || item.amountError}}" class="dish-error" aria-role="alert">{{item.error || item.amountError}}</view>
+        <button wx:if="{{!item.requirementId}}" class="delete-dish" data-id="{{item.id}}" bindtap="remove">删除这道菜品</button>
+      </view>
+    </view>
+
+    <button class="add-dish" disabled="{{saving}}" bindtap="add" aria-label="添加其他菜品"><text class="add-dish__icon">+</text><text>点击添加其他菜品</text></button>
+    <view wx:if="{{validationMessage}}" class="page-error" aria-role="alert">{{validationMessage}}</view>
+    <view class="page-actions"><button class="secondary-action" disabled="{{saving}}" bindtap="back">{{saving ? '保存中…' : '上一步：答题'}}</button><button class="primary-action" loading="{{saving}}" disabled="{{saving}}" bindtap="next">下一步：其他记录</button></view>
+  </view>
+</view>

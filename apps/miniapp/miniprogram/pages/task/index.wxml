@@ -1,0 +1,90 @@
+<view class="page task-page">
+  <!-- 首次加载骨架 -->
+  <block wx:if="{{loading}}">
+    <view class="surface-card skeleton-hero">
+      <view class="skeleton skeleton-line short"></view>
+      <view class="skeleton skeleton-line mid"></view>
+      <view class="skeleton skeleton-line"></view>
+    </view>
+    <view class="surface-card skeleton-card">
+      <view class="skeleton skeleton-line short"></view>
+      <view class="skeleton skeleton-line"></view>
+      <view class="skeleton skeleton-line mid"></view>
+    </view>
+    <text wx:if="{{loadSlow}}" class="task-slow-hint">正在读取任务详情…</text>
+  </block>
+
+  <!-- 加载错误（无内容） -->
+  <view wx:elif="{{errorBlocking}}" class="surface-card task-error">
+    <text class="empty-title">暂时无法打开任务</text>
+    <text class="inline-error">{{error}}</text>
+    <button class="primary" loading="{{retrying}}" disabled="{{retrying}}" bindtap="retry">重新加载</button>
+    <button class="btn-outline" bindtap="backToSchedule">返回日程</button>
+  </view>
+
+  <!-- 任务详情 -->
+  <view wx:elif="{{task}}" class="task-detail">
+    <view class="surface-card task-hero">
+      <view class="task-hero-top">
+        <text class="status-badge {{task.status === 'overdue' ? 'warning' : task.status === 'submitted' ? 'neutral' : task.status === 'cancelled' ? 'muted' : 'primary'}}">{{task.statusLabel}}</text>
+        <text class="task-type">{{task.taskType === 'secret' ? '暗访' : '明察'}}</text>
+      </view>
+      <text class="task-store">{{task.storeName}}</text>
+      <text class="task-address">{{task.address}}</text>
+      <text class="task-window">{{task.windowLabel}}</text>
+      <text wx:if="{{task.questionnaireDeadlineLabel}}" class="task-window">问卷截止 {{task.questionnaireDeadlineLabel}}</text>
+    </view>
+
+    <view class="surface-card task-block">
+      <text class="section-heading">本次要求</text>
+      <view class="detail-row"><text>问卷</text><text>{{task.questionnaireVersion.name}}</text></view>
+      <view class="detail-row"><text>预算</text><text>{{task.budgetLabel}}</text></view>
+      <view class="detail-row" wx:if="{{task.receiptRequired}}"><text>消费小票</text><text>需上传消费小票</text></view>
+      <view class="detail-row"><text>任务状态</text><text>{{task.statusLabel}}</text></view>
+    </view>
+
+    <view class="surface-card task-block">
+      <text class="section-heading">菜品要求</text>
+      <view wx:for="{{task.dishRequirements}}" wx:key="id" class="dish-line">
+        <text>{{item.plannedName}} × {{item.quantity}}</text>
+        <text>{{item.required ? '必点' : '建议'}}</text>
+      </view>
+      <text wx:if="{{!task.dishRequirements.length}}" class="muted">本次没有指定菜品。</text>
+    </view>
+
+    <view wx:if="{{task.specialInstruction}}" class="task-note">{{task.specialInstruction}}</view>
+
+    <!-- 已提交：只读 -->
+    <view wx:if="{{task.status === 'submitted'}}" class="surface-card task-block">
+      <text class="task-block-title">任务已提交</text>
+      <text class="muted">提交时间：{{task.submittedAtLabel}}</text>
+      <text class="muted">提交后不能回看答案、菜品、说明或证据。</text>
+    </view>
+
+    <!-- 已取消：显示管理员原因，不提供开始 -->
+    <view wx:elif="{{task.status === 'cancelled'}}" class="surface-card task-cancelled">
+      <text class="cancelled-title">任务已取消</text>
+      <text wx:if="{{task.cancelReason}}" class="cancelled-reason">取消原因：{{task.cancelReason}}</text>
+      <text wx:else class="muted">如需恢复执行，请联系管理员。</text>
+      <button class="btn-outline" bindtap="backToSchedule">返回日程</button>
+    </view>
+
+    <!-- 逾期：明显警告区，不提供开始 -->
+    <view wx:elif="{{task.status === 'overdue'}}" class="surface-card task-overdue">
+      <text class="overdue-title">任务已逾期</text>
+      <button class="btn-outline" bindtap="backToSchedule">返回日程</button>
+    </view>
+
+    <!-- 明察未启用 -->
+    <view wx:elif="{{task.taskType === 'overt'}}" class="surface-card task-block">
+      <text class="muted">明察任务暂未启用，当前不能开始。</text>
+    </view>
+
+    <!-- 开始流程 -->
+    <view wx:else class="start-actions">
+      <text class="location-line {{phase === 'failed' ? 'location-failed' : ''}}">{{phase === 'failed' ? startFailed : phaseText}}</text>
+      <button wx:if="{{task.attempt}}" class="secondary" loading="{{navigating}}" disabled="{{navigating}}" bindtap="continueDraft">{{navigating ? '正在打开…' : '继续填写'}}</button>
+      <button class="primary" loading="{{phase !== 'idle' && phase !== 'failed'}}" disabled="{{phase !== 'idle' && phase !== 'failed'}}" bindtap="start">{{phase === 'failed' ? '重新尝试开始' : phase === 'idle' ? '开始探店' : phaseText}}</button>
+    </view>
+  </view>
+</view>

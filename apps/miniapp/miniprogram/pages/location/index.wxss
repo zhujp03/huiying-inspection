@@ -1,0 +1,6 @@
+.location-page { padding: 110rpx 50rpx; background: #fff; }
+.location-symbol { width: 150rpx; height: 150rpx; margin-bottom: 50rpx; display: flex; align-items: center; justify-content: center; border-radius: 50%; color: #fff; background: #f25f42; font-weight: 700; }
+.location-page .title { display: block; margin: 18rpx 0; }
+.location-copy { display: block; }
+.location-notes { display: grid; gap: 18rpx; margin: 60rpx 0; padding: 30rpx; background: #f5f6f7; color: #666a70; font-size: 24rpx; }
+.location-page button { margin-top: 18rpx; }
