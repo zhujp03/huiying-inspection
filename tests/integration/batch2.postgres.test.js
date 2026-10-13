@@ -566,15 +566,23 @@ describe.sequential("PostgreSQL Batch 2 constraints", () => {
     const { app, headers, assignmentId, campaignId, versionId, userId } = await createAdminApp(storage);
     const attemptId = uuidv7();
     const submissionId = uuidv7();
+    const questionId = uuidv7();
     await pool.query("INSERT INTO survey_attempts (id,assignment_id,questionnaire_version_id,mode,status) VALUES ($1,$2,$3,'secret','draft')", [attemptId, assignmentId, versionId]);
     await pool.query(`INSERT INTO submission_versions (id,attempt_id,assignment_id,campaign_id,questionnaire_version_id,submitted_by,submitted_at,total_score,max_score,issue_count,answer_snapshot_json,dish_snapshot_json,other_snapshot_json,evidence_snapshot_json,receipt_snapshot_json,ocr_snapshot_json,integrity_hash)
       VALUES ($1,$2,$3,$4,$5,$6,now(),80,100,2,'[]','[]','{}','[]','[]','[]',$7)`, [submissionId, attemptId, assignmentId, campaignId, versionId, userId, "a".repeat(64)]);
+    // 单份问卷导出需要逐题得分且分类合计与 total/max 一致：补一题明细（80/100）
+    await pool.query("INSERT INTO questions (id,version_id,question_key,question_number,category,text,max_score,sort_order) VALUES ($1,$2,'b2-exp-key',1,'product','测试任务评估题',100,1)", [questionId, versionId]);
+    await pool.query("INSERT INTO submission_question_scores (id,submission_id,question_id,question_key,question_number,question_text,category,answer,awarded_score,max_score) VALUES ($1,$2,$3,'b2-exp-key',1,'测试任务评估题','product','scored',80,100)", [uuidv7(), submissionId, questionId]);
     const requested = await app.inject({ method: "POST", url: "/api/admin/exports", headers: { ...headers, "idempotency-key": uuidv7() }, payload: { submissionId } });
     expect(requested.statusCode, requested.body).toBe(202);
     await pool.query("UPDATE user_data_scopes SET revoked_at=now() WHERE user_id=$1", [userId]);
     expect(await runExportJobs({ pool, cos: storage })).toMatchObject({ claimed: 1, completed: 1 });
     expect(uploaded).toHaveLength(1);
-    expect(uploaded[0].body.toString("utf8")).toContain("测试任务");
+    expect(uploaded[0].contentType).toContain("spreadsheetml");
+    // 单份导出产物为真实 xlsx（非改名 CSV）：重读工作簿校验任务名进入评估表标题
+    const { workbookOf } = await import("../helpers/export-workbook.mjs");
+    const workbook = await workbookOf(uploaded[0]);
+    expect(workbook.getWorksheet("暗访评估表").getCell("A1").value).toContain("测试题库");
     await pool.query("UPDATE user_data_scopes SET revoked_at=NULL WHERE user_id=$1", [userId]);
     const state = await app.inject({ method: "GET", url: `/api/admin/exports/${requested.json().id}`, headers });
     expect(state.statusCode).toBe(200);
@@ -798,6 +806,81 @@ describe.sequential("PostgreSQL Batch 2 constraints", () => {
     expect(mine.json().items).toContainEqual(expect.objectContaining({ id: assignmentId, status: "overdue" }));
     const campaign = await pool.query("SELECT c.status FROM audit_campaigns c JOIN audit_assignments a ON a.campaign_id=c.id WHERE a.id=$1", [assignmentId]);
     expect(campaign.rows[0].status).toBe("in_progress");
+    await app.close();
+  });
+
+  // 门店详情 GET（Admin 深链接/刷新编辑页用）：与列表同权限、同数据范围断言、同行业结构。
+  test("store detail GET returns the authorized store row and 404 for unknown ids", async () => {
+    const { app, headers } = await createAdminApp();
+    const storeId = (await pool.query("SELECT id FROM stores LIMIT 1")).rows[0].id;
+    const detail = await app.inject({ method: "GET", url: `/api/admin/stores/${storeId}`, headers: { cookie: headers.cookie } });
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json().store).toMatchObject({ id: storeId, businessNo: "S-001", name: "测试门店", locationVerified: true });
+    expect(Number.isInteger(detail.json().store.revision)).toBe(true);
+    expect(detail.json().store).toHaveProperty("latitudeGcj02");
+
+    const missing = await app.inject({ method: "GET", url: `/api/admin/stores/${uuidv7()}`, headers: { cookie: headers.cookie } });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json().error.code).toBe("STORE_NOT_FOUND");
+
+    const unauthenticated = await app.inject({ method: "GET", url: `/api/admin/stores/${storeId}` });
+    expect(unauthenticated.statusCode).toBe(401);
+    await app.close();
+  });
+
+  // 门店详情 GET 数据范围/角色负向回归：区域范围管理员可读自己覆盖的门店，范围外统一 403
+  // （与列表静默过滤/PATCH 断言一致，不泄漏存在性）；无 store:manage 的登录态 403。
+  test("store detail GET enforces data scopes and role permissions", async () => {
+    const { createPasswordService } = await import("../../apps/api/src/auth/passwords.js");
+    const { encrypt, hmac: phoneHmac, normalizePhone } = await import("../../apps/api/src/auth/crypto.js");
+    const passwordHash = await createPasswordService().hash("a-secure-password");
+    const phoneKey = Buffer.from(config.PHONE_ENCRYPTION_KEY_BASE64, "base64");
+    const phone = normalizePhone("13811112222");
+
+    const inProvince = uuidv7(); const inCity = uuidv7(); const inDistrict = uuidv7();
+    const outProvince = uuidv7(); const outCity = uuidv7(); const outDistrict = uuidv7();
+    await pool.query("INSERT INTO regions (id,name,code,level) VALUES ($1,'辖内省','120000',1)", [inProvince]);
+    await pool.query("INSERT INTO regions (id,name,code,parent_id,level) VALUES ($1,'辖内市','120100',$2,2)", [inCity, inProvince]);
+    await pool.query("INSERT INTO regions (id,name,code,parent_id,level) VALUES ($1,'辖内区','120106',$2,3)", [inDistrict, inCity]);
+    await pool.query("INSERT INTO regions (id,name,code,level) VALUES ($1,'辖外省','980000',1)", [outProvince]);
+    await pool.query("INSERT INTO regions (id,name,code,parent_id,level) VALUES ($1,'辖外市','980100',$2,2)", [outCity, outProvince]);
+    await pool.query("INSERT INTO regions (id,name,code,parent_id,level) VALUES ($1,'辖外区','980106',$2,3)", [outDistrict, outCity]);
+    const inStore = uuidv7(); const outStore = uuidv7();
+    await pool.query("INSERT INTO stores (id,business_no,name,region_id,address,latitude_gcj02,longitude_gcj02,coordinate_source) VALUES ($1,'IN-1','辖内门店',$2,'地址',31.1,121.1,'poi')", [inStore, inDistrict]);
+    await pool.query("INSERT INTO stores (id,business_no,name,region_id,address,latitude_gcj02,longitude_gcj02,coordinate_source) VALUES ($1,'OUT-1','辖外门店',$2,'地址',31.2,121.2,'poi')", [outStore, outDistrict]);
+
+    // 区域范围管理员（省级三层覆盖辖内区）
+    const scopedAdmin = uuidv7();
+    await pool.query(`INSERT INTO users (id,username_display,username_normalized,display_name,phone_ciphertext,phone_lookup_hmac,phone_verified_at,password_hash,status)
+      VALUES ($1,'ScopedAdmin','scopedadmin','范围管理员',$3,$4,now(),$2,'approved_active')`, [scopedAdmin, passwordHash, encrypt(phoneKey, phone), phoneHmac(config.AUTH_TOKEN_HMAC_KEY, phone)]);
+    const adminRole = await pool.query("SELECT id FROM roles WHERE code = 'admin'");
+    await pool.query("INSERT INTO user_roles (id,user_id,role_id) VALUES ($1,$2,$3)", [uuidv7(), scopedAdmin, adminRole.rows[0].id]);
+    await pool.query("INSERT INTO user_data_scopes (id,user_id,scope_type,region_id) VALUES ($1,$2,'region',$3)", [uuidv7(), scopedAdmin, inProvince]);
+
+    // 探员（已登录但没有 store:manage，也不是 admin 会话）
+    const inspector = uuidv7();
+    await pool.query(`INSERT INTO users (id,username_display,username_normalized,display_name,phone_ciphertext,phone_lookup_hmac,phone_verified_at,password_hash,status)
+      VALUES ($1,'PlainInspector','plaininspector','普通探员',$3,$4,now(),$2,'approved_active')`, [inspector, passwordHash, encrypt(phoneKey, normalizePhone("13833334444")), phoneHmac(config.AUTH_TOKEN_HMAC_KEY, normalizePhone("13833334444"))]);
+    const inspectorRole = await pool.query("SELECT id FROM roles WHERE code = 'inspector'");
+    await pool.query("INSERT INTO user_roles (id,user_id,role_id) VALUES ($1,$2,$3)", [uuidv7(), inspector, inspectorRole.rows[0].id]);
+
+    const app = buildApp({ config, pool, logger: false, providers: { verifyCaptcha: async () => true, sendSms: async () => ({}) } });
+    const scopedLogin = await app.inject({ method: "POST", url: "/api/admin/auth/login", payload: { username: "ScopedAdmin", password: "a-secure-password" } });
+    expect(scopedLogin.statusCode).toBe(200);
+    const scopedHeaders = { cookie: scopedLogin.headers["set-cookie"] };
+
+    const own = await app.inject({ method: "GET", url: `/api/admin/stores/${inStore}`, headers: scopedHeaders });
+    expect(own.statusCode).toBe(200);
+    expect(own.json().store).toMatchObject({ id: inStore, name: "辖内门店" });
+
+    const foreign = await app.inject({ method: "GET", url: `/api/admin/stores/${outStore}`, headers: scopedHeaders });
+    expect(foreign.statusCode).toBe(403);
+    expect(foreign.json().error.code).toBe("SCOPE_FORBIDDEN");
+
+    const inspectorLogin = await app.inject({ method: "POST", url: "/api/auth/login", payload: { username: "PlainInspector", password: "a-secure-password" } });
+    expect(inspectorLogin.statusCode).toBe(200);
+    const forbidden = await app.inject({ method: "GET", url: `/api/admin/stores/${inStore}`, headers: { authorization: `Bearer ${inspectorLogin.json().accessToken}` } });
+    expect(forbidden.statusCode).toBe(403);
     await app.close();
   });
 });

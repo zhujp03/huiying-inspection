@@ -96,6 +96,18 @@ function comparisonDifferences(candidates, finalDishes) {
   return differences;
 }
 
+// 单份问卷导出 job_kind 推导：请求绑定 submissionId 即为单份（与汇总/看板互斥，见 ExportRequestSchema）；
+// job_kind 是自由 text 列（无 CHECK 约束），新增 'submission' 取值无需迁移。
+const exportJobKind = (request) => (request.kind === "dashboard" ? "dashboard" : request.submissionId ? "submission" : "submissions");
+// 存量兼容：旧「submissions + submissionId」任务 reexport 时升级为单份问卷导出，submissionId 原样保留；
+// 纯汇总/看板任务保持原类型。
+const reexportJobKind = (source) => (source.job_kind === "submissions" && source.filters_json?.submissionId ? "submission" : source.job_kind);
+// 提交记录是否在管理员当前数据范围内（层级区域范围，与提交详情端点同口径）。
+const submissionInScope = (client, submissionId, userId) => client.query(`SELECT 1 FROM submission_versions submission
+    JOIN audit_campaigns campaign ON campaign.id=submission.campaign_id JOIN stores store ON store.id=campaign.store_id JOIN regions region ON region.id=store.region_id
+    WHERE submission.id=$1 AND EXISTS (SELECT 1 FROM user_data_scopes scope WHERE scope.user_id=$2 AND scope.revoked_at IS NULL AND
+      (scope.scope_type='all' OR (scope.scope_type='region' AND (scope.region_id=region.id OR scope.region_id=region.parent_id OR scope.region_id=(SELECT parent_id FROM regions WHERE id=region.parent_id))) OR (scope.scope_type='store' AND scope.store_id=store.id)))`, [submissionId, userId]);
+
 export function registerBatch5Routes(app, { pool, cos }) {
   const admin = (request) => app.jundeAuth.adminReadSession(request, "submission:read");
   app.get("/api/admin/submissions", async (request) => {
@@ -142,15 +154,22 @@ export function registerBatch5Routes(app, { pool, cos }) {
     // 快速失败：对象存储未配置时任务永远不会被 worker 处理，与其排队误导不如直接提示
     if (!cos.exportConfigured) throw app.jundeAuth.businessError("EXPORT_COS_NOT_CONFIGURED", "导出文件服务尚未配置（需要腾讯云 COS），请先在 .env 中配置 COS_EXPORT_BUCKET 等参数", 503, { retryable: true });
     const body = ExportRequestSchema.parse(request.body || {});
+    if (body.kind === "dashboard" && body.submissionId) throw app.jundeAuth.businessError("EXPORT_KIND_CONFLICT", "看板导出不支持绑定单份提交记录", 422);
+    const kind = exportJobKind(body);
     const job = await app.jundeAuth.transaction(async (client) => {
+      // 单份导出在创建时即校验提交存在且在当前数据范围内：越权/不存在的 id 显式报错，
+      // 而不是排一个注定失败的队；worker 侧仍会按捕获的范围快照复核（防创建后范围被收回）。
+      if (body.submissionId && !(await submissionInScope(client, body.submissionId, session.user_id)).rows[0]) {
+        throw app.jundeAuth.businessError("SUBMISSION_NOT_FOUND", "提交记录不存在或不在您的数据范围内", 404);
+      }
       const scope = await client.query("SELECT scope_type,region_id,store_id FROM user_data_scopes WHERE user_id=$1 AND revoked_at IS NULL", [session.user_id]);
       const inserted = await client.query(`INSERT INTO export_jobs (id,requested_by,scope_snapshot_json,filters_json,job_kind,status,expires_at)
-        VALUES ($1,$2,$3,$4,$5,'queued',now()+INTERVAL '7 days') RETURNING *`, [uuidv7(), session.user_id, JSON.stringify(scope.rows), JSON.stringify(body), body.kind]);
+        VALUES ($1,$2,$3,$4,$5,'queued',now()+INTERVAL '7 days') RETURNING *`, [uuidv7(), session.user_id, JSON.stringify(scope.rows), JSON.stringify(body), kind]);
       await client.query(`INSERT INTO audit_logs (id,actor_id,actor_name,actor_username,action,subject_type,subject_id,data_json)
-        VALUES ($1,$2,$3,$4,'export_requested','export_job',$5,$6)`, [uuidv7(), session.user_id, session.display_name, session.username_display, inserted.rows[0].id, JSON.stringify({ submissionId: body.submissionId || null, kind: body.kind })]);
+        VALUES ($1,$2,$3,$4,'export_requested','export_job',$5,$6)`, [uuidv7(), session.user_id, session.display_name, session.username_display, inserted.rows[0].id, JSON.stringify({ submissionId: body.submissionId || null, kind })]);
       return inserted.rows[0];
     });
-    return reply.code(202).send({ id: job.id, fileName: "导出任务处理中", createdByName: session.display_name || "管理员", createdAt: job.created_at.toISOString(), status: job.status, downloadUrl: null });
+    return reply.code(202).send({ id: job.id, fileName: kind === "submission" ? "单份问卷导出（生成中）" : "导出任务处理中", createdByName: session.display_name || "管理员", createdAt: job.created_at.toISOString(), status: job.status, downloadUrl: null });
   });
   app.get("/api/admin/exports", async (request) => {
     const session = await app.jundeAuth.adminReadSession(request, "export:create");
@@ -163,7 +182,7 @@ export function registerBatch5Routes(app, { pool, cos }) {
       const viewStatus = row.status === "succeeded" && new Date(row.expires_at) <= new Date() ? "expired" : row.status;
       // 已完成且未过期的任务生成临时下载链接；其余状态不预签名
       const download = viewStatus === "succeeded" ? await app.jundeCos.createExportDownloadUrl(row.storage_key) : null;
-      items.push({ id: row.id, kind: row.job_kind, fileName: row.file_name || (row.job_kind === "dashboard" ? "数据看板导出（生成中）" : "提交记录汇总导出（生成中）"), createdByName: row.created_by_name || "管理员", createdAt: row.created_at.toISOString(), status: viewStatus, downloadUrl: download?.url || null });
+      items.push({ id: row.id, kind: row.job_kind, fileName: row.file_name || (row.job_kind === "dashboard" ? "数据看板导出（生成中）" : row.job_kind === "submission" ? "单份问卷导出（生成中）" : "提交记录汇总导出（生成中）"), createdByName: row.created_by_name || "管理员", createdAt: row.created_at.toISOString(), status: viewStatus, downloadUrl: download?.url || null, failureCode: viewStatus === "failed" ? row.failure_code || null : null });
     }
     return { items, nextCursor: result.rows.length > limit ? result.rows[limit - 1].id : null };
   });
@@ -175,7 +194,7 @@ export function registerBatch5Routes(app, { pool, cos }) {
     // 过期只作视图映射不写库：与列表接口同口径；落库 expired 由 worker expireExportJobs 在 COS 删除后完成
     const viewStatus = row.status === "succeeded" && new Date(row.expires_at) <= new Date() ? "expired" : row.status;
     const download = viewStatus === "succeeded" ? await app.jundeCos.createExportDownloadUrl(row.storage_key) : null;
-    return { id: row.id, fileName: row.file_name || "导出任务处理中", createdByName: session.display_name || "管理员", createdAt: row.created_at.toISOString(), status: viewStatus, downloadUrl: download?.url || null };
+    return { id: row.id, fileName: row.file_name || "导出任务处理中", createdByName: session.display_name || "管理员", createdAt: row.created_at.toISOString(), status: viewStatus, downloadUrl: download?.url || null, failureCode: viewStatus === "failed" ? row.failure_code || null : null };
   });
   app.post("/api/admin/submissions/:id/attachments/:attachmentId/restore", async (request, reply) => {
     const session = await app.jundeAuth.adminSession(request, "evidence:read");
@@ -273,20 +292,26 @@ export function registerBatch5Routes(app, { pool, cos }) {
       auditLogs: audits.rows.map((audit) => ({ id: audit.id, createdAt: audit.created_at.toISOString(), actorName: audit.display_name || "系统", actionLabel: auditActionLabel(audit.action) })),
     };
   });
-  // 重新导出：按原任务的类型与筛选条件再建一个新任务（归属范围按当前操作者重算）
+  // 重新导出：按原任务的类型与筛选条件再建一个新任务（归属范围按当前操作者重算）。
+  // 单份问卷任务（含旧「submissions+submissionId」升级形态）必须重新校验源提交仍在当前范围内。
   app.post("/api/admin/exports/:id/reexport", async (request, reply) => {
     const session = await app.jundeAuth.adminSession(request, "export:create");
     if (!cos.exportConfigured) throw app.jundeAuth.businessError("EXPORT_COS_NOT_CONFIGURED", "导出文件服务尚未配置（需要腾讯云 COS），请先在 .env 中配置 COS_EXPORT_BUCKET 等参数", 503, { retryable: true });
     const id = SecureUuidSchema.parse(request.params.id);
     const source = await pool.query("SELECT job_kind, filters_json FROM export_jobs WHERE id=$1 AND requested_by=$2", [id, session.user_id]);
     if (!source.rows[0]) throw app.jundeAuth.businessError("EXPORT_NOT_FOUND", "导出任务不存在", 404);
+    const kind = reexportJobKind(source.rows[0]);
     const job = await app.jundeAuth.transaction(async (client) => {
+      const submissionId = source.rows[0].filters_json?.submissionId;
+      if (kind === "submission" && !(await submissionInScope(client, submissionId, session.user_id)).rows[0]) {
+        throw app.jundeAuth.businessError("SUBMISSION_NOT_FOUND", "提交记录不存在或不在您的数据范围内，无法重新导出", 404);
+      }
       const scope = await client.query("SELECT scope_type,region_id,store_id FROM user_data_scopes WHERE user_id=$1 AND revoked_at IS NULL", [session.user_id]);
-      const inserted = await client.query("INSERT INTO export_jobs (id,requested_by,scope_snapshot_json,filters_json,job_kind,status,expires_at) VALUES ($1,$2,$3,$4,$5,'queued',now()+INTERVAL '7 days') RETURNING *", [uuidv7(), session.user_id, JSON.stringify(scope.rows), source.rows[0].filters_json, source.rows[0].job_kind]);
-      await client.query("INSERT INTO audit_logs (id,actor_id,actor_name,actor_username,action,subject_type,subject_id,data_json) VALUES ($1,$2,$3,$4,'export_requested','export_job',$5,$6)", [uuidv7(), session.user_id, session.display_name, session.username_display, inserted.rows[0].id, JSON.stringify({ reexportOf: id, kind: source.rows[0].job_kind })]);
+      const inserted = await client.query("INSERT INTO export_jobs (id,requested_by,scope_snapshot_json,filters_json,job_kind,status,expires_at) VALUES ($1,$2,$3,$4,$5,'queued',now()+INTERVAL '7 days') RETURNING *", [uuidv7(), session.user_id, JSON.stringify(scope.rows), source.rows[0].filters_json, kind]);
+      await client.query("INSERT INTO audit_logs (id,actor_id,actor_name,actor_username,action,subject_type,subject_id,data_json) VALUES ($1,$2,$3,$4,'export_requested','export_job',$5,$6)", [uuidv7(), session.user_id, session.display_name, session.username_display, inserted.rows[0].id, JSON.stringify({ reexportOf: id, kind })]);
       return inserted.rows[0];
     });
-    return reply.code(202).send({ id: job.id, fileName: job.job_kind === "dashboard" ? "数据看板导出" : "提交记录汇总导出", createdByName: session.display_name || "管理员", createdAt: job.created_at.toISOString(), status: job.status, downloadUrl: null });
+    return reply.code(202).send({ id: job.id, fileName: kind === "dashboard" ? "数据看板导出" : kind === "submission" ? "单份问卷导出" : "提交记录汇总导出", createdByName: session.display_name || "管理员", createdAt: job.created_at.toISOString(), status: job.status, downloadUrl: null });
   });
 
   app.get("/api/admin/audit-logs", async (request) => {

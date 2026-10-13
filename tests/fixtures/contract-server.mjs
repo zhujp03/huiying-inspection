@@ -54,6 +54,9 @@ const miniDraft = {
   otherRecords: { highlight: "员工主动巡台并及时补充餐具", suggestion: "高峰期增加入口引导" },
 };
 
+// 单份问卷导出任务：详情页发起的 submissionId 导出走固定任务号，前两次轮询返回排队/生成中，之后成功
+const singleExportJobId = "55555555-5555-5555-8555-555555555555";
+let singleExportPolls = 0;
 let receiptRevision = 4;
 let receiptSequence = 1;
 let receiptAttachments = [
@@ -184,6 +187,25 @@ const campaignAssignments = [
   { id: "assignment-extend", inspectorId: "user-inspector-101", inspectorName: "压测探员 101 号", questionnaireVersionId: "version-one", taskType: "secret", questionnaireName: "暗访问卷 2026 夏季版", startsAt: "2026-07-19T10:00:00Z", dueAt: "2026-07-19T13:30:00Z", questionnaireDeadlineAt: "2026-07-19T20:00:00Z", budgetLimit: 400, receiptRequired: false, specialInstruction: "重点观察收银流程", dishRequirements: [], status: "assigned", revision: 1 },
 ];
 const extendState = new Map();
+// 题库有状态存储（GET 返回当前数组，PATCH 乐观锁递增 revision；发布后冻结）——
+// 供「同一编辑器连续两次保存取最新 revision」「发布后只读」「丢弃编辑恢复服务端值」等路由回归使用。
+const questionSets = {
+  "version-one": Array.from({ length: 50 }, (_, index) => ({ id: `question-${index + 1}`, number: index + 1, category: index < 20 ? "environment" : index < 42 ? "service" : "product", text: `第 ${index + 1} 题检查内容`, maxScore: 2, enabled: true, scoreWipe: false, revision: 1, evidence: { evidenceRequired: index === 1, imageRequired: index === 1, audioRequired: false } })),
+  "version-draft": [
+    { id: "draft-question-1", number: 1, category: "environment", categoryName: "环境卫生", text: "门店门头是否整洁", maxScore: 2, enabled: true, scoreWipe: false, revision: 1, evidence: { evidenceRequired: false, imageRequired: false, audioRequired: false } },
+    { id: "draft-question-2", number: 2, category: "environment", categoryName: "环境卫生", text: "地面是否干净无杂物", maxScore: 2, enabled: true, scoreWipe: false, revision: 1, evidence: { evidenceRequired: false, imageRequired: false, audioRequired: false } },
+    { id: "draft-question-3", number: 3, category: "service", categoryName: "为客服务", text: "迎宾是否主动招呼", maxScore: 2, enabled: true, scoreWipe: false, revision: 1, evidence: { evidenceRequired: false, imageRequired: false, audioRequired: false } },
+  ],
+  "version-check-fail": [
+    { id: "check-fail-question-1", number: 1, category: "environment", categoryName: "环境卫生", text: "门店门头是否整洁", maxScore: 2, enabled: true, scoreWipe: true, revision: 1, evidence: { evidenceRequired: false, imageRequired: false, audioRequired: false } },
+    { id: "check-fail-question-2", number: 2, category: "environment", categoryName: "环境卫生", text: "地面是否干净无杂物", maxScore: 2, enabled: true, scoreWipe: true, revision: 1, evidence: { evidenceRequired: false, imageRequired: false, audioRequired: false } },
+  ],
+};
+const questionSetsPublished = new Set();
+// 新建问卷（POST 创建的 version-created-N）的题目快照：详情路由深链接/刷新可回读。
+const createdQuestionSets = new Map();
+// campaign-two 的指派存储：POST 创建的指派落入详情，供向导 ?step=3 刷新后回读。
+const campaignTwoAssignments = [];
 const mergeAssignment = (row) => {
   const extended = extendState.get(row.id);
   return extended
@@ -302,15 +324,41 @@ createServer(async (request, response) => {
     const filtered = adminStores.filter((store) => (!brandId || store.brandId === brandId) && (!cityRegionId || store.cityRegionId === cityRegionId));
     return send(response, 200, paged(url, filtered));
   }
+  // 门店/账号/问卷版本详情（Admin 深链接刷新用）：与生产端点同构（{ store }/{ user }/{ version }），
+  // 未命中返回 404 + 业务化 message，供前端「不存在或已被删除」恢复态断言。
+  const storeDetailMatch = url.pathname.match(/^\/api\/admin\/stores\/([^/]+)$/);
+  if (storeDetailMatch && request.method === "GET") {
+    const store = adminStores.find((row) => row.id === storeDetailMatch[1]);
+    if (!store) return send(response, 404, { error: { code: "STORE_NOT_FOUND", message: "门店不存在或已被删除", requestId: "fixture-request" } });
+    return send(response, 200, { store });
+  }
   if (url.pathname === "/api/admin/users" && request.method === "GET") {
     if (url.searchParams.get("kind") === "admin") return send(response, 200, paged(url, adminAdminUsers));
     return send(response, 200, paged(url, adminInspectors));
+  }
+  const userDetailMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)$/);
+  if (userDetailMatch && request.method === "GET") {
+    const user = [...adminInspectors, ...adminAdminUsers].find((row) => row.id === userDetailMatch[1]);
+    if (!user) return send(response, 404, { error: { code: "USER_NOT_FOUND", message: "账号不存在或已被删除", requestId: "fixture-request" } });
+    return send(response, 200, { user });
   }
   if (url.pathname === "/api/admin/users" && request.method === "POST") { const body = await readBody(request); return send(response, 201, { user: { id: "user-new", username: body.username, displayName: body.displayName, kind: body.kind } }); }
   if (url.pathname.startsWith("/api/admin/users/") && request.method === "PATCH") { await readBody(request); return send(response, 200, { user: { id: url.pathname.split("/").pop(), kind: "inspector" } }); }
   if (url.pathname === "/api/admin/campaigns" && request.method === "GET") return send(response, 200, paged(url, adminCampaigns));
   if (url.pathname === "/api/admin/campaigns" && request.method === "POST") { await readBody(request); return send(response, 201, { campaign: { id: "campaign-two", name: "新建探店任务", businessNo: "JD-NEW-001", storeName: "静安嘉里中心店", startsAt: "2026-07-19T10:00:00Z", dueAt: "2026-07-19T14:00:00Z", questionnaireDeadlineAt: "2026-07-19T20:00:00Z", status: "draft", revision: 1, assignmentCount: 0, overdueCount: 0 } }); }
   if (url.pathname === "/api/admin/campaigns/campaign-one" && request.method === "GET") return send(response, 200, { id: "campaign-one", name: "夏季门店服务品质暗访", storeId: "store-one", storeName: "静安嘉里中心店", startsAt: "2026-07-19T10:00:00Z", dueAt: "2026-07-19T14:00:00Z", questionnaireDeadlineAt: "2026-07-19T20:00:00Z", commonInstruction: "请保持自然就餐，重点观察高峰期服务。", status: "draft", revision: 3, locationVerified: true, overdueCount: 0, assignments: campaignAssignments.map(mergeAssignment) });
+  // campaign-two（POST 创建的草稿）：详情可回读（向导创建后 URL replace 为 :id/edit，刷新走这里），
+  // 指派 POST 落库到 campaignTwoAssignments，供 ?step=3 刷新后回显。
+  if (url.pathname === "/api/admin/campaigns/campaign-two" && request.method === "GET") return send(response, 200, { id: "campaign-two", name: "新建探店任务", businessNo: "JD-NEW-001", storeId: "store-one", storeName: "静安嘉里中心店", startsAt: "2026-07-19T10:00:00Z", dueAt: "2026-07-19T14:00:00Z", questionnaireDeadlineAt: "2026-07-19T20:00:00Z", status: "draft", revision: 1, locationVerified: true, overdueCount: 0, assignments: campaignTwoAssignments });
+  const campaignTwoAssignmentMatch = url.pathname.match(/^\/api\/admin\/campaigns\/campaign-two\/assignments$/);
+  if (campaignTwoAssignmentMatch && request.method === "POST") {
+    const body = await readBody(request);
+    const inspector = [...adminInspectors].find((row) => row.id === body.inspectorId);
+    const version = questionnaireVersions.find((row) => row.id === body.questionnaireVersionId);
+    const assignment = { id: `assignment-two-${campaignTwoAssignments.length + 1}`, inspectorId: body.inspectorId, inspectorName: inspector?.displayName || body.inspectorId, questionnaireVersionId: body.questionnaireVersionId, questionnaireName: version ? `${version.name} ${version.versionLabel}` : body.questionnaireVersionId, taskType: body.taskType || "secret", startsAt: body.startsAt, dueAt: body.dueAt, budgetLimit: body.budgetLimit ?? 0, receiptRequired: Boolean(body.receiptRequired), specialInstruction: body.specialInstruction || "", dishRequirements: [], status: "draft", revision: 1 };
+    campaignTwoAssignments.push(assignment);
+    return send(response, 201, { id: assignment.id, revision: assignment.revision });
+  }
   if (/^\/api\/admin\/campaigns\/[^/]+$/.test(url.pathname) && request.method === "PATCH") { await readBody(request); return send(response, 200, { campaign: { id: url.pathname.split("/").pop(), name: "夏季门店服务品质暗访", businessNo: "JD-20260719-018", storeName: "静安嘉里中心店", startsAt: "2026-07-19T10:00:00Z", dueAt: "2026-07-19T14:00:00Z", questionnaireDeadlineAt: "2026-07-19T20:00:00Z", status: "draft", revision: 4, assignmentCount: 3, overdueCount: 0 } }); }
   if (/^\/api\/admin\/campaigns\/[^/]+\/assignments$/.test(url.pathname) && request.method === "POST") { await readBody(request); return send(response, 201, { id: "assignment-two", revision: 1 }); }
   // 钉死契约：POST /api/admin/assignments/:id/extend —— AssignmentExtendSchema =
@@ -350,14 +398,33 @@ createServer(async (request, response) => {
       { key: "k15", number: 15, text: "您结束用餐离店时，是否口头欢送您？", overallRate: 30.23, monthly: [{ month: "2026-07", rate: 27.69 }, { month: "2026-08", rate: 32.76 }], delta: 5.07 },
     ],
   });
-  if (url.pathname === "/api/admin/exports" && request.method === "POST") return send(response, 202, { id: "44444444-4444-4444-8444-444444444444", fileName: "导出任务处理中", createdAt: "2026-09-05T08:00:00Z", status: "queued", downloadUrl: null });
+  if (url.pathname === "/api/admin/exports" && request.method === "POST") {
+    const body = await readBody(request);
+    if (body?.submissionId) {
+      singleExportPolls = 0;
+      return send(response, 202, { id: singleExportJobId, fileName: "单份问卷导出（生成中）", createdAt: "2026-09-05T08:00:00Z", status: "queued", downloadUrl: null });
+    }
+    return send(response, 202, { id: "44444444-4444-4444-8444-444444444444", fileName: "导出任务处理中", createdAt: "2026-09-05T08:00:00Z", status: "queued", downloadUrl: null });
+  }
+  if (url.pathname === `/api/admin/exports/${singleExportJobId}` && request.method === "GET") {
+    singleExportPolls += 1;
+    if (singleExportPolls < 2) return send(response, 200, { id: singleExportJobId, fileName: "单份问卷导出（生成中）", createdByName: "测试管理员", createdAt: "2026-09-05T08:00:00Z", status: "processing", downloadUrl: null });
+    return send(response, 200, { id: singleExportJobId, fileName: "暗访评估_静安嘉里中心店_周雨晴_20260719_55555555.xlsx", createdByName: "测试管理员", createdAt: "2026-09-05T08:00:00Z", status: "succeeded", downloadUrl: "https://exports.example.cos.test/signed-download" });
+  }
   if (url.pathname === "/api/admin/exports/44444444-4444-4444-8444-444444444444" && request.method === "GET") return send(response, 200, { id: "44444444-4444-4444-8444-444444444444", fileName: "数据看板导出_2026-07-01_2026-08-31.xlsx", createdByName: "测试管理员", createdAt: "2026-09-05T08:00:00Z", status: "succeeded", downloadUrl: "https://exports.example.cos.test/signed-download" });
   if (url.pathname === "/api/admin/questionnaire-versions" && request.method === "GET") return send(response, 200, paged(url, questionnaireVersions));
+  const versionDetailMatch = url.pathname.match(/^\/api\/admin\/questionnaire-versions\/([^/]+)$/);
+  if (versionDetailMatch && request.method === "GET") {
+    const version = questionnaireVersions.find((item) => item.id === versionDetailMatch[1]);
+    if (!version) return send(response, 404, { error: { code: "QUESTIONNAIRE_VERSION_NOT_FOUND", message: "问卷版本不存在或已被删除", requestId: "fixture-request" } });
+    return send(response, 200, { version });
+  }
   if (url.pathname === "/api/admin/questionnaire-versions" && request.method === "POST") {
     const body = await readBody(request);
     questionnaireVersionSequence += 1;
     const version = { id: `version-created-${questionnaireVersionSequence}`, name: body.name, versionLabel: "V1", enabledQuestionCount: body.questions.length, numberingValid: true, status: "draft", createdAt: new Date().toISOString(), revision: 0 };
     questionnaireVersions.push(version);
+    createdQuestionSets.set(version.id, body.questions.map((question, index) => ({ id: `created-question-${questionnaireVersionSequence}-${index + 1}`, number: index + 1, category: question.category, text: question.text, maxScore: question.maxScore, enabled: true, scoreWipe: Boolean(question.scoreWipe), revision: 0, evidence: { evidenceRequired: false, imageRequired: false, audioRequired: false } })));
     return send(response, 201, { version });
   }
   const publishVersionMatch = url.pathname.match(/^\/api\/admin\/questionnaire-versions\/([^/]+)\/publish$/);
@@ -368,18 +435,31 @@ createServer(async (request, response) => {
     if (body.revision !== version.revision || version.status !== "draft") return send(response, 409, { error: { code: "REVISION_CONFLICT" } });
     version.status = "published";
     version.revision += 1;
+    questionSetsPublished.add(version.id);
     return send(response, 200, { version: { id: version.id, status: version.status, revision: version.revision } });
   }
-  if (url.pathname === "/api/admin/questionnaire-versions/version-one/questions" && request.method === "GET") return send(response, 200, list(Array.from({ length: 50 }, (_, index) => ({ id: `question-${index + 1}`, number: index + 1, category: index < 20 ? "environment" : index < 42 ? "service" : "product", text: `第 ${index + 1} 题检查内容`, maxScore: 2, enabled: true, scoreWipe: false, revision: 1, evidence: { evidenceRequired: index === 1, imageRequired: index === 1, audioRequired: false } }))));
-  if (url.pathname === "/api/admin/questionnaire-versions/version-draft/questions" && request.method === "GET") return send(response, 200, list([
-    { id: "draft-question-1", number: 1, category: "environment", categoryName: "环境卫生", text: "门店门头是否整洁", maxScore: 2, enabled: true, scoreWipe: false, revision: 1, evidence: { evidenceRequired: false, imageRequired: false, audioRequired: false } },
-    { id: "draft-question-2", number: 2, category: "environment", categoryName: "环境卫生", text: "地面是否干净无杂物", maxScore: 2, enabled: true, scoreWipe: false, revision: 1, evidence: { evidenceRequired: false, imageRequired: false, audioRequired: false } },
-    { id: "draft-question-3", number: 3, category: "service", categoryName: "为客服务", text: "迎宾是否主动招呼", maxScore: 2, enabled: true, scoreWipe: false, revision: 1, evidence: { evidenceRequired: false, imageRequired: false, audioRequired: false } },
-  ]));
-  if (url.pathname === "/api/admin/questionnaire-versions/version-check-fail/questions" && request.method === "GET") return send(response, 200, list([
-    { id: "check-fail-question-1", number: 1, category: "environment", categoryName: "环境卫生", text: "门店门头是否整洁", maxScore: 2, enabled: true, scoreWipe: true, revision: 1, evidence: { evidenceRequired: false, imageRequired: false, audioRequired: false } },
-    { id: "check-fail-question-2", number: 2, category: "environment", categoryName: "环境卫生", text: "地面是否干净无杂物", maxScore: 2, enabled: true, scoreWipe: true, revision: 1, evidence: { evidenceRequired: false, imageRequired: false, audioRequired: false } },
-  ]));
+  const questionSetMatch = url.pathname.match(/^\/api\/admin\/questionnaire-versions\/([^/]+)\/questions$/);
+  if (questionSetMatch && request.method === "GET") {
+    const set = questionSets[questionSetMatch[1]] || createdQuestionSets.get(questionSetMatch[1]);
+    if (!set) return send(response, 404, { error: { code: "NOT_FOUND", message: "问卷版本不存在或已被删除", requestId: "fixture-request" } });
+    return send(response, 200, list(set));
+  }
+  // 题目 PATCH：有状态（revision 乐观锁，成功后 revision+1 并回写权威行），与生产契约一致返回 { question }。
+  const questionPatchMatch = url.pathname.match(/^\/api\/admin\/questionnaire-versions\/([^/]+)\/questions\/([^/]+)$/);
+  if (questionPatchMatch && request.method === "PATCH") {
+    const body = await readBody(request);
+    const set = questionSets[questionPatchMatch[1]] || createdQuestionSets.get(questionPatchMatch[1]);
+    const question = set?.find((row) => row.id === questionPatchMatch[2]);
+    if (!question) return send(response, 404, { error: { code: "QUESTION_NOT_FOUND", message: "题目不存在", requestId: "fixture-request" } });
+    if (questionSetsPublished[questionPatchMatch[1]]) return send(response, 409, { error: { code: "QUESTIONNAIRE_VERSION_FROZEN", message: "已发布版本不能修改", requestId: "fixture-request" } });
+    if (Number(body.revision) !== question.revision) return send(response, 409, { error: { code: "REVISION_CONFLICT", message: "内容已更新，请刷新后重试", requestId: "fixture-request" } });
+    question.revision += 1;
+    if (body.text !== undefined) question.text = body.text;
+    if (body.maxScore !== undefined) question.maxScore = body.maxScore;
+    if (body.scoreWipe !== undefined) question.scoreWipe = Boolean(body.scoreWipe);
+    if (body.evidence) question.evidence = { evidenceRequired: body.evidence.evidenceRequired, imageRequired: body.evidence.imageRequired, audioRequired: body.evidence.audioRequired, imageMaxCount: body.evidence.imageMaxCount ?? 3, audioMaxDurationSeconds: body.evidence.audioMaxDurationSeconds ?? 10 };
+    return send(response, 200, { question });
+  }
   if (url.pathname === "/api/admin/submissions" && request.method === "GET") {
     const query = url.searchParams;
     const contains = (value, field) => { const target = query.get(field); return !target || String(value || "").toLowerCase().includes(target.toLowerCase()); };
@@ -391,10 +471,10 @@ createServer(async (request, response) => {
     // 仅 submissions 额外带 total（全量计数，供「共 X 条」展示）
     return send(response, 200, { ...paged(url, filtered), total: filtered.length });
   }
-  if (url.pathname === "/api/admin/submissions/submission-one") return send(response, 200, { questionnaireName: "暗访问卷", versionLabel: "2026 夏季版", totalScore: 94, scoreRate: "94%", issueCount: 3, categoryScores: [{ category: "environment", scoreRate: "95%", score: 19 }, { category: "service", scoreRate: "93%", score: 41 }, { category: "product", scoreRate: "94%", score: 34 }], highlight: "员工主动巡台", suggestion: "高峰期增加引导", dishes: [{ id: "dish-one", requirementId: "requirement-one", plannedName: "招牌烤鸭", actualName: "招牌烤鸭", quantity: 1, unitPriceCents: 26800, lineTotalCents: 26800, fulfillmentStatus: "ordered", evaluation: "温度和口感良好", fullySatisfied: true, source: "ocr", manuallyModified: false, priceDerived: false, reviewFields: [] }], receiptComparison: adminReceiptComparison, auditLogs: [{ id: "submission-audit-one", createdAt: "2026-07-19T13:20:00Z", actorName: "周雨晴", actionLabel: "提交问卷" }], questions: Array.from({ length: 50 }, (_, index) => ({ id: `question-${index + 1}`, number: index + 1, text: `第 ${index + 1} 题检查内容`, answer: index % 17 === 0 ? "unscored" : "scored", issueRemark: index % 17 === 0 ? "现场细节需要改进" : "", previewUrls: [] })) });
+  if (url.pathname === "/api/admin/submissions/submission-one") return send(response, 200, { taskName: "夏季门店服务品质暗访", storeName: "静安嘉里中心店", inspectorName: "周雨晴", submittedAt: "2026-07-19T13:20:00Z", questionnaireName: "暗访问卷", versionLabel: "2026 夏季版", totalScore: 94, scoreRate: "94%", issueCount: 3, categoryScores: [{ category: "environment", scoreRate: "95%", score: 19 }, { category: "service", scoreRate: "93%", score: 41 }, { category: "product", scoreRate: "94%", score: 34 }], highlight: "员工主动巡台", suggestion: "高峰期增加引导", dishes: [{ id: "dish-one", requirementId: "requirement-one", plannedName: "招牌烤鸭", actualName: "招牌烤鸭", quantity: 1, unitPriceCents: 26800, lineTotalCents: 26800, fulfillmentStatus: "ordered", evaluation: "温度和口感良好", fullySatisfied: true, source: "ocr", manuallyModified: false, priceDerived: false, reviewFields: [] }], receiptComparison: adminReceiptComparison, auditLogs: [{ id: "submission-audit-one", createdAt: "2026-07-19T13:20:00Z", actorName: "周雨晴", actionLabel: "提交问卷" }], questions: Array.from({ length: 50 }, (_, index) => ({ id: `question-${index + 1}`, number: index + 1, text: `第 ${index + 1} 题检查内容`, answer: index % 17 === 0 ? "unscored" : "scored", issueRemark: index % 17 === 0 ? "现场细节需要改进" : "", previewUrls: [] })) });
   if (url.pathname === "/api/admin/exports" && request.method === "GET") return send(response, 200, paged(url, [], "desc"));
   if (url.pathname === "/api/admin/audit-logs" && request.method === "GET") return send(response, 200, paged(url, adminAudits, "desc"));
   if (request.method === "DELETE" && (url.pathname.startsWith("/api/admin/stores/") || url.pathname.startsWith("/api/admin/users/") || url.pathname.startsWith("/api/admin/campaigns/") || url.pathname.startsWith("/api/admin/questionnaire-versions/"))) return send(response, 200, { deleted: true });
   if (request.method !== "GET") return send(response, 200, { status: "ok", revision: 4 });
-  return send(response, 404, { error: { code: "NOT_FOUND" } });
+  return send(response, 404, { error: { code: "NOT_FOUND", message: "数据不存在或链接有误", requestId: "fixture-request" } });
 }).listen(port, "127.0.0.1", () => console.log(`test contract server ready on ${port}`));

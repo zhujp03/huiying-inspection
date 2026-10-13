@@ -2,6 +2,7 @@ import { uuidv7 } from "../../api/src/ids.js";
 import { buildSubmissionExportFilterConditions, DashboardFilterSchema } from "../../../packages/contracts/index.js";
 import { fetchDashboardStats } from "../../api/src/stats/queries.js";
 import { buildDashboardWorkbook, XLSX_CONTENT_TYPE } from "./dashboard-export.js";
+import { buildSubmissionExportFileName, buildSubmissionWorkbook, loadSubmissionExportModel } from "./submission-export.js";
 
 const MAX_EXPORT_ROWS = 10_000;
 const csvCell = (value) => `"${String(value ?? "").replaceAll('"', '""')}"`;
@@ -87,7 +88,11 @@ export async function runExportJobs({ pool, cos, leaseSeconds = 300, limit = 1 }
   const result = { claimed: jobs.length, completed: 0, failed: 0, lostLease: 0 };
   for (const job of jobs) {
     const isDashboard = job.job_kind === "dashboard";
-    const storageKey = `exports/${job.id}/${workerId}${isDashboard ? ".xlsx" : ".csv"}`;
+    // 单份问卷导出：job_kind='submission'，绑定 filters_json.submissionId；范围/存在性/评分数据
+    // 校验都在 loadSubmissionExportModel 内失败关闭（不产出空文件或汇总兜底）。
+    const isSubmission = job.job_kind === "submission";
+    const isXlsx = isDashboard || isSubmission;
+    const storageKey = `exports/${job.id}/${workerId}${isXlsx ? ".xlsx" : ".csv"}`;
     try {
       let body;
       let fileName;
@@ -98,6 +103,11 @@ export async function runExportJobs({ pool, cos, leaseSeconds = 300, limit = 1 }
         const stats = await fetchDashboardStats(pool, filter, job.requested_by);
         body = Buffer.from(await buildDashboardWorkbook(stats));
         fileName = `数据看板导出_${stats.range.from}_${stats.range.to}.xlsx`;
+        contentType = XLSX_CONTENT_TYPE;
+      } else if (isSubmission) {
+        const model = await loadSubmissionExportModel(pool, job);
+        body = Buffer.from(await buildSubmissionWorkbook(model));
+        fileName = buildSubmissionExportFileName(model);
         contentType = XLSX_CONTENT_TYPE;
       } else {
         body = Buffer.from(`\ufeff${csv(await submissionRows(pool, job))}`, "utf8");

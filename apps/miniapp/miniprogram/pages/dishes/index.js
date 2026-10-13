@@ -4,6 +4,7 @@ import {
   saveDishes, uploadToSignedTarget,
 } from "../../services/api.js";
 import { getDraft as getLocalDraft, markDraftSynced, saveDraft as saveLocalDraft } from "../../store/survey.js";
+import { parentIsPage, sanitizeSource } from "../../utils/navigation.js";
 import { firstIncompleteQuestion, isBlankExtraDish, secureUuid, validateDish } from "../../utils/business.js";
 import {
   applyOcrDishesOnce, deriveLineTotal, formatCentsToYuan, markDishEdited, nextPollDelay,
@@ -42,6 +43,8 @@ Page({
       this.setData({ loading: false, error: "未找到菜品记录，请从问卷重新进入" }); return;
     }
     this.routeMeta = { assignmentId: options.assignmentId, attemptId: options.attemptId, questionnaireVersionId: options.questionnaireVersionId, revision: Number(options.revision || 0) };
+    // 任务链来源（问卷写入）：只读回跳任务详情时原样带回。
+    this.source = sanitizeSource(options.source);
     this.pageVisible = true;
     await this.load();
   },
@@ -376,7 +379,7 @@ Page({
     try {
       const result = await saveDishes(this.routeMeta.attemptId, { dishes, revision: this.routeMeta.revision });
       this.updateRevision(result.revision); markDraftSynced(this.routeMeta, result.revision); this.dirty = false;
-      if (destination === "survey") this.routeToSurvey(false); else wx.navigateTo({ url: routeUrl("/pages/other/index", this.routeMeta) });
+      if (destination === "survey") this.routeToSurvey(false); else wx.navigateTo({ url: `${routeUrl("/pages/other/index", this.routeMeta)}&source=${this.source || ""}` });
     } catch (error) { const message = safeMessage(error, "暂时无法保存菜品，请重试"); this.setData({ validationMessage: message }); wx.showToast({ title: message, icon: "none", duration: 3000 }); }
     finally { this.setData({ saving: false }); }
   },
@@ -391,8 +394,10 @@ Page({
   setReceiptState(receipts) { this.setData({ receipts: receipts.map(projectReceipt) }); this.refreshReceiptProjection(); },
   refreshReceiptProjection() { const readyCount = readyReceiptCount(this.data.receipts); this.setData({ readyCount, canAddReceipt: occupiedReceiptCount(this.data.receipts, this.data.pendingReceipts) < 9 }); },
   updateRevision(revision) { if (!Number.isInteger(revision)) return; this.routeMeta = { ...this.routeMeta, revision }; this.setData({ meta: this.routeMeta }); },
-  routeToSurvey(replace) { const url = `${routeUrl("/pages/survey/index", this.routeMeta)}&category=product`; const pages = getCurrentPages(); if (!replace && pages.length > 1) wx.navigateBack(); else wx.redirectTo({ url }); },
-  closeSubmitted() { wx.showToast({ title: "该问卷已关闭编辑", icon: "none" }); wx.redirectTo({ url: `/pages/task/index?assignmentId=${encodeURIComponent(this.routeMeta.assignmentId)}` }); },
+  // 返回问卷：仅当紧邻父页确为同任务问卷才原生返回（问卄件仍存活，分类不丢）；
+  // 直达进入/无关栈不算证据，此时 redirectTo 携全量参数的规范问卷页（R40 固定 category=product）。
+  routeToSurvey(replace) { const url = `${routeUrl("/pages/survey/index", this.routeMeta)}&category=product&source=${this.source || ""}`; if (!replace && parentIsPage("pages/survey/index", { assignmentId: this.routeMeta.assignmentId, attemptId: this.routeMeta.attemptId })) wx.navigateBack(); else wx.redirectTo({ url }); },
+  closeSubmitted() { wx.showToast({ title: "该问卷已关闭编辑", icon: "none" }); wx.redirectTo({ url: `/pages/task/index?assignmentId=${encodeURIComponent(this.routeMeta.assignmentId)}&source=${this.source || ""}` }); },
   onShow() { this.pageVisible = true; this.syncOcrEntry(); if (!this.data.loading && this.recovery?.jobId && !this.data.ocrView?.terminal) this.resumeOcr(); },
   onHide() { this.pageVisible = false; this.stopOcrPolling(); this.persistLocal(); },
   onUnload() { this.pageVisible = false; this.stopOcrPolling(); if (this.dirty || this.data.pendingReceipts.length || this.recovery?.jobId) this.persistLocal(); },

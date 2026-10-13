@@ -1,5 +1,6 @@
 import { checkIn, getAssignment, startAssignment } from "../../services/api.js";
 import { formatBudgetLabel, formatSubmittedAt, formatTimeRange, mapAssignmentStatus } from "../../utils/presentation.js";
+import { sanitizeSource, taskOriginLabel, taskOriginTab } from "../../utils/navigation.js";
 
 const PHASE_TEXT = {
   locating: "正在获取现场位置…",
@@ -24,15 +25,28 @@ Page({
     assignmentId: "", task: null,
     loading: true, loadSlow: false, error: "", errorBlocking: false, retrying: false,
     phase: "idle", phaseText: "开始时将重新定位", startFailed: "", navigating: false,
+    originLabel: "返回日程",
   },
   onLoad(options) {
     // onUnload 防护：页面离开后异步回调不得继续 setData。
     this.unloaded = false;
-    if (!options.assignmentId) { this.setData({ loading: false, error: "未找到对应任务，请从日程重新进入", errorBlocking: true }); return; }
-    this.setData({ assignmentId: options.assignmentId });
+    // 返回起点（?source=，首页/日程白名单；缺省或非法 → 日程）。文案与去向一致，
+    // 刷新/重进入随 URL 保留；来源不参与草稿身份与 API 契约。
+    this.source = sanitizeSource(options.source);
+    if (!options.assignmentId) { this.setData({ loading: false, error: "未找到对应任务，请从日程重新进入", errorBlocking: true, originLabel: taskOriginLabel(this.source) }); return; }
+    this.setData({ assignmentId: options.assignmentId, originLabel: taskOriginLabel(this.source) });
     // 加载超过 800ms 才提示，避免瞬间闪烁。
     this.slowTimer = setTimeout(() => { if (!this.unloaded && this.data.loading) this.setData({ loadSlow: true }); }, 800);
     this.load();
+  },
+  // 从问卷（navigateTo 子页，任务页存活）返回或后台切回：仅复位「已完成子页跳转」的
+  // 导航锁与终态阶段（否则继续填写/开始永久禁用）；定位/打卡/请求中的活动阶段不复位
+  //（app 前后台切换同样触发 onShow，误复位会造成开始流程重入）。随后重拉聚合。
+  onShow() {
+    if (this.data.navigating || this.data.phase === "navigating") {
+      this.setData({ navigating: false, ...(this.data.phase === "navigating" ? { phase: "idle", phaseText: "开始时将重新定位" } : {}) });
+    }
+    if (this.data.assignmentId && !this.data.loading) this.load();
   },
   onUnload() {
     this.unloaded = true;
@@ -64,7 +78,8 @@ Page({
     }
   },
   retry() { if (this.data.retrying) return; this.setData({ retrying: true }); this.load(); },
-  backToSchedule() { wx.switchTab({ url: "/pages/schedule/index" }); },
+  // 返回业务起点：从首页进入回首页、从日程进入回日程（不再固定日程）。
+  backToSchedule() { wx.switchTab({ url: taskOriginTab(this.source) }); },
   continueDraft() {
     const { task, assignmentId, navigating } = this.data;
     if (!task?.attempt?.id || navigating) return; // 防重复跳转
@@ -107,5 +122,16 @@ Page({
       },
     });
   },
-  openSurvey(meta) { wx.redirectTo({ url: `/pages/survey/index?assignmentId=${encodeURIComponent(meta.assignmentId)}&attemptId=${encodeURIComponent(meta.attemptId)}&questionnaireVersionId=${encodeURIComponent(meta.questionnaireVersionId)}&revision=${meta.revision}` }); },
+  // 进入问卷改用 navigateTo（原 redirectTo 会销毁任务详情，问卷的返回与系统返回手势
+  // 都只能落回 tab 页）：任务页保留在栈内作为问卷的父页，来源随参数带回问卷链路。
+  // 打开失败必须放行导航锁，否则任务页存活语义下「继续填写/开始」永久禁用。
+  openSurvey(meta) {
+    wx.navigateTo({
+      url: `/pages/survey/index?assignmentId=${encodeURIComponent(meta.assignmentId)}&attemptId=${encodeURIComponent(meta.attemptId)}&questionnaireVersionId=${encodeURIComponent(meta.questionnaireVersionId)}&revision=${meta.revision}&source=${this.source}`,
+      fail: () => {
+        if (this.unloaded) return;
+        this.setData({ navigating: false, ...(this.data.phase === "navigating" ? { phase: "idle", phaseText: "开始时将重新定位" } : {}) });
+      },
+    });
+  },
 });

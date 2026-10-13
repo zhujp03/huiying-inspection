@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { z } from "zod";
 import { API, AdminUserOptionSchema, AssignmentWriteSchema, QuestionnaireVersionRowSchema, listSchema } from "../../../../packages/contracts/index.js";
 import { request } from "../api/client.js";
+import { useAdminAuth } from "../auth/AdminAuth.jsx";
+import { useNavigationGuard } from "../router.jsx";
 
 function localValue(value) {
   if (!value) return "";
@@ -27,6 +29,7 @@ function matchOption(query, ...fields) {
 }
 
 export function AssignmentEditor({ campaign, assignment, onCancel, onSaved, run }) {
+  const { expire } = useAdminAuth();
   const editing = Boolean(assignment?.id);
   const [options, setOptions] = useState({ users: [], versions: [] });
   // 各数据源游标：null = 已到底（隐藏加载更多）；search 为选择器客户端检索关键字。
@@ -42,6 +45,11 @@ export function AssignmentEditor({ campaign, assignment, onCancel, onSaved, run 
     receiptRequired: Boolean(assignment?.receiptRequired), specialInstruction: assignment?.specialInstruction || "",
     dishRequirements: assignment?.dishRequirements?.length ? assignment.dishRequirements : [blankDish()],
   });
+  // 未保存修改守卫：与挂载时快照比较（改回原值即不脏）；保存成功后基准推进，失败保留拦截。
+  const formRef = useRef(form);
+  formRef.current = form;
+  const formBaselineRef = useRef(form);
+  useNavigationGuard(useCallback(() => JSON.stringify(formRef.current) !== JSON.stringify(formBaselineRef.current), []));
 
   useEffect(() => {
     const controller = new AbortController();
@@ -52,7 +60,11 @@ export function AssignmentEditor({ campaign, assignment, onCancel, onSaved, run 
       setOptions({ users: users.items, versions: versions.items });
       setCursors({ users: users.nextCursor ?? null, versions: versions.nextCursor ?? null });
     })
-      .catch((error) => { if (!controller.signal.aborted) setMessage(error.message); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
+      .catch((loadError) => {
+        if (controller.signal.aborted) return;
+        if (loadError.kind === "session") { expire(); return; }
+        setMessage(loadError.message);
+      }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, []);
 
@@ -99,6 +111,7 @@ export function AssignmentEditor({ campaign, assignment, onCancel, onSaved, run 
         const assignmentId = assignment?.id || saved?.id;
         if (!assignmentId) throw new Error("服务返回的分配信息不完整，请刷新后重试");
         await request(API.admin.dishRequirements(assignmentId), { method: "PUT", body: { revision: saved?.revision ?? assignment?.revision ?? 0, items: dishRequirements } });
+        formBaselineRef.current = { ...formRef.current }; // 保存成功：基准推进（失败时保留拦截）
       },
       success: editing ? "指派已保存" : "指派已创建", onSuccess: onSaved,
     });

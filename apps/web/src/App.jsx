@@ -18,6 +18,10 @@ import {
 import { loadPublicConfig } from "./services/public-config.js";
 import { getSession } from "./store/session.js";
 import { requireApprovedSession } from "./router/guards.js";
+import {
+  initNavLog, syncNavLogOnHashChange, recordNavPush, recordNavReplace, previousNavEntry, forgetCurrentNav,
+  sanitizeTaskSource,
+} from "./router/nav-history.js";
 
 const routes = pages.map((page) => page.route);
 const tabRoutes = new Set(pages.filter((page) => page.tabBar).map((page) => page.route));
@@ -29,6 +33,24 @@ const parseHash = () => {
   return { path: routes.includes(path) ? path : "/login", query: new URLSearchParams(query) };
 };
 
+// 业务身份键：业务页面在挂载时解析路由参数，同路由不同业务参数/来源的同文档跳转
+// 必须以 key 重挂载重读（否则组件持有旧任务的来源/实体）。刻意排除：
+// - revision（作答推进，组件内以服务端为准自愈，重挂载反而打扰未保存作答）；
+// - survey 的 category（视图态，由问卷页 replace 同步进 URL，不得触发重挂载）。
+const businessKeyOf = (path, query) => {
+  const source = sanitizeTaskSource(query.get("source") || "");
+  const ids = `${query.get("assignmentId") || ""}|${query.get("attemptId") || ""}|${query.get("questionnaireVersionId") || ""}`;
+  switch (path) {
+    case "/task": return `task|${query.get("assignmentId") || ""}|${source}`;
+    case "/survey": return `survey|${ids}|${source}`;
+    case "/issue": return `issue|${ids}|${query.get("questionId") || ""}|${query.get("target") || ""}|${source}|${query.get("category") || ""}`;
+    case "/dishes": return `dishes|${ids}|${source}`;
+    case "/other": return `other|${ids}|${source}`;
+    case "/location": return `location|${query.get("source") === "profile" ? "profile" : "default"}`;
+    default: return "";
+  }
+};
+
 export default function App() {
   const [{ path, query }, setRoute] = useState(parseHash);
   const [publicConfig, setPublicConfig] = useState(null);
@@ -36,7 +58,12 @@ export default function App() {
   const toastTimerRef = useRef(null);
 
   useEffect(() => {
-    const onHashChange = () => setRoute(parseHash());
+    // 应用内导航日志（按 history.state 条目身份推进/弹栈，为 back() 提供父页证据）。
+    const onHashChange = () => {
+      syncNavLogOnHashChange();
+      setRoute(parseHash());
+    };
+    initNavLog(); // 每次文档装载：真刷新延续既有链；首开/外链/跨文档往返只信当前条目
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
@@ -56,19 +83,31 @@ export default function App() {
     const next = String(to).startsWith("#") ? String(to) : `#${to}`;
     if (next === window.location.hash) return;
     window.location.hash = next;
+    recordNavPush(next); // 同步标记并入栈，抢在异步 hashchange 之前（快速连续导航不伪造邻接）
   }, []);
 
   // replace：等价小程序 redirectTo / reLaunch 的「替换当前栈顶」语义。
   const replace = useCallback((to) => {
     const target = String(to).startsWith("#") ? String(to) : `#${to}`;
     if (target !== window.location.hash) window.history.replaceState(null, "", target);
+    recordNavReplace(target);
     setRoute(parseHash());
   }, []);
 
   // PM 钉定 Web 适配点 5（inventory §4.3）：有历史则 back，否则 replace 到兜底路由。
-  const back = useCallback((fallback = "/schedule") => {
-    if (window.history.length > 1) window.history.back();
-    else replace(fallback);
+  // 修订：window.history.length 无法证明上一条是应用内父页（外部来源同样计入）。
+  // 只有应用内导航日志存在上一条、且通过 expectParent 校验（未提供校验器时仅要求
+  // 上一条存在）才 history.back()；否则 replace 到调用方给定的规范兜底路由，
+  // 绝不后退到外部页面或无关任务。
+  const back = useCallback((fallback = "/schedule", expectParent = null) => {
+    const previous = previousNavEntry();
+    const parentOk = Boolean(previous) && (typeof expectParent !== "function" || expectParent(previous));
+    if (parentOk) {
+      forgetCurrentNav();
+      window.history.back();
+      return;
+    }
+    replace(fallback);
   }, [replace]);
 
   const toast = useCallback((message) => {
@@ -102,6 +141,7 @@ export default function App() {
   const contextValue = { publicConfig, session, navigate, back, replace, toast, redirectToLogin };
 
   const pageProps = { onNavigate: navigate };
+  const businessKey = businessKeyOf(path, query);
 
   let content;
   switch (path) {
@@ -109,7 +149,7 @@ export default function App() {
       content = <LoginPage initialMode={query.get("mode") || ""} />;
       break;
     case "/location":
-      content = <LocationPage />;
+      content = <LocationPage key={businessKey} />;
       break;
     case "/profile":
       content = <ProfilePage />;
@@ -124,19 +164,25 @@ export default function App() {
       content = <SchedulePage {...pageProps} />;
       break;
     case "/task":
-      content = <TaskPage onBackToSchedule={() => navigate("/schedule")} {...pageProps} />;
+      // 返回起点由 TaskPage 按 ?source= 自证（home/schedule 白名单），不再硬编码日程。
+      // 业务身份键：同文档切换任务/来源时重挂载重读参数。
+      content = <TaskPage key={businessKey} {...pageProps} />;
       break;
     case "/survey":
-      content = <SurveyPage {...pageProps} />;
+      // category 不参与业务键（不得因视图态重挂载）；作为路由属性传入，由页面消费
+      // 同文档查询变化（浏览器前进后退/外部跳转），见 SurveyPage routeCategory 效应。
+      content = <SurveyPage key={businessKey} routeCategory={query.get("category") || ""} {...pageProps} />;
       break;
+    // issue/dishes/other 的返回均由页面按「同任务父页证据」自证：
+    // 有同任务父页才 history.back，否则 replace 携全量业务参数的规范父页。
     case "/issue":
-      content = <IssuePage onCancel={() => back("/survey")} {...pageProps} />;
+      content = <IssuePage key={businessKey} {...pageProps} />;
       break;
     case "/dishes":
-      content = <DishesPage onBack={() => navigate("/survey?category=product")} {...pageProps} />;
+      content = <DishesPage key={businessKey} {...pageProps} />;
       break;
     case "/other":
-      content = <OtherPage onBack={() => navigate("/dishes")} onDone={() => navigate("/schedule")} {...pageProps} />;
+      content = <OtherPage key={businessKey} {...pageProps} />;
       break;
     default:
       content = <LoginPage initialMode="" />;

@@ -117,7 +117,8 @@ export function HomePage() {
     if (navigatingRef.current || !taskRef.current) return; // 防重复跳转
     navigatingRef.current = true;
     setNavigating(true);
-    navigate(`/task?assignmentId=${encodeURIComponent(taskRef.current.id)}`); // 成功即整页切换（组件卸载，navigating 随之消亡）
+    // source=home：任务页返回键据此回到首页（而非固定日程）。
+    navigate(`/task?assignmentId=${encodeURIComponent(taskRef.current.id)}&source=home`); // 成功即整页切换（组件卸载，navigating 随之消亡）
   };
 
   const goSchedule = () => navigate("/schedule");

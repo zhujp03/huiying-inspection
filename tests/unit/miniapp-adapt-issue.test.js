@@ -48,12 +48,19 @@ function installWxRouter(routes = []) {
       else options.success({ statusCode: route.status, data: route.body });
     },
     navigateBack: vi.fn(),
+    redirectTo: vi.fn(),
     showToast: vi.fn(),
     chooseMedia: vi.fn(),
     getRecorderManager: () => ({ onStop: vi.fn(), start: vi.fn(), stop: vi.fn() }),
     createInnerAudioContext: vi.fn(() => ({ play: vi.fn(), destroy: vi.fn() })),
     uploadFile: vi.fn(),
   };
+  // 正常链路（问卷 navigateTo 问题页）的页面栈：保存/取消后原生返回问卷。
+  // 同任务校验依赖父页 route 与业务 ID；fallbackUrl 兜底由 redirectTo 承接。
+  globalThis.getCurrentPages = () => [
+    { route: "pages/survey/index", options: { assignmentId: "assignment-1", attemptId: "attempt-1", questionnaireVersionId: "qv-1", revision: "2" } },
+    { route: "pages/issue/index", options: {} },
+  ];
   return requests;
 }
 function installApp() {
@@ -64,7 +71,7 @@ const countCancel = (requests) => requests.filter((r) => r.method === "POST" && 
 // 每个用例用唯一静态 query 导入页面模块（vite 动态 import 需静态可分析，且 query 不同才能重新执行 Page()）。
 
 describe("问题页编辑会话回读恢复（断点续写）", () => {
-  afterEach(() => { delete globalThis.wx; delete globalThis.getApp; delete globalThis.Page; });
+  afterEach(() => { delete globalThis.wx; delete globalThis.getApp; delete globalThis.Page; delete globalThis.getCurrentPages; });
 
   it("恢复场景：既有 open 会话优先，remark 取会话备注，附件按类型回填含回读 active 附件", async () => {
     let pageConfig;
@@ -111,7 +118,7 @@ describe("问题页编辑会话回读恢复（断点续写）", () => {
 });
 
 describe("问题页保存计数口径（unscored 证据判定）", () => {
-  afterEach(() => { delete globalThis.wx; delete globalThis.getApp; delete globalThis.Page; });
+  afterEach(() => { delete globalThis.wx; delete globalThis.getApp; delete globalThis.Page; delete globalThis.getCurrentPages; });
 
   it("active（回读）与 staged_ready（本会话）附件均通过校验，发起 PATCH+confirm 并返回", async () => {
     let pageConfig;
@@ -175,7 +182,7 @@ describe("问题页保存计数口径（unscored 证据判定）", () => {
 });
 
 describe("问题页返回键尽力取消编辑会话", () => {
-  afterEach(() => { delete globalThis.wx; delete globalThis.getApp; delete globalThis.Page; });
+  afterEach(() => { delete globalThis.wx; delete globalThis.getApp; delete globalThis.Page; delete globalThis.getCurrentPages; });
 
   it("未 settled 时 onUnload 发出 cancel 请求，失败（409）不抛异常", async () => {
     let pageConfig;

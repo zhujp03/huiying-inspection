@@ -278,6 +278,17 @@ export function registerBatch2Routes(app, { pool, config }) {
     return { items, nextCursor: result.rows.length > query.limit ? items.at(-1).id : null };
   });
 
+  // 门店详情（Admin 深链接/刷新编辑页用）：与列表同权限、同数据范围断言（范围外统一 403，不泄漏存在性），
+  // 行结构与列表/写入一致（storeRow），供前端编辑器直接回填。
+  app.get("/api/admin/stores/:id", async (request) => {
+    const session = await requireStoreAdmin(request);
+    const id = SecureUuidSchema.parse(request.params.id);
+    if (!hasFullScope(session.scopes)) await assertStoreCovered(pool, session.scopes, id, scopeForbidden);
+    const result = await pool.query(`${selectStore} WHERE s.id = $1`, [id]);
+    if (!result.rows[0]) throw app.jundeAuth.businessError("STORE_NOT_FOUND", "门店不存在或已被删除", 404);
+    return { store: row(result.rows[0]) };
+  });
+
   const requireActiveBrand = async (brandId) => {
     const brand = await pool.query("SELECT id, active FROM brands WHERE id=$1", [brandId]);
     if (!brand.rows[0]) throw app.jundeAuth.businessError("BRAND_NOT_FOUND", "品牌不存在，请先在品牌列表中创建", 422);

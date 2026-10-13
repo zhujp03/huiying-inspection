@@ -60,12 +60,14 @@ async function createAdminApp(storage) {
   return { ...setup, app, headers: { cookie: login.headers["set-cookie"], "x-csrf-token": login.json().csrfToken, "idempotency-key": uuidv7() } };
 }
 
-// 一条最小提交（导出主链路的行来源），约束同批次二：attempt/assignment/campaign 成组
+// 一条最小提交（导出主链路的行来源），约束同批次二：attempt/assignment/campaign 成组。
+// 单份问卷导出要求逐题得分可安全对账（分类合计必须与 total/max 一致），这里补一题明细行。
 async function insertSubmission({ storeId, versionId, userId }, index) {
   const campaignId = uuidv7();
   const assignmentId = uuidv7();
   const attemptId = uuidv7();
   const submissionId = uuidv7();
+  const questionId = uuidv7();
   const startsAt = new Date(Date.now() - 3_600_000);
   const dueAt = new Date(Date.now() + 3_600_000);
   await pool.query("INSERT INTO audit_campaigns (id,business_no,name,store_id,starts_at,due_at,questionnaire_deadline_at,status,created_by) VALUES ($1,$2,'测试任务',$3,$4,$5,$5,'draft',$6)", [campaignId, `C-EXP-${index}`, storeId, startsAt, dueAt, userId]);
@@ -73,6 +75,9 @@ async function insertSubmission({ storeId, versionId, userId }, index) {
   await pool.query("INSERT INTO survey_attempts (id,assignment_id,questionnaire_version_id,mode,status) VALUES ($1,$2,$3,'secret','draft')", [attemptId, assignmentId, versionId]);
   await pool.query(`INSERT INTO submission_versions (id,attempt_id,assignment_id,campaign_id,questionnaire_version_id,submitted_by,submitted_at,total_score,max_score,issue_count,answer_snapshot_json,dish_snapshot_json,other_snapshot_json,evidence_snapshot_json,receipt_snapshot_json,ocr_snapshot_json,integrity_hash)
     VALUES ($1,$2,$3,$4,$5,$6,now(),80,100,1,'[]','[]','{}','[]','[]','[]',$7)`, [submissionId, attemptId, assignmentId, campaignId, versionId, userId, "a".repeat(64)]);
+  await pool.query(`INSERT INTO questions (id,version_id,question_key,question_number,category,text,max_score,sort_order) VALUES ($1,$2,'exp-key',$3,'product','测试任务评估题',100,$3)`, [questionId, versionId, index + 1]);
+  await pool.query(`INSERT INTO submission_question_scores (id,submission_id,question_id,question_key,question_number,question_text,category,answer,awarded_score,max_score)
+    VALUES ($1,$2,$3,'exp-key',$4,'测试任务评估题','product','scored',80,100)`, [uuidv7(), submissionId, questionId, index + 1]);
   return submissionId;
 }
 
@@ -206,8 +211,16 @@ describe.sequential("PostgreSQL export expiry", () => {
     const reexport = await app.inject({ method: "POST", url: `/api/admin/exports/${expiredId}/reexport`, headers });
     expect(reexport.statusCode, reexport.body).toBe(202);
     const newJobId = reexport.json().id;
+    // 存量「submissions+submissionId」任务 reexport 升级为单份问卷导出，submissionId 原样保留
+    expect(reexport.json().fileName).toBe("单份问卷导出");
+    const kindRow = await pool.query("SELECT job_kind,filters_json FROM export_jobs WHERE id=$1", [newJobId]);
+    expect(kindRow.rows[0].job_kind).toBe("submission");
+    expect(kindRow.rows[0].filters_json.submissionId).toBe(submissionId);
     expect(await runExportJobs({ pool, cos })).toMatchObject({ claimed: 1, completed: 1 });
-    expect(cos.uploaded[0].body.toString("utf8")).toContain("测试任务");
+    // 单份导出产物是真实 xlsx：重读工作簿校验问卷名进入评估表标题
+    const { workbooksOf } = await import("../helpers/export-workbook.mjs");
+    const [workbook] = await workbooksOf(cos);
+    expect(workbook.getWorksheet("暗访评估表").getCell("A1").value).toContain("测试题库");
     const detail = await app.inject({ method: "GET", url: `/api/admin/exports/${newJobId}`, headers });
     expect(detail.statusCode, detail.body).toBe(200);
     expect(detail.json()).toMatchObject({ status: "succeeded" });

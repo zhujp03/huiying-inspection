@@ -1,6 +1,7 @@
 import { getQuestionnaire, saveAnswer } from "../../services/api.js";
 import { markDraftSynced, peekDraft, saveDraft as saveLocalDraft } from "../../store/survey.js";
 import { mergeSurveyAnswers } from "../../store/survey-merge.js";
+import { sanitizeSource } from "../../utils/navigation.js";
 import { firstIncompleteQuestion } from "../../utils/business.js";
 
 // 分类由服务端动态下发（管理员可扩展）；此处仅作接口异常时的兜底展示。
@@ -13,6 +14,8 @@ Page({
   async onLoad(options) {
     if (!options.assignmentId || !options.attemptId || !options.questionnaireVersionId) { this.setData({ loading: false, error: "未找到问卷，请从任务详情重新进入" }); return; }
     this.routeMeta = { assignmentId: options.assignmentId, attemptId: options.attemptId, questionnaireVersionId: options.questionnaireVersionId, revision: Number(options.revision || 0) };
+    // 任务链来源（任务详情写入）：只读回跳任务详情时原样带回，任务页再按来源返回首页/日程。
+    this.source = sanitizeSource(options.source);
     // 路由指定的分类要等服务端分类列表返回后再校验（分类可由管理员扩展）
     this.pendingCategory = options.category || "";
     await this.load();
@@ -31,7 +34,7 @@ Page({
     this.setData({ loading: true, error: "" });
     try {
       const result = await getQuestionnaire(this.routeMeta.assignmentId);
-      if (result.attempt.status === "submitted") { wx.showToast({ title: "该任务已提交，不能回看问卷内容", icon: "none" }); wx.redirectTo({ url: `/pages/task/index?assignmentId=${encodeURIComponent(this.routeMeta.assignmentId)}` }); return; }
+      if (result.attempt.status === "submitted") { wx.showToast({ title: "该任务已提交，不能回看问卷内容", icon: "none" }); wx.redirectTo({ url: `/pages/task/index?assignmentId=${encodeURIComponent(this.routeMeta.assignmentId)}&source=${this.source}` }); return; }
       if (result.attempt.id !== this.routeMeta.attemptId || result.questionnaireVersion.id !== this.routeMeta.questionnaireVersionId) throw new Error("问卷信息已更新，请从任务详情重新进入");
       const meta = { ...this.routeMeta, revision: result.attempt.revision };
       const serverAnswers = result.answers || {};
@@ -96,11 +99,13 @@ Page({
     if (!question?.isScoreWipe) { this.openIssue(id, "unscored"); return; }
     wx.showModal({ title: "分数清零确认", content: "确认存在该严重问题？确认后本类目全部题目不得分。", confirmText: "确认", success: (result) => { if (result.confirm) this.openIssue(id, "unscored"); } });
   },
-  openIssue(questionId, target) { const meta = this.routeMeta; wx.navigateTo({ url: `/pages/issue/index?assignmentId=${encodeURIComponent(meta.assignmentId)}&attemptId=${encodeURIComponent(meta.attemptId)}&questionnaireVersionId=${encodeURIComponent(meta.questionnaireVersionId)}&revision=${meta.revision}&questionId=${encodeURIComponent(questionId)}&target=${target}` }); },
+  // 进问题页带来源与当前分类：原生返回时问卄件仍存活上下文不丢；异常路径（父页缺失）
+  // redirectTo 重建问卷时以 source/category 参数还原来源链与选中分类。均为路由参数，不进草稿身份。
+  openIssue(questionId, target) { const meta = this.routeMeta; wx.navigateTo({ url: `/pages/issue/index?assignmentId=${encodeURIComponent(meta.assignmentId)}&attemptId=${encodeURIComponent(meta.attemptId)}&questionnaireVersionId=${encodeURIComponent(meta.questionnaireVersionId)}&revision=${meta.revision}&questionId=${encodeURIComponent(questionId)}&target=${target}&source=${this.source}&category=${encodeURIComponent(this.data.category)}` }); },
   dishes() {
     const missing = firstIncompleteQuestion(this.data.questions, this.data.answers);
     if (missing) { this.setData({ category: missing.category }); this.project(); wx.showToast({ title: `请先完成第 ${missing.number} 题`, icon: "none" }); return; }
     const meta = this.routeMeta;
-    wx.navigateTo({ url: `/pages/dishes/index?assignmentId=${encodeURIComponent(meta.assignmentId)}&attemptId=${encodeURIComponent(meta.attemptId)}&questionnaireVersionId=${encodeURIComponent(meta.questionnaireVersionId)}&revision=${meta.revision}` });
+    wx.navigateTo({ url: `/pages/dishes/index?assignmentId=${encodeURIComponent(meta.assignmentId)}&attemptId=${encodeURIComponent(meta.attemptId)}&questionnaireVersionId=${encodeURIComponent(meta.questionnaireVersionId)}&revision=${meta.revision}&source=${this.source}` });
   },
 });

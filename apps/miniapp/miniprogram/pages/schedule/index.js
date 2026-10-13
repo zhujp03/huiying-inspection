@@ -64,8 +64,9 @@ Page({
     const id = event.currentTarget.dataset.id;
     if (this.data.navigatingId) return; // 防重复：跳转期间禁止再次触发
     this.setData({ navigatingId: id });
+    // source=schedule：任务页返回键据此回到日程。
     wx.navigateTo({
-      url: `/pages/task/index?assignmentId=${encodeURIComponent(id)}`,
+      url: `/pages/task/index?assignmentId=${encodeURIComponent(id)}&source=schedule`,
       complete: () => this.setData({ navigatingId: "" }),
     });
   },

@@ -13,6 +13,7 @@ import {
 import { useApp } from "./app-context.jsx";
 import { checkIn, getAssignment, startAssignment } from "../services/assignments.js";
 import { getCurrentLocation } from "../adapters/location.js";
+import { navEntryIsPage, sanitizeTaskSource } from "../router/nav-history.js";
 import {
   formatBudgetLabel, formatSubmittedAt, formatTimeRange, mapAssignmentStatus,
 } from "../utils/presentation.js";
@@ -44,8 +45,8 @@ function routeQuery() {
   return new URLSearchParams(raw.split("?")[1] || "");
 }
 
-export function TaskPage({ onBackToSchedule }) {
-  const { navigate, replace, toast, redirectToLogin } = useApp();
+export function TaskPage() {
+  const { back, navigate, toast, redirectToLogin } = useApp();
   const [task, setTask] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadSlow, setLoadSlow] = useState(false);
@@ -58,6 +59,10 @@ export function TaskPage({ onBackToSchedule }) {
   const [navigating, setNavigating] = useState(false);
   // 异步闭包内读取最新值（phase/task 用同步镜像 ref）；unloaded 后异步回调不再写状态（R30）。
   const assignmentIdRef = useRef("");
+  // 返回起点（?source=，白名单 home/schedule；缺省/非法 → schedule）：
+  // 从首页进入返回首页、从日程进入返回日程，刷新后随 URL 保留。
+  const sourceRef = useRef("schedule");
+  const [originLabel, setOriginLabel] = useState("返回日程");
   const taskRef = useRef(null);
   const phaseRef = useRef("idle");
   const navigatingRef = useRef(false);
@@ -120,6 +125,10 @@ export function TaskPage({ onBackToSchedule }) {
     unloadedRef.current = false;
     const params = routeQuery();
     const id = params.get("assignmentId") || "";
+    // 来源白名单化：非法值落回日程，绝不把用户带出应用。
+    const source = sanitizeTaskSource(params.get("source") || "");
+    sourceRef.current = source;
+    setOriginLabel(source === "home" ? "返回首页" : "返回日程");
     if (!id) {
       setLoading(false);
       loadingRef.current = false;
@@ -151,11 +160,17 @@ export function TaskPage({ onBackToSchedule }) {
     load(assignmentIdRef.current);
   };
 
-  const backToSchedule = onBackToSchedule || (() => navigate("/schedule"));
+  // 返回业务起点（首页或日程，随 ?source=）：上一条应用内历史确为该起点才原生后退
+  // （不产生 bounce 条目，浏览器后退链保持 home→task→home 一致）；否则 replace 兜底。
+  const backToOrigin = () => {
+    const originPath = sourceRef.current === "home" ? "/home" : "/schedule";
+    back(originPath, (previous) => navEntryIsPage(previous, originPath));
+  };
 
-  // openSurvey（等价 miniapp js:109，redirectTo 4 参）。
+  // openSurvey（等价 miniapp navigateTo，4 参 + source）：压栈保留任务为问卷的父页
+  // （replace 会抹掉任务条目，浏览器后退会跳过任务详情）。source 不参与草稿身份与 API 契约。
   const openSurvey = (meta) => {
-    replace(`/survey?assignmentId=${encodeURIComponent(meta.assignmentId)}&attemptId=${encodeURIComponent(meta.attemptId)}&questionnaireVersionId=${encodeURIComponent(meta.questionnaireVersionId)}&revision=${meta.revision}`);
+    navigate(`/survey?assignmentId=${encodeURIComponent(meta.assignmentId)}&attemptId=${encodeURIComponent(meta.attemptId)}&questionnaireVersionId=${encodeURIComponent(meta.questionnaireVersionId)}&revision=${meta.revision}&source=${sourceRef.current}`);
   };
 
   // 继续填写（R29）：有 attempt 直接带参进问卷，跳过打卡；navigating 防重。
@@ -251,7 +266,7 @@ export function TaskPage({ onBackToSchedule }) {
 
   return (
     <div className="app-page app-page--flat" data-page="task" data-state={viewState} data-phase={phase}>
-      <PageNav title="任务详情" onBack={backToSchedule} />
+      <PageNav title="任务详情" onBack={backToOrigin} />
 
       {loading ? (
         /* 首载骨架 + 800ms 慢提示（§1.6 a.1 / R30） */
@@ -268,7 +283,7 @@ export function TaskPage({ onBackToSchedule }) {
             message={error}
             onRetry={retry}
             retryLabel="重新加载"
-            secondary={<Button variant="link" onClick={backToSchedule}>返回日程</Button>}
+            secondary={<Button variant="link" onClick={backToOrigin}>{originLabel}</Button>}
           />
         </Card>
       ) : task ? (
@@ -291,14 +306,14 @@ export function TaskPage({ onBackToSchedule }) {
                 <div style={{ marginTop: 6 }}><Muted>如需恢复执行，请联系管理员。</Muted></div>
               )}
               <div style={{ marginTop: 12 }}>
-                <Button variant="outline" block onClick={backToSchedule}>返回日程</Button>
+                <Button variant="outline" block onClick={backToOrigin}>{originLabel}</Button>
               </div>
             </Card>
           ) : task.status === "overdue" ? (
             <Card>
               <div style={{ fontWeight: 700 }}>任务已逾期</div>
               <div style={{ marginTop: 12 }}>
-                <Button variant="outline" block onClick={backToSchedule}>返回日程</Button>
+                <Button variant="outline" block onClick={backToOrigin}>{originLabel}</Button>
               </div>
             </Card>
           ) : task.taskType === "overt" ? (

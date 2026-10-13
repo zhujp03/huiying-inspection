@@ -648,6 +648,17 @@
           }
         }
       },
+      "get": {
+        "operationId": "admin_storeDetail",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      },
       "patch": {
         "operationId": "admin_store",
         "responses": {
@@ -726,6 +737,17 @@
     "/api/admin/users/{id}": {
       "delete": {
         "operationId": "admin_deleteUser",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      },
+      "get": {
+        "operationId": "admin_userDetail",
         "responses": {
           "200": {
             "description": "Success"

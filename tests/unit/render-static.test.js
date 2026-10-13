@@ -66,15 +66,49 @@ describe.sequential("render static hosting", () => {
     await app.close();
   });
 
-  it("never serves index for missing admin assets or unknown admin paths", async () => {
+  // Admin 回退规则：无扩展名的客户端页面路径回退 index（未知页面由前端渲染友好 404 页）；
+  // 带扩展名的缺失资源严格 404（构建缺口不遮掩），路径穿越/编码逃逸严格 404。
+  it("serves the admin app shell for extension-less page paths but never for missing assets or traversal", async () => {
     const app = await buildWithDists();
     const missingAsset = await app.inject({ method: "GET", url: "/admin/assets/missing.js" });
     expect(missingAsset.statusCode).toBe(404);
     expect(missingAsset.body).not.toContain("admin-panel-marker");
 
-    const unknownPath = await app.inject({ method: "GET", url: "/admin/some/where" });
-    expect(unknownPath.statusCode).toBe(404);
-    expect(unknownPath.body).not.toContain("admin-panel-marker");
+    // 未知页面路径：应用壳可达，前端路由负责渲染友好 404（资源文件不受影响）。
+    const unknownPage = await app.inject({ method: "GET", url: "/admin/some/where" });
+    expect(unknownPage.statusCode).toBe(200);
+    expect(unknownPage.headers["content-type"]).toContain("text/html");
+    expect(unknownPage.body).toContain("admin-panel-marker");
+
+    for (const url of ["/admin/assets/missing.css", "/admin/missing.txt", "/admin/assets/missing", "/admin/..%2F..%2Fsecret.txt", "/admin/%2e%2e/secret.txt"]) {
+      const response = await app.inject({ method: "GET", url });
+      expect(response.statusCode, url).toBe(404);
+      expect(response.body, url).not.toContain("admin-panel-marker");
+    }
+    await app.close();
+  });
+
+  // Admin 客户端路由深链接回退：带 ID 的详情/编辑屏与全部已知路由命中 index；POST 不回退。
+  it("falls back to the admin index for real client route paths only", async () => {
+    const app = await buildWithDists();
+    const deepLinks = [
+      "/admin/overview", "/admin/dashboard/", "/admin/campaigns", "/admin/campaigns/new",
+      "/admin/campaigns/campaign-one", "/admin/campaigns/campaign-one/edit", "/admin/campaigns/campaign-one/assignments/assignment-one/edit",
+      "/admin/users", "/admin/users/new", "/admin/users/user-inspector-one/edit",
+      "/admin/stores/store-one/edit", "/admin/questionnaires/version-one", "/admin/questionnaires/new",
+      "/admin/submissions/submission-one", "/admin/exports", "/admin/audits",
+    ];
+    for (const url of deepLinks) {
+      const response = await app.inject({ method: "GET", url });
+      expect(response.statusCode, url).toBe(200);
+      expect(response.headers["content-type"], url).toContain("text/html");
+      expect(response.headers["cache-control"], url).toBe("no-cache");
+      expect(response.body, url).toContain("admin-panel-marker");
+    }
+    // 非 GET 方法不回退（保持 JSON 404）。
+    const post = await app.inject({ method: "POST", url: "/admin/overview", payload: {} });
+    expect(post.statusCode).toBe(404);
+    expect(post.json().error.code).toBe("ROUTE_NOT_FOUND");
     await app.close();
   });
 

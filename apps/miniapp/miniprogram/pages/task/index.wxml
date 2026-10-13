@@ -19,7 +19,7 @@
     <text class="empty-title">暂时无法打开任务</text>
     <text class="inline-error">{{error}}</text>
     <button class="primary" loading="{{retrying}}" disabled="{{retrying}}" bindtap="retry">重新加载</button>
-    <button class="btn-outline" bindtap="backToSchedule">返回日程</button>
+    <button class="btn-outline" bindtap="backToSchedule">{{originLabel}}</button>
   </view>
 
   <!-- 任务详情 -->
@@ -66,13 +66,13 @@
       <text class="cancelled-title">任务已取消</text>
       <text wx:if="{{task.cancelReason}}" class="cancelled-reason">取消原因：{{task.cancelReason}}</text>
       <text wx:else class="muted">如需恢复执行，请联系管理员。</text>
-      <button class="btn-outline" bindtap="backToSchedule">返回日程</button>
+      <button class="btn-outline" bindtap="backToSchedule">{{originLabel}}</button>
     </view>
 
     <!-- 逾期：明显警告区，不提供开始 -->
     <view wx:elif="{{task.status === 'overdue'}}" class="surface-card task-overdue">
       <text class="overdue-title">任务已逾期</text>
-      <button class="btn-outline" bindtap="backToSchedule">返回日程</button>
+      <button class="btn-outline" bindtap="backToSchedule">{{originLabel}}</button>
     </view>
 
     <!-- 明察未启用 -->

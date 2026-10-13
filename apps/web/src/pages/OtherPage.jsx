@@ -16,6 +16,7 @@ import { getDraft, saveOtherRecords, submitQuestionnaire } from "../services/dra
 import { clearDraft, getDraft as getLocalDraft, markDraftSynced, saveDraft } from "../store/survey.js";
 import { secureUuid } from "../utils/business.js";
 import { formatSubmittedAt } from "../utils/presentation.js";
+import { navEntryIsPage, sanitizeTaskSource } from "../router/nav-history.js";
 
 // hash 路由查询参数（Web 适配：页面自读，等价 miniapp onLoad(options)）。
 function routeQuery() {
@@ -37,6 +38,8 @@ export function OtherPage() {
   // 异步闭包内读取最新值（等价 miniapp this.data）；卸载后异步回调不再写状态。
   const latestRef = useRef({});
   const routeMetaRef = useRef(null);
+  // 任务链来源（?source=，菜品页写入；只读回跳任务详情时原样带回）。
+  const sourceRef = useRef("");
   const assignmentRevisionRef = useRef(null);
   const submitTokenRef = useRef(null);
   const pollTimerRef = useRef(null);
@@ -67,10 +70,10 @@ export function OtherPage() {
     try {
       const assignment = await getAssignment(routeMetaRef.current.assignmentId);
       if (unloadedRef.current) return;
-      // R31：任务已提交终态 → toast + 任务详情。
+      // R31：任务已提交终态 → toast + 任务详情（保留任务来源）。
       if (assignment.status === "submitted") {
         toast("该任务已提交");
-        replace(`/task?assignmentId=${encodeURIComponent(routeMetaRef.current.assignmentId)}`);
+        replace(`/task?assignmentId=${encodeURIComponent(routeMetaRef.current.assignmentId)}&source=${sourceRef.current}`);
         return;
       }
       const result = await getDraft(routeMetaRef.current.attemptId);
@@ -82,7 +85,7 @@ export function OtherPage() {
       // R76：提交中/已提交终态关闭编辑（按状态区分 toast 文案）。
       if (["submitting", "processing", "submitted"].includes(result.attempt.status)) {
         toast(result.attempt.status === "submitted" ? "该任务已提交" : "问卷正在提交");
-        replace(`/task?assignmentId=${encodeURIComponent(routeMetaRef.current.assignmentId)}`);
+        replace(`/task?assignmentId=${encodeURIComponent(routeMetaRef.current.assignmentId)}&source=${sourceRef.current}`);
         return;
       }
       const nextMeta = { ...routeMetaRef.current, revision: result.attempt.revision };
@@ -199,7 +202,7 @@ export function OtherPage() {
       clearDraft(routeMetaRef.current);
       submitTokenRef.current = null;
       toast("该任务已提交");
-      replace(`/task?assignmentId=${encodeURIComponent(routeMetaRef.current.assignmentId)}`);
+      replace(`/task?assignmentId=${encodeURIComponent(routeMetaRef.current.assignmentId)}&source=${sourceRef.current}`);
       return;
     }
     if (submitError?.retryable === true) {
@@ -303,9 +306,12 @@ export function OtherPage() {
     if (locked()) return;
     const saved = await saveRecords();
     if (!saved) return;
-    // §4.3 返回栈兜底：有历史则 back，否则 replace 到菜品页。
-    if (window.history.length > 1) back(routeUrl("/dishes", routeMetaRef.current));
-    else replace(routeUrl("/dishes", routeMetaRef.current));
+    // §4.3 返回栈兜底（修订）：仅当上一条应用内路由确为同任务菜品页才 history.back；
+    // 外部/无关历史不算证据，此时 replace 到携全量参数与任务来源的规范菜品页。
+    back(`${routeUrl("/dishes", routeMetaRef.current)}&source=${sourceRef.current}`, (previous) => navEntryIsPage(previous, "/dishes", {
+      assignmentId: routeMetaRef.current.assignmentId,
+      attemptId: routeMetaRef.current.attemptId,
+    }));
   };
 
   const confirm = async () => {
@@ -350,6 +356,7 @@ export function OtherPage() {
       questionnaireVersionId,
       revision: Number(params.get("revision") || 0),
     };
+    sourceRef.current = sanitizeTaskSource(params.get("source") || "");
     load();
     return () => {
       // onUnload 等价：清轮询定时器；未提交且脏时持久化本地。

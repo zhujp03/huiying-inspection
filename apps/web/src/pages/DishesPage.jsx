@@ -38,6 +38,7 @@ import {
 import { firstIncompleteQuestion, isBlankExtraDish, secureUuid, validateDish } from "../utils/business.js";
 import { isReceiptOcrEnabled } from "../utils/feature-flags.js";
 import { createCancelledUploads } from "../utils/upload-queue.js";
+import { navEntryIsPage, sanitizeTaskSource } from "../router/nav-history.js";
 
 const ALL_STATUSES = [
   { value: "ordered", label: "已点" }, { value: "substituted", label: "替代" },
@@ -82,6 +83,8 @@ export function DishesPage() {
   // 异步闭包内读取最新值（等价 miniapp this.data）；卸载后异步回调不再写状态。
   const latestRef = useRef({});
   const routeMetaRef = useRef(null);
+  // 任务链来源（?source=，问卷写入；只读回跳任务详情时原样带回）。
+  const sourceRef = useRef("");
   const recoveryRef = useRef({ jobId: null, applyKey: null, appliedJobId: null });
   const dirtyRef = useRef(false);
   const unloadedRef = useRef(false);
@@ -181,15 +184,19 @@ export function DishesPage() {
   // ---------- 导航（等价 miniapp routeToSurvey/closeSubmitted/routeUrl） ----------
 
   const routeToSurvey = (forceReplace) => {
-    const url = `${routeUrl("/survey", routeMetaRef.current)}&category=product`;
-    // §4.3 返回栈兜底：有历史则 back，无历史则 replace。
-    if (!forceReplace && window.history.length > 1) back(url);
+    const url = `${routeUrl("/survey", routeMetaRef.current)}&category=product&source=${sourceRef.current}`;
+    // §4.3 返回栈兜底（修订）：仅当上一条应用内路由确为同任务问卷时才 history.back；
+    // 外部/无关历史不算证据，此时 replace 到携全量参数的规范问卷页，绝不后退出应用。
+    if (!forceReplace) back(url, (previous) => navEntryIsPage(previous, "/survey", {
+      assignmentId: routeMetaRef.current.assignmentId,
+      attemptId: routeMetaRef.current.attemptId,
+    }));
     else replace(url);
   };
 
   const closeSubmitted = () => {
     toast("该问卷已关闭编辑");
-    replace(`/task?assignmentId=${encodeURIComponent(routeMetaRef.current.assignmentId)}`);
+    replace(`/task?assignmentId=${encodeURIComponent(routeMetaRef.current.assignmentId)}&source=${sourceRef.current}`);
   };
 
   const stopOcrPolling = () => {
@@ -770,7 +777,7 @@ export function DishesPage() {
       markDraftSynced(routeMetaRef.current, result.revision);
       dirtyRef.current = false;
       if (destination === "survey") routeToSurvey(false);
-      else navigate(routeUrl("/other", routeMetaRef.current));
+      else navigate(`${routeUrl("/other", routeMetaRef.current)}&source=${sourceRef.current}`);
     } catch (saveError) {
       if (unloadedRef.current) return;
       if (handleSessionError(saveError)) return;
@@ -838,6 +845,7 @@ export function DishesPage() {
       questionnaireVersionId,
       revision: Number(params.get("revision") || 0),
     };
+    sourceRef.current = sanitizeTaskSource(params.get("source") || "");
     pageVisibleRef.current = true;
     load();
     return () => {

@@ -10,7 +10,8 @@
 //    播完即 pause+置空（用完即停），组件卸载清理。
 // 3) 选图：隐藏 <input type="file" accept="image/jpeg,image/png">（multiple 按余量）；
 //    类型判定用 file.type/name 后缀（png→image/png 否则 image/jpeg）。
-// 4) wx.showModal 类确认（本页无）；wx.navigateBack → context.back（有历史回退，无历史 replace 兜底）。
+// 4) wx.showModal 类确认（本页无）；wx.navigateBack → context.back（仅当上一条应用内
+//    路由确为同任务问卷才回退，否则 replace 携全量参数的规范问卷页）。
 // 6) kind=session 的 BusinessError → redirectToLogin()。
 import React, { useEffect, useRef, useState } from "react";
 import { Button, Card, Muted, PageNav, SectionHeading, TextArea } from "../design/components.jsx";
@@ -22,6 +23,8 @@ import {
 } from "../services/drafts.js";
 import { uploadToSignedTarget } from "../services/uploads.js";
 import { getSession } from "../store/session.js";
+import { recallSurveyCategory } from "../store/survey-view.js";
+import { navEntryIsPage, sanitizeTaskSource } from "../router/nav-history.js";
 import { endpointRegistry } from "../../../../packages/contracts/endpoint-registry.js";
 import { secureUuid } from "../utils/business.js";
 
@@ -73,8 +76,8 @@ function routeQuery() {
   return new URLSearchParams(raw.split("?")[1] || "");
 }
 
-export function IssuePage({ onCancel }) {
-  const { back, toast, redirectToLogin } = useApp();
+export function IssuePage() {
+  const { back, replace, toast, redirectToLogin } = useApp();
   const [question, setQuestion] = useState(null);
   const [editSessionId, setEditSessionId] = useState("");
   const [target, setTarget] = useState("unscored");
@@ -94,6 +97,9 @@ export function IssuePage({ onCancel }) {
   const remarkRef = useRef("");
   const savingRef = useRef(false);
   const unloadedRef = useRef(false);
+  // 任务链来源与路由指定分类（问卷写入）：兜底返回问卷时保持来源链与选中分类。
+  const sourceRef = useRef("");
+  const categoryParamRef = useRef("");
   // 会话清理（T4）：sessionClosedRef=会话已确认/已取消（卸载无需再取消）；pagehideRef=文档正在卸载
   // （刷新/关页，setTimeout 不可靠须同步直发）；leaveCancelTimerRef=SPA 路由离开的延迟取消定时器。
   const sessionClosedRef = useRef(false);
@@ -117,9 +123,21 @@ export function IssuePage({ onCancel }) {
 
   latestRef.current = { question, images, audios, remark, target };
 
+  // 返回问卷：上一条应用内路由确为同任务问卷才 history.back（问卄件仍持有全部上下文）；
+  // 否则（外部历史/直达进入）replace 到携全量业务参数、任务来源与分类（路由参数优先于
+  // 会话记忆）的规范问卷 URL，绝不后退到外部页面或缺失参数的 /survey。
   const goBack = () => {
-    if (onCancel) onCancel();
-    else back("/survey");
+    const meta = routeMetaRef.current;
+    if (!meta) {
+      replace("/home");
+      return;
+    }
+    const category = categoryParamRef.current || recallSurveyCategory(meta.attemptId);
+    const fallback = `/survey?assignmentId=${encodeURIComponent(meta.assignmentId)}&attemptId=${encodeURIComponent(meta.attemptId)}&questionnaireVersionId=${encodeURIComponent(meta.questionnaireVersionId)}&revision=${meta.revision}&source=${sourceRef.current}${category ? `&category=${encodeURIComponent(category)}` : ""}`;
+    back(fallback, (previous) => navEntryIsPage(previous, "/survey", {
+      assignmentId: meta.assignmentId,
+      attemptId: meta.attemptId,
+    }));
   };
 
   const appendItem = (type, item) => {
@@ -503,6 +521,8 @@ export function IssuePage({ onCancel }) {
       revision: Number(params.get("revision") || 0),
     };
     routeMetaRef.current = meta;
+    sourceRef.current = sanitizeTaskSource(params.get("source") || "");
+    categoryParamRef.current = params.get("category") || "";
     const nextTarget = params.get("target") || "unscored";
     targetRef.current = nextTarget;
     setTarget(nextTarget);

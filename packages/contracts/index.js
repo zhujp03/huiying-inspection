@@ -333,7 +333,9 @@ export const UserUpdateSchema = z.object({
 });
 export const AdminQuestionRowSchema = z.object({ id: IdSchema, number: z.number().int().min(1), category: z.string(), categoryName: z.string().nullable().optional(), text: z.string(), maxScore: z.number().int().min(0), enabled: z.boolean(), scoreWipe: z.boolean(), revision: RevisionSchema, evidence: z.object({ evidenceRequired: z.boolean(), imageRequired: z.boolean(), audioRequired: z.boolean(), imageMaxCount: z.number().int().min(1).max(9).optional(), audioMaxDurationSeconds: z.number().int().min(1).max(60).optional() }) });
 export const SubmissionRowSchema = z.object({ id: IdSchema, taskName: z.string(), businessNo: z.string(), storeName: z.string(), regionName: z.string().optional(), inspectorName: z.string(), status: z.string().optional(), submittedAt: z.string(), scoreRate: z.string(), issueCount: z.number(), highRiskCount: z.number().optional() });
-export const ExportRowSchema = z.object({ id: IdSchema, kind: z.string().optional(), fileName: z.string(), createdByName: z.string(), createdAt: z.string(), status: z.string(), downloadUrl: z.string().url().nullable().optional() });
+// failureCode：导出任务失败时的稳定业务错误码（如 EXPORT_SUBMISSION_SCORES_MISSING），
+// 供前端映射成可行动的安全提示；成功/进行中任务为 null。附加可选字段，不破坏既有消费方。
+export const ExportRowSchema = z.object({ id: IdSchema, kind: z.string().optional(), fileName: z.string(), createdByName: z.string(), createdAt: z.string(), status: z.string(), downloadUrl: z.string().url().nullable().optional(), failureCode: z.string().nullable().optional() });
 // 数据看板筛选：时间为问卷提交时间；月份按 Asia/Shanghai 自然月聚合；得分为得分率×100（0-100），分类/考核点得分为百分数（0-100）
 export const DashboardFilterSchema = z.object({
   from: z.string().min(8).max(10), to: z.string().min(8).max(10),

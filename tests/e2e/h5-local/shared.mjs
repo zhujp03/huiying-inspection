@@ -18,6 +18,8 @@ export function testDatabaseUrl() {
   if (!match) throw new Error("DATABASE_URL not found in root .env");
   const devUrl = match[1].trim().replace(/^["']|["']$/g, "");
   const testUrl = new URL(devUrl);
+  // 本机保险丝：仅允许回环地址上的 junde_test，绝不触碰开发/远端（Render）库。
+  if (!["127.0.0.1", "::1", "localhost"].includes(testUrl.hostname)) throw new Error("refusing to operate on non-local database host");
   testUrl.pathname = "/junde_test";
   if (!/(test|realapi)/i.test(testUrl.pathname)) throw new Error("refusing to operate on non-test database");
   return testUrl.toString();

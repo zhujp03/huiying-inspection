@@ -157,4 +157,48 @@ describe.sequential("user management", () => {
     expect(logs.rows[1].data_json.kind).toBe("inspector");
     await app.close();
   });
+
+  // 用户详情 GET（Admin 深链接/刷新编辑页用）：与列表同权限（user:manage），行结构与列表一致。
+  test("user detail GET returns the account row and 404 for unknown ids", async () => {
+    await seedAdmin(pool);
+    const app = buildApp({ config, pool, logger: false, providers });
+    const { cookie, csrf } = await adminHeaders(app);
+    const created = await app.inject({ method: "POST", url: "/api/admin/users", headers: { cookie, "x-csrf-token": csrf, "idempotency-key": uuidv7() }, payload: { kind: "inspector", username: "DetailTarget", displayName: "详情目标", phone: "13966666666", password: "weak-pass-6" } });
+    expect(created.statusCode).toBe(201);
+    const targetId = created.json().user.id;
+    const detail = await app.inject({ method: "GET", url: `/api/admin/users/${targetId}`, headers: { cookie } });
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json().user).toMatchObject({ id: targetId, username: "DetailTarget", displayName: "详情目标", roleCode: "inspector", status: "approved_active", source: "manual" });
+    expect(Number.isInteger(detail.json().user.revision)).toBe(true);
+    expect(detail.json().user.maskedPhone).toBe("139****6666");
+
+    const adminSelf = await pool.query("SELECT id FROM users WHERE username_normalized = 'adminone'");
+    const adminDetail = await app.inject({ method: "GET", url: `/api/admin/users/${adminSelf.rows[0].id}`, headers: { cookie } });
+    expect(adminDetail.statusCode).toBe(200);
+    // 主角色优先取管理类角色（与 kind=admin 列表语义一致）
+    expect(["admin", "super_admin"]).toContain(adminDetail.json().user.roleCode);
+
+    const missing = await app.inject({ method: "GET", url: `/api/admin/users/${uuidv7()}`, headers: { cookie } });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json().error.code).toBe("USER_NOT_FOUND");
+
+    const unauthenticated = await app.inject({ method: "GET", url: `/api/admin/users/${targetId}` });
+    expect(unauthenticated.statusCode).toBe(401);
+
+    // 已登录但无 user:manage 的角色（store_manager）→ 403（与列表同权限语义）
+    const managerHash = await createPasswordService().hash("A-secure-pass");
+    const managerKey = Buffer.from(config.PHONE_ENCRYPTION_KEY_BASE64, "base64");
+    const managerId = uuidv7();
+    const managerPhone = normalizePhone("13677778888");
+    await pool.query(`INSERT INTO users (id,username_display,username_normalized,display_name,phone_ciphertext,phone_lookup_hmac,phone_verified_at,password_hash,status)
+      VALUES ($1,'StoreMgr','storemgr','门店负责人',$3,$4,now(),$2,'approved_active')`, [managerId, managerHash, encrypt(managerKey, managerPhone), hmac(config.AUTH_TOKEN_HMAC_KEY, managerPhone)]);
+    const managerRole = await pool.query("SELECT id FROM roles WHERE code = 'store_manager'");
+    await pool.query("INSERT INTO user_roles (id,user_id,role_id) VALUES ($1,$2,$3)", [uuidv7(), managerId, managerRole.rows[0].id]);
+    const managerLogin = await app.inject({ method: "POST", url: "/api/admin/auth/login", payload: { username: "StoreMgr", password: "A-secure-pass" } });
+    expect(managerLogin.statusCode).toBe(200);
+    const forbiddenRole = await app.inject({ method: "GET", url: `/api/admin/users/${targetId}`, headers: { cookie: managerLogin.headers["set-cookie"] } });
+    expect(forbiddenRole.statusCode).toBe(403);
+    expect(forbiddenRole.json().error.code).toBe("FORBIDDEN");
+    await app.close();
+  });
 });

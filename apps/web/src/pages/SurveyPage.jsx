@@ -10,7 +10,9 @@ import { useApp } from "./app-context.jsx";
 import { getQuestionnaire } from "../services/assignments.js";
 import { saveAnswer } from "../services/drafts.js";
 import { advanceDraftRevision, markDraftSynced, peekDraft, saveDraft } from "../store/survey.js";
+import { recallSurveyCategory, rememberSurveyCategory } from "../store/survey-view.js";
 import { mergeSurveyAnswers } from "../store/survey-merge.js";
+import { navEntryIsPage, sanitizeTaskSource } from "../router/nav-history.js";
 import { firstIncompleteQuestion } from "../utils/business.js";
 
 // 分类由服务端动态下发（管理员可扩展）；此处仅作接口异常时的兜底展示（R33）。
@@ -39,8 +41,8 @@ const pendingQuestionOrder = (pendingIds, questions) => {
   });
 };
 
-export function SurveyPage() {
-  const { navigate, replace, toast, redirectToLogin } = useApp();
+export function SurveyPage({ routeCategory = "" }) {
+  const { back, navigate, replace, toast, redirectToLogin } = useApp();
   const [categories, setCategories] = useState(FALLBACK_CATEGORIES);
   const [category, setCategory] = useState(FALLBACK_CATEGORIES[0].id);
   const [meta, setMeta] = useState(null);
@@ -55,6 +57,8 @@ export function SurveyPage() {
   const latestRef = useRef({});
   const routeMetaRef = useRef(null);
   const pendingCategoryRef = useRef("");
+  // 返回任务所需的来源（?source=，由任务页写入；已提交回跳任务详情时原样带回）。
+  const sourceRef = useRef("");
   const unloadedRef = useRef(false);
   // 草稿同步时序（T3）：尚未补发到服务端的 scored 题；补发成功前草稿不得整体置已同步。
   const pendingResyncRef = useRef(new Set());
@@ -62,19 +66,24 @@ export function SurveyPage() {
   const loadInProgressRef = useRef(false);
   const loadRef = useRef(null);
 
-  latestRef.current = { answers, questions, category, meta };
+  latestRef.current = { answers, questions, categories, category, meta };
 
   const putAnswers = (value) => {
     latestRef.current.answers = value;
     setAnswers(value);
   };
 
-  // 用服务端分类列表替换兜底：路由指定的分类有效则优先，否则落在当前有效分类或第一个分类上（R33）。
+  // 用服务端分类列表替换兜底：路由指定的分类有效则优先，其次是本会话记忆的选中分类
+  //（Issue 往返/浏览器后退/刷新重挂载时不丢当前分类），再次落在当前有效分类或第一个分类上（R33）。
   const applyCategories = (result) => {
     const nextCategories = Array.isArray(result.categories) && result.categories.length ? result.categories : FALLBACK_CATEGORIES;
     let nextCategory = latestRef.current.category;
     const pending = pendingCategoryRef.current;
     if (pending && nextCategories.some((item) => item.id === pending)) nextCategory = pending;
+    if (!nextCategories.some((item) => item.id === nextCategory)) {
+      const recalled = recallSurveyCategory(routeMetaRef.current?.attemptId);
+      if (recalled && nextCategories.some((item) => item.id === recalled)) nextCategory = recalled;
+    }
     if (!nextCategories.some((item) => item.id === nextCategory)) nextCategory = nextCategories[0].id;
     pendingCategoryRef.current = "";
     return { categories: nextCategories, category: nextCategory };
@@ -92,10 +101,10 @@ export function SurveyPage() {
     try {
       const result = await getQuestionnaire(routeMeta.assignmentId);
       if (unloadedRef.current) return;
-      // R31：已提交终态不可再进，toast 后落回任务详情。
+      // R31：已提交终态不可再进，toast 后落回任务详情（只读回跳保留任务来源）。
       if (result.attempt.status === "submitted") {
         toast("该任务已提交，不能回看问卷内容");
-        replace(`/task?assignmentId=${encodeURIComponent(routeMeta.assignmentId)}`);
+        replace(`/task?assignmentId=${encodeURIComponent(routeMeta.assignmentId)}&source=${sourceRef.current}`);
         return;
       }
       // R32：服务端 attempt/版本与路由不符。
@@ -208,9 +217,21 @@ export function SurveyPage() {
       questionnaireVersionId,
       revision: Number(params.get("revision") || 0),
     };
+    // 任务来源（返回任务详情→首页/日程链路）；非法值由 sanitize 归一为 schedule。
+    sourceRef.current = sanitizeTaskSource(params.get("source") || "");
     setMeta(routeMetaRef.current);
     // 路由指定的分类要等服务端分类列表返回后再校验（分类可由管理员扩展，R33）。
     pendingCategoryRef.current = params.get("category") || "";
+    // 无路由分类时先恢复会话内记忆的选中分类（Issue 往返/浏览器后退/刷新重挂载不丢当前
+    // 分类；服务端列表返回后仍校验，无效则按 R33 落回首个分类）。不预置会被组件初值
+    //（首个兜底分类，恰好是合法分类）短路，记忆永远不被消费。
+    if (!pendingCategoryRef.current) {
+      const recalled = recallSurveyCategory(routeMetaRef.current.attemptId);
+      if (recalled) {
+        latestRef.current.category = recalled;
+        setCategory(recalled);
+      }
+    }
     load();
     return () => { unloadedRef.current = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -225,6 +246,18 @@ export function SurveyPage() {
     window.addEventListener("online", handleOnline);
     return () => window.removeEventListener("online", handleOnline);
   }, []);
+
+  // 同文档路由的 category 查询变化（浏览器前进后退/外部跳转；业务键刻意不含 category）：
+  // 不重挂载、不打断在途保存，直接应用到当前分类。经服务端分类列表校验（R33），无效分类
+  // 保留当前有效选择；与 applyCategorySelection 幂等（自身 replace 引发的 prop 变化被
+  // 「与当前一致即跳过」短路，不会回退用户点选）。
+  useEffect(() => {
+    if (!routeCategory || unloadedRef.current) return;
+    if (routeCategory === latestRef.current.category) return;
+    if (!(latestRef.current.categories || []).some((item) => item.id === routeCategory)) return;
+    setCategory(routeCategory);
+    rememberSurveyCategory(routeMetaRef.current?.attemptId, routeCategory);
+  }, [routeCategory]);
 
   const retry = () => {
     if (!routeMetaRef.current) return; // 参数缺失的阻断错误无重试意义
@@ -246,15 +279,30 @@ export function SurveyPage() {
   const lastCategory = categories[categories.length - 1];
   const isLastCategory = Boolean(lastCategory) && category === lastCategory.id;
 
-  const selectCategory = (id) => setCategory(id);
+  // 选中分类落地三件事：组件态、会话级记忆、规范 URL（replace 原位同步，不加历史）。
+  // URL 里的 category 若不同步，返回/直达重建时旧参数会盖掉用户实际所选（R33 校验仍在）。
+  const applyCategorySelection = (id) => {
+    setCategory(id);
+    rememberSurveyCategory(routeMetaRef.current?.attemptId, id);
+    const raw = String(window.location.hash || "");
+    if (!raw.startsWith("#/survey")) return;
+    const [path, query = ""] = raw.slice(1).split("?");
+    const search = new URLSearchParams(query);
+    if ((search.get("category") || "") === id) return;
+    search.set("category", id);
+    replace(`#${path}?${search.toString()}`);
+  };
+
+  const selectCategory = (id) => applyCategorySelection(id);
 
   // 纯视图：题干展开/收起。
   const toggleExpand = (id) => setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
 
-  // openIssue（等价 miniapp js:94，navigateTo 6 参数）。
+  // openIssue（等价 miniapp navigateTo，6 参 + source/category）：问题页兜底返回问卷时
+  // 需要完整来源链与当前分类（分类仅为路由参数，不进草稿身份）。
   const openIssue = (questionId, target) => {
     const current = routeMetaRef.current;
-    navigate(`/issue?assignmentId=${encodeURIComponent(current.assignmentId)}&attemptId=${encodeURIComponent(current.attemptId)}&questionnaireVersionId=${encodeURIComponent(current.questionnaireVersionId)}&revision=${current.revision}&questionId=${encodeURIComponent(questionId)}&target=${target}`);
+    navigate(`/issue?assignmentId=${encodeURIComponent(current.assignmentId)}&attemptId=${encodeURIComponent(current.attemptId)}&questionnaireVersionId=${encodeURIComponent(current.questionnaireVersionId)}&revision=${current.revision}&questionId=${encodeURIComponent(questionId)}&target=${target}&source=${sourceRef.current}&category=${encodeURIComponent(latestRef.current.category)}`);
   };
 
   // 分数清零题「是」二次确认（等价 miniapp wx.showModal；web 端惯例 window.confirm，参考 OtherPage R80）。
@@ -298,23 +346,35 @@ export function SurveyPage() {
     }
   };
 
+  // 返回任务详情（问卷的规范父页）：上一条应用内历史确为同任务详情才原生后退（不产生
+  // bounce 条目）；否则 replace 携来源的任务 URL。无路由参数（直达缺参）落首页。
+  const backToTask = () => {
+    const current = routeMetaRef.current;
+    if (!current) {
+      replace("/home");
+      return;
+    }
+    const taskUrl = `/task?assignmentId=${encodeURIComponent(current.assignmentId)}&source=${sourceRef.current}`;
+    back(taskUrl, (previous) => navEntryIsPage(previous, "/task", { assignmentId: current.assignmentId }));
+  };
+
   // 进菜品页全题守卫（R40）：有未完成题 → 切到该分类 + toast 阻断；全完成 → 带 4 参数进入。
   const goDishes = () => {
     const missing = firstIncompleteQuestion(latestRef.current.questions, latestRef.current.answers);
     if (missing) {
-      setCategory(missing.category);
+      applyCategorySelection(missing.category);
       toast(`请先完成第 ${missing.number} 题`);
       return;
     }
     const current = routeMetaRef.current;
-    navigate(`/dishes?assignmentId=${encodeURIComponent(current.assignmentId)}&attemptId=${encodeURIComponent(current.attemptId)}&questionnaireVersionId=${encodeURIComponent(current.questionnaireVersionId)}&revision=${current.revision}`);
+    navigate(`/dishes?assignmentId=${encodeURIComponent(current.assignmentId)}&attemptId=${encodeURIComponent(current.attemptId)}&questionnaireVersionId=${encodeURIComponent(current.questionnaireVersionId)}&revision=${current.revision}&source=${sourceRef.current}`);
   };
 
   const viewState = loading ? "loading" : error ? "error" : "ready";
 
   return (
     <div className="app-page app-page--flat" data-page="survey" data-state={viewState} data-conflict={conflict ? "true" : "false"}>
-      <PageNav title="暗访问卷" />
+      <PageNav title="暗访问卷" onBack={backToTask} />
       {/* 三步流程条：第 1 步 active（§1.7 a.1） */}
       <FlowSteps current="survey" />
 

@@ -317,6 +317,29 @@ export function registerAuthRoutes(app, { pool, config, passwordService, provide
     });
     return { items: rows, nextCursor: result.rows.length > limit ? rows.at(-1).id : null };
   }));
+  // 用户详情（Admin 深链接/刷新编辑页用）：与列表同权限（user:manage），行结构与列表一致；
+  // 主角色优先取管理类角色（与 kind=admin 列表的主角色语义一致），探员回退 inspector。
+  app.get("/api/admin/users/:id", requireConfigured(async (request) => {
+    await adminReadSession(request, "user:manage");
+    const id = SecureUuidSchema.parse(request.params.id);
+    const primaryRole = `(SELECT r2.code FROM user_roles ur2 JOIN roles r2 ON r2.id = ur2.role_id WHERE ur2.user_id = u.id AND ur2.revoked_at IS NULL ORDER BY CASE WHEN r2.code = 'inspector' THEN 1 ELSE 0 END, r2.code LIMIT 1)`;
+    const result = await pool.query(`SELECT u.id,u.username_display,u.display_name,u.status,u.session_version revision,u.phone_ciphertext,${primaryRole} role_code,
+        s.scope_type,s.region_id scope_region_id,s.store_id scope_store_id,region.name scope_region_name,store.name scope_store_name,reg.id registration_id
+      FROM users u
+      LEFT JOIN user_data_scopes s ON s.user_id = u.id AND s.revoked_at IS NULL
+      LEFT JOIN regions region ON region.id = s.region_id
+      LEFT JOIN stores store ON store.id = s.store_id
+      LEFT JOIN inspector_registrations reg ON reg.user_id = u.id AND reg.status = 'approved_active'
+      WHERE u.id = $1 LIMIT 1`, [id]);
+    if (!result.rows[0]) throw businessError("USER_NOT_FOUND", "账号不存在或已被删除", 404);
+    let phone_display = null;
+    try {
+      phone_display = decrypt(key, result.rows[0].phone_ciphertext).replace(/^\+86/, "");
+    } catch {
+      phone_display = null;
+    }
+    return { user: userRowFor({ ...result.rows[0], phone_display }) };
+  }));
   app.post("/api/admin/users", requireConfigured(async (request, reply) => {
     const session = await adminSession(request, "user:manage");
     const body = UserCreateSchema.parse(request.body);

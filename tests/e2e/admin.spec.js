@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { attachBusinessConsoleCollector } from "../helpers/admin-e2e-console.mjs";
 
 async function login(page, username = "ops") {
   await page.goto("/");
@@ -15,8 +16,7 @@ function wizardStoreSelect(page, label) {
 }
 
 test("管理员登录、角色菜单和主要业务数据", async ({ page }) => {
-  const browserMessages = [];
-  page.on("console", (message) => { if (["error", "warning"].includes(message.type())) browserMessages.push(message.text()); });
+  const consoleCollector = attachBusinessConsoleCollector(page);
   await login(page);
   await page.getByRole("button", { name: "用户管理" }).click();
   await page.getByRole("button", { name: /注册审批/ }).click();
@@ -31,7 +31,7 @@ test("管理员登录、角色菜单和主要业务数据", async ({ page }) => 
   await expect(page.locator(".submission-question-list article")).toHaveCount(50);
   const visibleText = await page.locator("body").innerText();
   expect(visibleText).not.toMatch(/\/api\/|HTTP\s*\d|assignment_id|attempt_id|storage key|stack trace|submit token|revision/i);
-  expect(browserMessages).toEqual([]);
+  await consoleCollector.expectClean();
 });
 
 test("门店负责人只能看到授权菜单", async ({ page }) => {
@@ -361,8 +361,7 @@ test("草稿详情操作条随检查状态启停", async ({ page }) => {
 });
 
 test("门店列表超过 100 条支持加载更多并操作靠后记录", async ({ page }) => {
-  const browserMessages = [];
-  page.on("console", (message) => { if (["error", "warning"].includes(message.type())) browserMessages.push(message.text()); });
+  const consoleCollector = attachBusinessConsoleCollector(page);
   await login(page);
   await page.getByRole("button", { name: "门店管理" }).click();
   // fixture 造了 130 家门店：首屏 limit=100 只见前 100 条，压测门店 227 号店（store-z227，asc 排序在 101+ 位）不在
@@ -376,12 +375,11 @@ test("门店列表超过 100 条支持加载更多并操作靠后记录", async 
   // 对靠后记录执行操作：行内删除按钮可用并弹出确认
   await page.getByRole("row", { name: /压测门店 227 号店/ }).getByRole("button", { name: "删除" }).click();
   await expect(page.getByText("删除这家门店？")).toBeVisible();
-  expect(browserMessages).toEqual([]);
+  await consoleCollector.expectClean();
 });
 
 test("向导指派步通过加载更多与检索选中第 100 名以外的探员", async ({ page }) => {
-  const browserMessages = [];
-  page.on("console", (message) => { if (["error", "warning"].includes(message.type())) browserMessages.push(message.text()); });
+  const consoleCollector = attachBusinessConsoleCollector(page);
   let savedAssignment;
   page.on("request", (request) => { if (request.method() === "POST" && request.url().endsWith("/api/admin/campaigns/campaign-one/assignments")) savedAssignment = request.postDataJSON(); });
   await login(page);
@@ -405,7 +403,7 @@ test("向导指派步通过加载更多与检索选中第 100 名以外的探员
   await page.getByRole("button", { name: "下一步：确认并发布" }).click();
   await expect(page.getByRole("heading", { name: /指派明细/ })).toBeVisible();
   expect(savedAssignment.inspectorId).toBe("user-inspector-128");
-  expect(browserMessages).toEqual([]);
+  await consoleCollector.expectClean();
 });
 
 test("门店品牌筛选切换后游标重置并从首页重新查询", async ({ page }) => {
@@ -437,8 +435,7 @@ async function openExtendDialog(page) {
 }
 
 test("延期弹窗展示双窗口字段与当前截止提示", async ({ page }) => {
-  const browserMessages = [];
-  page.on("console", (message) => { if (["error", "warning"].includes(message.type())) browserMessages.push(message.text()); });
+  const consoleCollector = attachBusinessConsoleCollector(page);
   await openExtendDialog(page);
   // 只读提示：展示该指派当前 dueAt / questionnaireDeadlineAt，帮助运营判断
   await expect(page.getByText(/当前执行截止/)).toBeVisible();
@@ -447,12 +444,11 @@ test("延期弹窗展示双窗口字段与当前截止提示", async ({ page }) 
   await expect(page.getByLabel("执行截止")).toHaveValue("");
   await expect(page.getByLabel("问卷最终截止")).toHaveValue("");
   await expect(page.getByLabel("延期原因")).toHaveValue("");
-  expect(browserMessages).toEqual([]);
+  await consoleCollector.expectClean();
 });
 
 test("延期弹窗行内校验拦截缺时间与缺原因且不发请求", async ({ page }) => {
-  const browserMessages = [];
-  page.on("console", (message) => { if (["error", "warning"].includes(message.type())) browserMessages.push(message.text()); });
+  const consoleCollector = attachBusinessConsoleCollector(page);
   let extendRequests = 0;
   page.on("request", (request) => { if (request.method() === "POST" && request.url().includes("/api/admin/assignments/assignment-extend/extend")) extendRequests += 1; });
   await openExtendDialog(page);
@@ -465,12 +461,11 @@ test("延期弹窗行内校验拦截缺时间与缺原因且不发请求", async
   await page.getByRole("button", { name: "确认延期" }).click();
   await expect(page.getByText("请填写延期原因")).toBeVisible();
   expect(extendRequests).toBe(0);
-  expect(browserMessages).toEqual([]);
+  await consoleCollector.expectClean();
 });
 
 test("延期提交携带 revision 与已填时间原因并刷新详情回显", async ({ page }) => {
-  const browserMessages = [];
-  page.on("console", (message) => { if (["error", "warning"].includes(message.type())) browserMessages.push(message.text()); });
+  const consoleCollector = attachBusinessConsoleCollector(page);
   const extendPosted = page.waitForRequest((request) => request.method() === "POST" && request.url().includes("/api/admin/assignments/assignment-extend/extend"));
   await openExtendDialog(page);
   await page.getByLabel("执行截止").fill("2026-07-25T10:30");
@@ -489,12 +484,11 @@ test("延期提交携带 revision 与已填时间原因并刷新详情回显", a
   await expect(page.getByText("延期这条指派？")).toHaveCount(0);
   const expected = new Date(payload.dueAt).toLocaleString("zh-CN", { hour12: false });
   await expect(page.getByRole("row", { name: /压测探员 101 号/ })).toContainText(expected);
-  expect(browserMessages).toEqual([]);
+  await consoleCollector.expectClean();
 });
 
 test("延期双窗口提交两键均在且为 UTC ISO", async ({ page }) => {
-  const browserMessages = [];
-  page.on("console", (message) => { if (["error", "warning"].includes(message.type())) browserMessages.push(message.text()); });
+  const consoleCollector = attachBusinessConsoleCollector(page);
   const extendPosted = page.waitForRequest((request) => request.method() === "POST" && request.url().includes("/api/admin/assignments/assignment-extend/extend"));
   await openExtendDialog(page);
   await page.getByLabel("执行截止").fill("2026-07-26T10:30");
@@ -507,5 +501,123 @@ test("延期双窗口提交两键均在且为 UTC ISO", async ({ page }) => {
   expect(Number.isInteger(payload.revision)).toBe(true);
   expect(payload.revision).toBeGreaterThanOrEqual(1);
   await expect(page.getByText("任务已延期")).toBeVisible();
-  expect(browserMessages).toEqual([]);
+  await consoleCollector.expectClean();
+});
+
+test("提交详情单份问卷导出：确认→排队→生成→下载链接", async ({ page }) => {
+  const consoleCollector = attachBusinessConsoleCollector(page);
+  await login(page);
+  await page.getByRole("button", { name: "提交记录" }).click();
+  await page.getByRole("button", { name: "查看详情" }).click();
+  await expect(page.getByText("完整题目")).toBeVisible();
+  // 创建任务只绑定这一份提交（body 携带 submissionId，无任何汇总筛选键）
+  const exportPosted = page.waitForRequest((request) => request.method() === "POST" && request.url().endsWith("/api/admin/exports"));
+  await page.getByRole("button", { name: "导出这份问卷 Excel" }).click();
+  await expect(page.getByText("导出这份问卷？")).toBeVisible();
+  await page.getByRole("button", { name: "确认导出" }).click();
+  const payload = (await exportPosted).postDataJSON();
+  expect(Object.keys(payload)).toEqual(["submissionId"]);
+  // 行内状态随轮询推进（排队→生成中→成功），pending 期间按钮禁用防重复发起
+  await expect(page.getByText("单份问卷导出已创建，正在生成文件")).toBeVisible();
+  await expect(page.getByRole("button", { name: /导出进行中…|正在创建导出任务…/ })).toBeDisabled();
+  await expect(page.getByText(/正在生成 Excel 文件…|导出任务排队中…/)).toBeVisible();
+  await expect(page.getByRole("link", { name: "下载 Excel" })).toBeVisible({ timeout: 15000 });
+  await expect(page.getByText(/下载链接有时效/)).toBeVisible();
+  await consoleCollector.expectClean();
+});
+
+test("单份问卷导出失败展示安全原因并可重新生成，pending 期间禁止重复发起", async ({ page }) => {
+  const consoleCollector = attachBusinessConsoleCollector(page);
+  const failedJobId = "66666666-6666-6666-8666-666666666666";
+  // 浏览器层拦截：任务始终失败（第 3 次轮询起），前两轮保持排队以验证禁用态
+  let statusPolls = 0;
+  const jobResponse = (status) => JSON.stringify({ id: failedJobId, fileName: "单份问卷导出（生成中）", createdByName: "测试管理员", createdAt: "2026-10-11T08:00:00Z", status, downloadUrl: null, failureCode: status === "failed" ? "EXPORT_SUBMISSION_SCORES_MISSING" : null });
+  await page.route("**/api/admin/exports", async (route) => {
+    if (route.request().method() === "POST") {
+      return route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify({ id: failedJobId, fileName: "单份问卷导出（生成中）", createdAt: "2026-10-11T08:00:00Z", status: "queued", downloadUrl: null }) });
+    }
+    await route.fallback();
+  });
+  await page.route(`**/api/admin/exports/${failedJobId}`, (route) => {
+    statusPolls += 1;
+    return route.fulfill({ status: 200, contentType: "application/json", body: jobResponse(statusPolls <= 2 ? "queued" : "failed") });
+  });
+  await login(page);
+  await page.getByRole("button", { name: "提交记录" }).click();
+  await page.getByRole("button", { name: "查看详情" }).click();
+  await expect(page.getByText("完整题目")).toBeVisible();
+  await page.getByRole("button", { name: "导出这份问卷 Excel" }).click();
+  await page.getByRole("button", { name: "确认导出" }).click();
+  // 失败原因按稳定错误码映射为安全可行动提示（不引导用户去别处“查看原因”）
+  await expect(page.getByText("这份提交缺少可安全导出的逐题得分数据（可能是历史数据不完整），无法生成评估表。")).toBeVisible({ timeout: 15000 });
+  await expect(page.getByRole("button", { name: "重新生成" })).toBeVisible();
+  // 重新生成：新任务进入 pending → 按钮禁用防重复；随后轮询再次失败仍可重试
+  await page.getByRole("button", { name: "重新生成" }).click();
+  await expect(page.getByRole("button", { name: /导出进行中…|正在创建导出任务…/ })).toBeDisabled();
+  await expect(page.getByText("这份提交缺少可安全导出的逐题得分数据（可能是历史数据不完整），无法生成评估表。")).toBeVisible({ timeout: 15000 });
+  await consoleCollector.expectClean();
+});
+
+test("离开详情页即中止在途创建与轮询（卸载后无任何状态查询）", async ({ page }) => {
+  const consoleCollector = attachBusinessConsoleCollector(page);
+  const delayedJobId = "77777777-7777-7777-8777-777777777777";
+  let statusPolls = 0;
+  await page.route("**/api/admin/exports", async (route) => {
+    if (route.request().method() === "POST") {
+      // 创建请求保持在途，让“离开页面”发生在 POST 未返回时
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      return route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify({ id: delayedJobId, fileName: "单份问卷导出（生成中）", createdAt: "2026-10-11T08:00:00Z", status: "queued", downloadUrl: null }) });
+    }
+    await route.fallback();
+  });
+  await page.route(`**/api/admin/exports/${delayedJobId}`, (route) => {
+    statusPolls += 1;
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ id: delayedJobId, fileName: "单份问卷导出（生成中）", createdByName: "测试管理员", createdAt: "2026-10-11T08:00:00Z", status: "queued", downloadUrl: null }) });
+  });
+  await login(page);
+  await page.getByRole("button", { name: "提交记录" }).click();
+  await page.getByRole("button", { name: "查看详情" }).click();
+  await expect(page.getByText("完整题目")).toBeVisible();
+  await page.getByRole("button", { name: "导出这份问卷 Excel" }).click();
+  await page.getByRole("button", { name: "确认导出" }).click();
+  // 创建仍在途即返回列表（组件卸载应中止创建请求，且不启动轮询）
+  await page.getByRole("button", { name: "返回提交列表" }).click();
+  await expect(page.getByText("提交结果")).toBeVisible();
+  // 越过「创建返回（1.5s）+ 首个轮询间隔（2s）」窗口后仍无任何状态查询
+  await page.waitForTimeout(4200);
+  expect(statusPolls).toBe(0);
+  await consoleCollector.expectClean();
+});
+
+test("状态查询失败保留任务并可「重新检查」恢复，不自动重复生成", async ({ page }) => {
+  // 刻意 503 会产生浏览器自身的资源加载 console error（同既有“服务失败”用例，不采集 console）
+  const jobId = "88888888-8888-8888-8888-888888888888";
+  let statusCalls = 0;
+  await page.route("**/api/admin/exports", async (route) => {
+    if (route.request().method() === "POST") {
+      return route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify({ id: jobId, fileName: "单份问卷导出（生成中）", createdAt: "2026-10-11T08:00:00Z", status: "queued", downloadUrl: null }) });
+    }
+    await route.fallback();
+  });
+  await page.route(`**/api/admin/exports/${jobId}`, (route) => {
+    statusCalls += 1;
+    // 503 不在自动重试窗口内：首次查询失败即转入可恢复的「重新检查」态
+    if (statusCalls <= 1) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: { code: "SERVICE_DOWN" } }) });
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ id: jobId, fileName: "暗访评估_测试.xlsx", createdByName: "测试管理员", createdAt: "2026-10-11T08:00:00Z", status: "succeeded", downloadUrl: "https://exports.example.cos.test/signed-download" }) });
+  });
+  await login(page);
+  await page.getByRole("button", { name: "提交记录" }).click();
+  await page.getByRole("button", { name: "查看详情" }).click();
+  await expect(page.getByText("完整题目")).toBeVisible();
+  await page.getByRole("button", { name: "导出这份问卷 Excel" }).click();
+  await page.getByRole("button", { name: "确认导出" }).click();
+  // 查询失败：任务保留、出现「重新检查」，主按钮保持禁用（不重复生成）
+  await expect(page.getByText("服务暂时不可用，请稍后重试")).toBeVisible({ timeout: 15000 });
+  await expect(page.getByRole("button", { name: "重新检查" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /导出进行中…|正在创建导出任务…/ })).toBeDisabled();
+  // 恢复：复查同一任务（无新 POST），查询成功后出下载链接
+  const postsDuring = page.waitForRequest((request) => request.method() === "POST" && request.url().endsWith("/api/admin/exports"), { timeout: 1000 }).catch(() => null);
+  await page.getByRole("button", { name: "重新检查" }).click();
+  await expect(page.getByRole("link", { name: "下载 Excel" })).toBeVisible({ timeout: 15000 });
+  expect(await postsDuring).toBeNull(); // 重新检查绝不新建任务
 });

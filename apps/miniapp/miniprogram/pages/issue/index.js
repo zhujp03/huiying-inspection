@@ -1,4 +1,5 @@
 import { cancelIssue, completeEvidenceUpload, confirmIssue, createEditSession, getQuestionnaire, initEvidenceUpload, removeEvidence, updateEditSession, uploadToSignedTarget } from "../../services/api.js";
+import { backToParentOrRedirect, sanitizeSource } from "../../utils/navigation.js";
 import { secureUuid } from "../../utils/business.js";
 
 Page({
@@ -6,6 +7,9 @@ Page({
   async onLoad(options) {
     if (!options.assignmentId || !options.attemptId || !options.questionnaireVersionId || !options.questionId) { this.setData({ loading: false, error: "未找到题目，请返回问卷重试" }); return; }
     const meta = { assignmentId: options.assignmentId, attemptId: options.attemptId, questionnaireVersionId: options.questionnaireVersionId, revision: Number(options.revision || 0) };
+    // 问卷写入的来源与当前分类：异常路径（父页缺失）redirectTo 重建问卷时保持来源链与选中分类。
+    this.source = sanitizeSource(options.source);
+    this.surveyCategory = options.category || "";
     this.setData({ meta, target: options.target || "unscored" });
     try {
       const draft = await getQuestionnaire(meta.assignmentId);
@@ -55,6 +59,18 @@ Page({
   play(event) { const item = this.data.audios.find((entry) => entry.id === event.currentTarget.dataset.id); if (!item?.path && !item?.previewUrl) return; // 音频实例复用单例，页面卸载时统一销毁，避免每次播放泄漏一个 InnerAudioContext。
     this.audio = this.audio || wx.createInnerAudioContext(); this.audio.src = item.path || item.previewUrl; this.audio.play(); },
   onUnload() { if (this.audio) { this.audio.destroy(); this.audio = null; } if (!this.sessionSettled && this.data.editSessionId) cancelIssue(this.data.meta.attemptId, this.data.question.id, this.data.editSessionId).catch(() => {}); },
+  // 返回问卷：紧邻父页确为同任务问卷才原生返回；直达进入/无关栈不算证据，
+  // 此时 redirectTo 携全量参数（含分类）的规范问卷页，绝不落到无关任务或空栈报错。
+  backToSurvey() {
+    const meta = this.data.meta;
+    if (!meta) return;
+    const category = this.surveyCategory ? `&category=${encodeURIComponent(this.surveyCategory)}` : "";
+    backToParentOrRedirect({
+      parentRoute: "pages/survey/index",
+      meta: { assignmentId: meta.assignmentId, attemptId: meta.attemptId },
+      fallbackUrl: `/pages/survey/index?assignmentId=${encodeURIComponent(meta.assignmentId)}&attemptId=${encodeURIComponent(meta.attemptId)}&questionnaireVersionId=${encodeURIComponent(meta.questionnaireVersionId)}&revision=${meta.revision}&source=${this.source || ""}${category}`,
+    });
+  },
   async save() {
     if (this.data.target === "unscored") {
       if (!this.data.remark.trim()) return this.message("请填写问题说明");
@@ -66,11 +82,11 @@ Page({
     try {
       await updateEditSession(this.data.meta.attemptId, this.data.question.id, this.data.editSessionId, { draftIssueRemark: this.data.target === "unscored" ? this.data.remark.trim() : "", revision: this.data.meta.revision });
       await confirmIssue(this.data.meta.attemptId, this.data.question.id, this.data.editSessionId, { answer: this.data.target, revision: this.data.meta.revision });
-      this.sessionSettled = true; wx.navigateBack();
+      this.sessionSettled = true; this.backToSurvey();
     } catch (error) { this.message(error.message); }
     finally { this.setData({ saving: false }); }
   },
-  async cancel() { if (!this.data.editSessionId) return wx.navigateBack(); try { await cancelIssue(this.data.meta.attemptId, this.data.question.id, this.data.editSessionId); this.sessionSettled = true; wx.navigateBack(); } catch (error) { this.message(error.message); } },
+  async cancel() { if (!this.data.editSessionId) return this.backToSurvey(); try { await cancelIssue(this.data.meta.attemptId, this.data.question.id, this.data.editSessionId); this.sessionSettled = true; this.backToSurvey(); } catch (error) { this.message(error.message); } },
   append(type, item) { const field = type === "image" ? "images" : "audios"; this.setData({ [field]: [...this.data[field], item] }); },
   replace(type, id, item) { const field = type === "image" ? "images" : "audios"; this.setData({ [field]: this.data[field].map((entry) => entry.id === id ? item : entry) }); },
   removeLocal(type, id) { const field = type === "image" ? "images" : "audios"; this.setData({ [field]: this.data[field].filter((entry) => entry.id !== id) }); },

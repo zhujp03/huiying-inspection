@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { z } from "zod";
 import {
   Buildings, CalendarBlank, CaretDown, CaretRight, CaretUp, ChartLine, CheckCircle, ClipboardText, DownloadSimple,
@@ -6,12 +6,14 @@ import {
   WarningCircle, ClockCounterClockwise,
 } from "@phosphor-icons/react";
 import {
-  ADMIN_LIST_SCHEMAS, API, AdminQuestionListSchema, AdminUserOptionSchema, ArchiveRestoreStatusSchema, BrandRowSchema, CampaignDetailSchema,
+  ADMIN_LIST_SCHEMAS, API, AdminQuestionListSchema, AdminQuestionRowSchema, AdminUserOptionSchema, ArchiveRestoreStatusSchema, BrandRowSchema, CampaignDetailSchema,
   CampaignRowSchema, ExportRowSchema, QuestionnaireVersionCreateSchema, QuestionnaireVersionRowSchema, RegionRowSchema, RegistrationRowSchema,
   StoreRowSchema, SubmissionDetailSchema, SubmissionRowSchema, UserCreateSchema, UserRowSchema, UserUpdateSchema, listSchema, toStatusLabel,
 } from "../../../../packages/contracts/index.js";
 import { request } from "../api/client.js";
 import { useAdminAuth } from "../auth/AdminAuth.jsx";
+import { adminPaths, listSearchOf, resolveRoute } from "../routes.js";
+import { cancelLeave, confirmLeave, forceNavigate, navigate, navigationBlocked, setNavigationConfirm, useAdminLocation, useNavigationGuard, useRootRedirect } from "../router.jsx";
 import { Modal, FormDialog, StatusBadge, Toast, PageHeader } from "../components/BusinessUI.jsx";
 import { AssignmentEditor } from "../components/AssignmentEditor.jsx";
 import { ReceiptComparison } from "../components/ReceiptComparison.jsx";
@@ -67,16 +69,32 @@ export function AdminWorkbench() {
   const role = session.user.role;
   const permissions = useMemo(() => new Set(session.user.permissions || []), [session.user.permissions]);
   const allowedNav = useMemo(() => NAV.filter((item) => !item.permission || permissions.has(item.permission)), [permissions]);
-  const [page, setPage] = useState(allowedNav[0]?.id || "overview");
+  // 页面由真实 pathname 驱动（/admin/...）：菜单/概览卡片跳转走 pushState 客户端导航，
+  // 刷新/直接打开由 routes.js 解析恢复；根入口（/、/admin/）replace 规整到 /admin/overview。
+  const location = useAdminLocation();
+  useRootRedirect(location);
+  const route = useMemo(() => resolveRoute(location), [location]);
+  const page = route?.page || null;
   const [toast, setToastState] = useState(null);
   const [confirm, setConfirm] = useState(null);
   // 表单确认弹窗：需要填写原因/时间的操作统一走这里（替代原生 window.prompt），
   // 表单本身即确认步骤，提交后直接执行业务请求。
   const [formDialog, setFormDialog] = useState(null);
+  // 未保存修改确认弹窗：router 层（浏览器返回/前进、受守卫导航）与退出登录共用同一裁决。
+  // 弹窗打开期间的新目标以最近一次为准（router 内 pending 覆盖），不存在过期跳转。
+  const [leaveConfirm, setLeaveConfirm] = useState(null);
+  useEffect(() => {
+    setNavigationConfirm((payload) => setLeaveConfirm(payload));
+    return () => { setNavigationConfirm(null); cancelLeave(); };
+  }, []);
   // 统一通知：成功默认对勾，错误用警告图标；调用方传 type="error" 表示错误。
   const notify = useCallback((text, type = "success") => setToastState({ text, type }), []);
   const [refreshKey, setRefreshKey] = useState(0);
-  const listPage = usePagedRemote({ path: ENDPOINTS[page], schema: PAGED_LIST_SCHEMAS[page], refreshKey, expire });
+  // 列表数据只给「已授权页面的列表屏」拉：无权限路由零请求（前端权限校验先于任何受保护请求），
+  // 详情/编辑屏按 ID 自取数据，不依赖无关列表。
+  const listAllowed = Boolean(route && (!route.permission || permissions.has(route.permission)));
+  const needsList = route?.screen === "list";
+  const listPage = usePagedRemote({ path: needsList && listAllowed ? ENDPOINTS[page] : null, schema: PAGED_LIST_SCHEMAS[page], refreshKey, expire });
 
   const refresh = () => setRefreshKey((value) => value + 1);
   const run = useCallback(async ({ title, description, danger = false, path, method = "POST", body, execute, success, onSuccess }) => {
@@ -112,13 +130,83 @@ export function AdminWorkbench() {
       if (!config.skipRefresh) refresh();
       config.onSuccess?.();
     } catch (actionError) {
-      setFormDialog(null);
-      if (actionError.kind === "session") expire();
-      else notify(actionError.message, "error");
+      if (actionError.kind === "session") { setFormDialog(null); expire(); }
+      // 失败：弹窗保持，已填内容与保护不丢，后端错误就地展示（FormDialog 的 error 槽）。
+      else setFormDialog({ ...config, pending: false, error: actionError.message });
     }
   };
+  // 有未保存修改时的主动动作（菜单跳转由 navigate 内部裁决；这里覆盖退出登录等非导航动作）。
+  const guardedAction = useCallback((action) => {
+    if (navigationBlocked()) setLeaveConfirm({ kind: "action", action });
+    else action();
+  }, []);
+  // 确认弹窗裁决：确认离开时连带丢弃页面上打开的对话框/执行确认（同属未保存内容），
+  // 不让旧路由的弹窗带着过期回调存活到新路由；取消则全部保持原状。
+  const resolveLeave = (leave) => {
+    const payload = leaveConfirm;
+    setLeaveConfirm(null);
+    if (!payload) return;
+    if (!leave) { cancelLeave(); return; }
+    if (payload.kind === "action") { payload.action(); return; }
+    setFormDialog(null);
+    setConfirm(null);
+    confirmLeave();
+  };
 
-  return <div className="admin-shell"><aside className="admin-sidebar"><div className="admin-logo"><span>汇</span><div><strong>汇盈探店</strong><small>运营管理中心</small></div></div><nav>{allowedNav.map(({ id, label, icon: Icon }) => <button key={id} className={page === id ? "is-active" : ""} onClick={() => setPage(id)}><Icon size={19} weight={page === id ? "fill" : "regular"} /><span>{label}</span></button>)}</nav><div className="admin-user"><div>{session.user.displayName.slice(0, 1)}</div><span><strong>{session.user.displayName}</strong><small>{roleLabel(role)}</small>{session.user.scopeLabel ? <small className="user-scope">{session.user.scopeLabel}</small> : null}</span><button aria-label="退出登录" onClick={logout}><SignOut size={18} /></button></div></aside><section className="admin-main"><main className="admin-content"><Page page={page} data={listPage.data} loading={listPage.loading} error={listPage.error} pager={listPage} refresh={refresh} run={run} ask={ask} role={role} setToast={notify} setPage={setPage} /></main></section><Toast toast={toast} onClose={() => setToastState(null)} /><Modal open={Boolean(confirm)} title={confirm?.title} description={confirm?.description} danger={confirm?.danger} confirmLabel={confirm?.pending ? "处理中…" : "确认"} onCancel={() => !confirm?.pending && setConfirm(null)} onConfirm={confirm?.pending ? undefined : confirm?.action} /><FormDialog open={Boolean(formDialog)} title={formDialog?.title} description={formDialog?.description} danger={formDialog?.danger} fields={formDialog?.fields} initialValues={formDialog?.initialValues} pending={formDialog?.pending} error={formDialog?.error} confirmLabel={formDialog?.confirmLabel} onConfirm={submitFormDialog} onCancel={() => !formDialog?.pending && setFormDialog(null)} /></div>;
+  // —— 路由屏渲染：列表屏吃 workbench 级分页数据；详情/编辑屏按 URL 参数自行拉取权威数据 ——
+  const renderScreen = () => {
+    if (!route) return <RouteNotFound onBack={() => navigate(adminPaths.page("overview"))} />;
+    // 手动输入无权限路径：先做前端权限校验（服务端 RBAC 仍是最终防线），给出可恢复的无权限页。
+    if (route.permission && !permissions.has(route.permission)) return <NoPermission action={<button className="admin-primary" onClick={() => navigate(adminPaths.page(allowedNav[0]?.id || "overview"))}>返回首页</button>} />;
+    const { page: pageId, screen, params, query } = route;
+    if (pageId === "overview") return <Overview setPage={(target) => navigate(adminPaths.page(target))} />;
+    if (pageId === "dashboard") return <Dashboard setToast={notify} />;
+    if (screen === "list") {
+      if (listPage.loading) return <StatePanel title="正在加载业务数据…" />;
+      if (listPage.error) return <StatePanel title={listPage.error} action={<button className="admin-primary" onClick={refresh}>重新加载</button>} />;
+      if (pageId === "users") return <UsersPage tab={query.get("tab")} onTab={(tab) => navigate(adminPaths.users(tab))} onNew={(kind) => navigate(adminPaths.userNew(kind))} onEdit={(row) => navigate(adminPaths.userEdit(row.id))} run={run} ask={ask} setToast={notify} />;
+      if (pageId === "stores") return <Stores query={query} onFiltersChange={(next) => navigate(adminPaths.stores(next))} onNew={() => navigate(adminPaths.storeNew(query.toString()))} onEdit={(storeId) => navigate(adminPaths.storeEdit(storeId, query.toString()))} run={run} ask={ask} />;
+      if (pageId === "campaigns") return <Campaigns data={listPage.data} onOpen={(row) => navigate(adminPaths.campaignDetail(row.id))} onEdit={(row) => navigate(adminPaths.campaignEdit(row.id, undefined, "list"))} onNew={() => navigate(adminPaths.campaignNew())} run={run} ask={ask} pager={listPage} />;
+      if (pageId === "questionnaires") return <Questionnaires data={listPage.data} onOpen={(row) => navigate(adminPaths.questionnaireDetail(row.id))} onNew={() => navigate(adminPaths.questionnaireNew())} run={run} ask={ask} refresh={refresh} setToast={notify} pager={listPage} />;
+      if (pageId === "submissions") return <Submissions appliedQuery={query} onApply={(next) => navigate(adminPaths.submissions(next))} onOpen={(row) => navigate(adminPaths.submissionDetail(row.id, query.toString()))} run={run} setToast={notify} />;
+      if (pageId === "exports") return <Exports data={listPage.data} run={run} pager={listPage} />;
+      if (pageId === "audits") return <Audits />;
+      return <NoPermission />;
+    }
+    if (pageId === "users") {
+      if (screen === "user-new") {
+        const kind = query.get("kind") === "admin" ? "admin" : "inspector";
+        return <UserEditor mode="new" kind={kind} onBack={() => navigate(adminPaths.users(kind))} run={run} reload={refresh} setToast={notify} />;
+      }
+      return <UserEditorRoute userId={params.id} onBackForKind={(kind) => navigate(adminPaths.users(kind))} run={run} reload={refresh} setToast={notify} />;
+    }
+    if (pageId === "stores") return <StoreEditorRoute storeId={screen === "store-new" ? null : params.id} onBack={() => navigate(`/admin/stores${listSearchOf("stores", query.get("list"))}`)} run={run} ask={ask} />;
+    if (pageId === "campaigns") {
+      // closeWizard：from=list（列表进入/新建）关闭回列表并刷新；from=detail（详情进入）回任务详情（详情路由重查）。
+      const closeWizard = (wizardId, from) => {
+        if (from === "list" || !wizardId) { navigate(adminPaths.campaigns()); refresh(); }
+        else navigate(adminPaths.campaignDetail(wizardId));
+      };
+      if (screen === "campaign-new") return <CampaignWizardRoute campaignId={null} step={1} from="list" setToast={notify} onClose={closeWizard} />;
+      if (screen === "campaign-edit") return <CampaignWizardRoute campaignId={params.id} step={wizardStep(query)} from={query.get("from") === "list" ? "list" : "detail"} setToast={notify} onClose={closeWizard} />;
+      if (screen === "campaign-detail") return <CampaignDetailRoute campaignId={params.id} onBack={() => { navigate(adminPaths.campaigns()); refresh(); }} run={run} ask={ask} setToast={notify} />;
+      if (screen === "assignment-edit") return <AssignmentEditorRoute campaignId={params.id} assignmentId={params.assignmentId} onBack={() => navigate(adminPaths.campaignDetail(params.id))} run={run} />;
+    }
+    if (pageId === "questionnaires") {
+      if (screen === "questionnaire-new") return <QuestionnaireEditorRoute onBack={() => { navigate(adminPaths.questionnaires()); refresh(); }} run={run} setToast={notify} />;
+      if (screen === "questionnaire-version") return <QuestionnaireDetailRoute versionId={params.id} query={query} run={run} ask={ask} setToast={notify} />;
+    }
+    if (pageId === "submissions" && screen === "submission-detail") return <SubmissionDetailRoute submissionId={params.id} parentList={query.get("list") || ""} run={run} setToast={notify} />;
+    return <NoPermission />;
+  };
+
+  return <div className="admin-shell"><aside className="admin-sidebar"><div className="admin-logo"><span>汇</span><div><strong>汇盈探店</strong><small>运营管理中心</small></div></div><nav>{allowedNav.map(({ id, label, icon: Icon }) => <button key={id} className={page === id ? "is-active" : ""} onClick={() => navigate(adminPaths.page(id))}><Icon size={19} weight={page === id ? "fill" : "regular"} /><span>{label}</span></button>)}</nav><div className="admin-user"><div>{session.user.displayName.slice(0, 1)}</div><span><strong>{session.user.displayName}</strong><small>{roleLabel(role)}</small>{session.user.scopeLabel ? <small className="user-scope">{session.user.scopeLabel}</small> : null}</span><button aria-label="退出登录" onClick={() => guardedAction(logout)}><SignOut size={18} /></button></div></aside><section className="admin-main"><main className="admin-content">{renderScreen()}</main></section><Toast toast={toast} onClose={() => setToastState(null)} /><Modal open={Boolean(confirm)} title={confirm?.title} description={confirm?.description} danger={confirm?.danger} confirmLabel={confirm?.pending ? "处理中…" : "确认"} onCancel={() => !confirm?.pending && setConfirm(null)} onConfirm={confirm?.pending ? undefined : confirm?.action} /><FormDialog open={Boolean(formDialog)} title={formDialog?.title} description={formDialog?.description} danger={formDialog?.danger} fields={formDialog?.fields} initialValues={formDialog?.initialValues} pending={formDialog?.pending} error={formDialog?.error} confirmLabel={formDialog?.confirmLabel} onConfirm={submitFormDialog} onCancel={() => !formDialog?.pending && setFormDialog(null)} />{/* 离开确认始终最上层：脏态弹窗/编辑器之上仍可点按 */}<Modal open={Boolean(leaveConfirm)} title="有未保存的修改" description="离开当前页面将丢失未保存的内容。" danger confirmLabel="放弃并离开" cancelLabel="留在本页" onCancel={() => resolveLeave(false)} onConfirm={() => resolveLeave(true)} /></div>;
+}
+
+// 任务向导 step 查询串（详情页「添加探店员」直达 ?step=2）；非法值安全回退第 1 步。
+function wizardStep(query) {
+  const value = Number(query.get("step"));
+  return [1, 2, 3].includes(value) ? value : 1;
 }
 
 // 游标分页 hook：首屏（path 已含 limit/filters，不带 cursor）整体替换；
@@ -195,21 +283,6 @@ function LoadMorePager({ rows, hasMore, loadingMore, moreError, onLoadMore, unit
   return <div className="pager"><span>已加载 {rows.length} {unit}</span>{moreError ? <span className="form-message" role="alert">{moreError}</span> : null}<button className="admin-secondary" onClick={onLoadMore} disabled={loadingMore}>{loadingMore ? "正在加载…" : "加载更多"}</button></div>;
 }
 
-function Page({ page, pager, ...props }) {
-  if (page === "overview") return <Overview setPage={props.setPage} />;
-  if (page === "dashboard") return <Dashboard setToast={props.setToast} />;
-  if (props.loading) return <StatePanel title="正在加载业务数据…" />;
-  if (props.error) return <StatePanel title={props.error} action={<button className="admin-primary" onClick={props.refresh}>重新加载</button>} />;
-  if (page === "users") return <UsersPage {...props} />;
-  if (page === "stores") return <Stores {...props} />;
-  if (page === "campaigns") return <Campaigns {...props} pager={pager} />;
-  if (page === "questionnaires") return <Questionnaires {...props} pager={pager} />;
-  if (page === "submissions") return <Submissions {...props} />;
-  if (page === "exports") return <Exports {...props} pager={pager} />;
-  if (page === "audits") return <Audits {...props} />;
-  return <NoPermission />;
-}
-
 function Overview({ setPage }) {
   // 数据看板：按当前角色与可见范围统计；任一接口无权限或失败时对应卡片显示「—」，不影响其他卡片。
   const [stats, setStats] = useState(null);
@@ -261,12 +334,13 @@ function Overview({ setPage }) {
   return <><PageHeader eyebrow="运营概览" title="暗访执行工作台" description="以下数字按你的角色和可见范围实时统计，点击卡片可直接进入对应功能。" /><section className="metric-grid">{cards.map(({ label, value, icon: Icon, page }) => <button key={label} className="metric-card" onClick={() => setPage(page)}><Icon size={20} /><strong>{value ?? "—"}</strong><span>{label}</span></button>)}</section><section className="overview-grid"><div className="panel panel--wide"><div className="panel-heading"><div><h2>最近提交</h2></div><button className="admin-secondary" onClick={() => setPage("submissions")}>查看全部</button></div>{stats?.recentSubmissions?.length ? <div className="recent-submissions">{stats.recentSubmissions.map((row) => <div key={row.id}><span className="rs-name">{row.inspectorName}</span><span className="rs-task">{row.taskName}</span><span className="rs-score">{row.scoreRate}</span><span className="rs-time">{formatTime(row.submittedAt)}</span></div>)}</div> : <div className="empty-business"><strong>{stats ? "还没有提交记录" : "正在加载…"}</strong></div>}</div><div className="panel"><div className="panel-heading"><div><h2>功能开关</h2></div></div><div className="feature-flags"><div className="feature-flag"><span>小票识别（OCR）</span><StatusBadge tone={ocrFlag === true ? "success" : "neutral"}>{ocrFlag === null ? "读取中…" : ocrFlag === "error" ? "状态未知" : ocrFlag ? "已开启" : "未开启"}</StatusBadge></div><p className="feature-flag-hint">开启后探店员可在菜品页识别小票并带入菜品；本开关由服务端部署配置 OCR_PROVIDER 控制，修改 .env 并重启服务后立即生效，无需小程序发版。</p></div></div></section></>;
 }
 
-function UsersPage({ run, ask, setToast }) {
+function UsersPage({ tab: tabParam, onTab, onNew, onEdit, run, ask, setToast }) {
   const { session, expire } = useAdminAuth();
   const currentUserId = session.user.id;
-  const [tab, setTab] = useState("inspector");
+  // tab 由 URL 查询串驱动（?tab=inspector|admin|registrations），非法值安全回退探员 tab。
+  const tab = ["inspector", "admin", "registrations"].includes(tabParam) ? tabParam : "inspector";
+  const setTab = (value) => onTab(value);
   const [version, setVersion] = useState(0);
-  const [editing, setEditing] = useState(null);
   // 三个数据源各自独立游标，tab 间互不影响；任一操作成功后 reload 让三源整体重置回首页。
   const reload = useCallback(() => setVersion((value) => value + 1), []);
   const regsPage = usePagedRemote({ path: `${API.admin.registrations}?limit=${PAGE_SIZE}&order=desc`, schema: PAGED_LIST_SCHEMAS.registrations, refreshKey: version, expire });
@@ -280,10 +354,9 @@ function UsersPage({ run, ask, setToast }) {
   const isInspectorTab = tab === "inspector";
   const rows = isInspectorTab ? inspectors : admins;
   const activePager = isRegistrationTab ? regsPage : isInspectorTab ? inspectorsPage : adminsPage;
-  if (editing) return <UserEditor mode={editing.mode} kind={editing.kind} row={editing.row} onBack={() => setEditing(null)} run={run} reload={reload} setToast={setToast} />;
   // 行内自我保护标记：当前登录账号不可停用/删除（后端同样拦截），避免误删自己
   const selfRow = (row) => row.id === currentUserId;
-  return <><PageHeader eyebrow="人员管理" title="用户管理" description="管理员手动创建账号并控制账号设置；小程序注册的探员需审批后生效。" action={isRegistrationTab ? null : <button className="admin-primary" onClick={() => setEditing({ mode: "new", kind: isInspectorTab ? "inspector" : "admin" })}><Plus size={17} /> {isInspectorTab ? "新建探员" : "新建管理员"}</button>} />{error ? <p className="form-message" role="alert">{error}</p> : null}<div className="status-tabs" role="tablist"><button className={isInspectorTab ? "is-active" : ""} onClick={() => setTab("inspector")}>探员账号<span>{inspectors.length}{inspectorsPage.hasMore ? "+" : ""}</span></button><button className={tab === "admin" ? "is-active" : ""} onClick={() => setTab("admin")}>管理员账号<span>{admins.length}{adminsPage.hasMore ? "+" : ""}</span></button><button className={isRegistrationTab ? "is-active" : ""} onClick={() => setTab("registrations")}>注册审批<span>{registrations.filter((row) => row.status === "pending_approval").length}{regsPage.hasMore ? "+" : ""}</span></button></div>{isRegistrationTab ? <RegistrationPanel rows={registrations} run={run} ask={ask} reload={reload} pager={regsPage} /> : <DataPanel empty={`当前没有${isInspectorTab ? "探员" : "管理员"}账号`}><table className="data-table"><thead><tr>{isInspectorTab ? <><th>探员</th><th>手机号</th><th>来源</th><th>状态</th><th>操作</th></> : <><th>管理员</th><th>手机号</th><th>可见范围</th><th>状态</th><th>操作</th></>}</tr></thead><tbody>{rows.map((row) => { const self = selfRow(row); return <tr key={row.id} className={self ? "row-current-user" : ""}><td><strong>{row.displayName}</strong>{self && <StatusBadge tone="success">当前登录</StatusBadge>}<small>{row.username}{isInspectorTab ? "" : ` · ${roleLabel(row.roleCode)}`}</small></td><td>{row.maskedPhone}</td><td>{isInspectorTab ? (row.source === "registration" ? "注册" : "手动创建") : row.scopeLabel || "—"}</td><td><StatusBadge>{toStatusLabel(row.status)}</StatusBadge></td><td><div className="table-actions"><button onClick={() => setEditing({ mode: "edit", kind: isInspectorTab ? "inspector" : "admin", row })}>编辑</button>{row.status === "approved_active" && <button className="link-danger" disabled={self} title={self ? "不能停用当前登录的账号" : undefined} onClick={() => askReason(ask, { title: `停用这名${isInspectorTab ? "探员" : "管理员"}？`, description: "停用后该账号将立即无法登录。", danger: true, reasonLabel: "停用原因", confirmLabel: "确认停用", path: API.admin.disableUser(row.id), body: { revision: row.revision }, success: "账号已停用", onSuccess: reload })}>停用</button>}{row.status === "disabled" && <button onClick={() => askReason(ask, { title: `启用这名${isInspectorTab ? "探员" : "管理员"}？`, description: "启用后该账号可立即登录。", reasonLabel: "启用原因", confirmLabel: "确认启用", path: API.admin.enableUser(row.id), body: { revision: row.revision }, success: "账号已启用", onSuccess: reload })}>启用</button>}<button className="link-danger" disabled={self} title={self ? "不能删除当前登录的账号" : undefined} onClick={() => run({ title: "删除这个账号？", description: "账号若关联探店任务、提交记录或注册申请将无法删除（可改为停用）；删除后其创建的业务记录将移交给当前操作者，审计历史保留。", danger: true, path: API.admin.deleteUser(row.id), method: "DELETE", body: { revision: row.revision }, success: "账号已删除", onSuccess: reload })}>删除</button></div></td></tr>; })}</tbody></table></DataPanel>}{!isRegistrationTab && <LoadMorePager rows={rows} hasMore={activePager.hasMore} loadingMore={activePager.loadingMore} moreError={activePager.moreError} onLoadMore={activePager.loadMore} unit="个账号" />}</>;
+  return <><PageHeader eyebrow="人员管理" title="用户管理" description="管理员手动创建账号并控制账号设置；小程序注册的探员需审批后生效。" action={isRegistrationTab ? null : <button className="admin-primary" onClick={() => onNew(isInspectorTab ? "inspector" : "admin")}><Plus size={17} /> {isInspectorTab ? "新建探员" : "新建管理员"}</button>} />{error ? <p className="form-message" role="alert">{error}</p> : null}<div className="status-tabs" role="tablist"><button className={isInspectorTab ? "is-active" : ""} onClick={() => setTab("inspector")}>探员账号<span>{inspectors.length}{inspectorsPage.hasMore ? "+" : ""}</span></button><button className={tab === "admin" ? "is-active" : ""} onClick={() => setTab("admin")}>管理员账号<span>{admins.length}{adminsPage.hasMore ? "+" : ""}</span></button><button className={isRegistrationTab ? "is-active" : ""} onClick={() => setTab("registrations")}>注册审批<span>{registrations.filter((row) => row.status === "pending_approval").length}{regsPage.hasMore ? "+" : ""}</span></button></div>{isRegistrationTab ? <RegistrationPanel rows={registrations} run={run} ask={ask} reload={reload} pager={regsPage} /> : <DataPanel empty={`当前没有${isInspectorTab ? "探员" : "管理员"}账号`}><table className="data-table"><thead><tr>{isInspectorTab ? <><th>探员</th><th>手机号</th><th>来源</th><th>状态</th><th>操作</th></> : <><th>管理员</th><th>手机号</th><th>可见范围</th><th>状态</th><th>操作</th></>}</tr></thead><tbody>{rows.map((row) => { const self = selfRow(row); return <tr key={row.id} className={self ? "row-current-user" : ""}><td><strong>{row.displayName}</strong>{self && <StatusBadge tone="success">当前登录</StatusBadge>}<small>{row.username}{isInspectorTab ? "" : ` · ${roleLabel(row.roleCode)}`}</small></td><td>{row.maskedPhone}</td><td>{isInspectorTab ? (row.source === "registration" ? "注册" : "手动创建") : row.scopeLabel || "—"}</td><td><StatusBadge>{toStatusLabel(row.status)}</StatusBadge></td><td><div className="table-actions"><button onClick={() => onEdit(row)}>编辑</button>{row.status === "approved_active" && <button className="link-danger" disabled={self} title={self ? "不能停用当前登录的账号" : undefined} onClick={() => askReason(ask, { title: `停用这名${isInspectorTab ? "探员" : "管理员"}？`, description: "停用后该账号将立即无法登录。", danger: true, reasonLabel: "停用原因", confirmLabel: "确认停用", path: API.admin.disableUser(row.id), body: { revision: row.revision }, success: "账号已停用", onSuccess: reload })}>停用</button>}{row.status === "disabled" && <button onClick={() => askReason(ask, { title: `启用这名${isInspectorTab ? "探员" : "管理员"}？`, description: "启用后该账号可立即登录。", reasonLabel: "启用原因", confirmLabel: "确认启用", path: API.admin.enableUser(row.id), body: { revision: row.revision }, success: "账号已启用", onSuccess: reload })}>启用</button>}<button className="link-danger" disabled={self} title={self ? "不能删除当前登录的账号" : undefined} onClick={() => run({ title: "删除这个账号？", description: "账号若关联探店任务、提交记录或注册申请将无法删除（可改为停用）；删除后其创建的业务记录将移交给当前操作者，审计历史保留。", danger: true, path: API.admin.deleteUser(row.id), method: "DELETE", body: { revision: row.revision }, success: "账号已删除", onSuccess: reload })}>删除</button></div></td></tr>; })}</tbody></table></DataPanel>}{!isRegistrationTab && <LoadMorePager rows={rows} hasMore={activePager.hasMore} loadingMore={activePager.loadingMore} moreError={activePager.moreError} onLoadMore={activePager.loadMore} unit="个账号" />}</>;
 }
 
 function RegistrationPanel({ rows, run, ask, reload, pager }) {
@@ -298,6 +371,11 @@ function UserEditor({ mode, kind, row, onBack, run, reload, setToast }) {
   const [form, setForm] = useState(isNew
     ? { kind, username: "", displayName: "", phone: "", password: "", scopeType: "all", regionId: "", storeId: "" }
     : { kind: kind, displayName: row.displayName, status: row.status, password: "", scopeType: row.scopeType || "all", regionId: row.regionId || "", storeId: row.storeId || "" });
+  // 未保存修改守卫：与挂载时的表单快照比较（异步加载区域/门店选项不算编辑；改动后改回原值即不脏）。
+  const formRef = useRef(form);
+  formRef.current = form;
+  const formBaselineRef = useRef(form);
+  useNavigationGuard(useCallback(() => JSON.stringify(formRef.current) !== JSON.stringify(formBaselineRef.current), []));
   const [regions, setRegions] = useState([]);
   const [stores, setStores] = useState([]);
   const [provinceId, setProvinceId] = useState("");
@@ -333,7 +411,7 @@ function UserEditor({ mode, kind, row, onBack, run, reload, setToast }) {
       : { displayName: form.displayName.trim(), status: form.status, kind: form.kind, ...(form.password ? { password: form.password } : {}), ...(form.kind !== "inspector" ? { scopeType: form.scopeType, regionId: form.scopeType === "region" ? form.regionId : null, storeId: form.scopeType === "store" ? form.storeId : null } : {}) };
     const parsed = (isNew ? UserCreateSchema : UserUpdateSchema).safeParse(body);
     if (!parsed.success) { setToast(parsed.error.issues.map((issue) => issue.message).join("；"), "error"); return; }
-    run({ title: isNew ? "创建这个账号？" : "保存账号设置？", description: isNew ? "创建后账号立即可用（探员直接激活，管理员可登录后台）。" : "重置密码后该用户所有会话将立即失效。", path: isNew ? API.admin.createUser : API.admin.user(row.id), method: isNew ? "POST" : "PATCH", body, success: isNew ? "账号已创建" : "账号设置已保存", onSuccess: reload });
+    run({ title: isNew ? "创建这个账号？" : "保存账号设置？", description: isNew ? "创建后账号立即可用（探员直接激活，管理员可登录后台）。" : "重置密码后该用户所有会话将立即失效。", execute: async () => { await request(isNew ? API.admin.createUser : API.admin.user(row.id), { method: isNew ? "POST" : "PATCH", body }); formBaselineRef.current = { ...formRef.current }; }, success: isNew ? "账号已创建" : "账号设置已保存", onSuccess: reload });
   };
   const required = isNew ? Boolean(form.username.trim() && form.displayName.trim() && form.phone.trim() && form.password) : true;
   const scopeInvalid = form.kind !== "inspector" && form.scopeType === "region" && !form.regionId || form.kind !== "inspector" && form.scopeType === "store" && !form.storeId;
@@ -341,8 +419,7 @@ function UserEditor({ mode, kind, row, onBack, run, reload, setToast }) {
   return <><button className="back-link" onClick={onBack}><CaretRight size={15} /> 返回用户列表</button><PageHeader eyebrow="人员管理" title={isNew ? `新建${kindLabel[form.kind] || "账号"}` : "编辑账号"} description="账号密码由管理员设置，创建后立即可用。" /><section className="panel"><div className="field-grid">{isNew && <label className="admin-field"><span>用户名</span><input value={form.username} onChange={(event) => patch("username", event.target.value)} /></label>}<label className="admin-field"><span>姓名</span><input value={form.displayName} onChange={(event) => patch("displayName", event.target.value)} /></label>{isNew && <label className="admin-field"><span>手机号</span><input value={form.phone} onChange={(event) => patch("phone", event.target.value)} /></label>}<label className="admin-field"><span>账号类型</span><select value={form.kind} onChange={(event) => patch("kind", event.target.value)}><option value="inspector">探员</option><option value="admin">管理员</option><option value="auditor">审计员（查看全部内容与操作审计）</option></select></label>{!isNew && <label className="admin-field"><span>状态</span><select value={form.status} onChange={(event) => patch("status", event.target.value)}><option value="approved_active">启用</option><option value="disabled">停用</option></select></label>}<label className="admin-field"><span>{isNew ? "初始密码" : "重置密码（留空不修改）"}</span><input type="password" value={form.password} onChange={(event) => patch("password", event.target.value)} /></label>{form.kind !== "inspector" && <><label className="admin-field"><span>可见范围</span><select value={form.scopeType} onChange={(event) => patch("scopeType", event.target.value)}><option value="all">全部</option><option value="region">按区域</option><option value="store">按门店</option></select></label>{form.scopeType === "region" && <><label className="admin-field"><span>省份</span><select value={provinceId} onChange={(event) => { setProvinceId(event.target.value); setCityId(""); patch("regionId", ""); }}><option value="" disabled>请选择省份</option>{provinces.map((region) => <option key={region.id} value={region.id}>{region.name}</option>)}</select></label><label className="admin-field"><span>城市</span><select value={cityId} disabled={!provinceId} onChange={(event) => { setCityId(event.target.value); patch("regionId", ""); }}><option value="" disabled>请选择城市</option>{cities.map((region) => <option key={region.id} value={region.id}>{region.name}</option>)}</select></label><label className="admin-field"><span>区县</span><select value={form.regionId} disabled={!cityId} onChange={(event) => patch("regionId", event.target.value)}><option value="" disabled>请选择区县</option>{districts.map((region) => <option key={region.id} value={region.id}>{region.name}</option>)}</select></label></>}{form.scopeType === "store" && <label className="admin-field"><span>门店</span><select value={form.storeId} onChange={(event) => patch("storeId", event.target.value)}><option value="" disabled>请选择门店</option>{stores.map((store) => <option key={store.id} value={store.id}>{store.name}</option>)}</select></label>}</>}</div><div className="editor-footer"><button className="admin-primary" onClick={save} disabled={!required || scopeInvalid}>保存</button></div></section></>;
 }
 
-function Stores({ run, ask }) {
-  const [editing, setEditing] = useState(null);
+function Stores({ query, onFiltersChange, onNew, onEdit, run, ask }) {
   // 品牌列表不可用（如权限或服务异常）时收起品牌面板，门店列表本身不受影响。
   const [brands, setBrands] = useState(null);
   const loadBrands = useCallback(() => {
@@ -358,7 +435,10 @@ function Stores({ run, ask }) {
     return () => { active = false; };
   }, []);
   // 「城市 x 品牌」筛选升级为服务端参数（brandId/cityRegionId）：条件变化即换 path，usePagedRemote 自动重置游标重查。
-  const [filters, setFilters] = useState({ cityRegionId: "", brandId: "" });
+  // 筛选以列表 URL 查询串为准（白名单键）：进入编辑器再返回（站内返回或浏览器返回）筛选与行集保持；
+  // 刷新/书签同样恢复；请求契约（limit/cityRegionId/brandId）不变。
+  const filters = { cityRegionId: query.get("cityRegionId") || "", brandId: query.get("brandId") || "" };
+  const patchFilter = (field, value) => onFiltersChange({ ...filters, [field]: value });
   const [retryKey, setRetryKey] = useState(0);
   const reloadStores = useCallback(() => setRetryKey((value) => value + 1), []);
   const storesPath = useMemo(() => {
@@ -382,19 +462,22 @@ function Stores({ run, ask }) {
   });
   const cityOptions = cities.map((region) => [region.id, region.name]);
   const hasFilter = Boolean(filters.cityRegionId || filters.brandId);
-  const patchFilter = (field, value) => setFilters((current) => ({ ...current, [field]: value }));
-  if (editing) return <StoreEditor store={editing} onBack={() => setEditing(null)} run={run} ask={ask} brands={brandList} onBrandCreated={loadBrands} />;
   if (storesPage.loading) return <StatePanel title="正在加载业务数据…" />;
   if (storesPage.error) return <StatePanel title={storesPage.error} action={<button className="admin-primary" onClick={reloadStores}>重新加载</button>} />;
-  return <><PageHeader eyebrow="门店管理" title="门店与打卡范围" description="门店按「城市 → 品牌」组织；打卡是否通过由系统最终判断。" action={<button className="admin-primary" onClick={() => setEditing({ name: "", businessNo: "", brandId: "", regionName: "", address: "", latitude: null, longitude: null, radiusMeters: 300, accuracyAllowanceMaxMeters: 200 })}><Plus size={17} /> 新建门店</button>} />
+  return <><PageHeader eyebrow="门店管理" title="门店与打卡范围" description="门店按「城市 → 品牌」组织；打卡是否通过由系统最终判断。" action={<button className="admin-primary" onClick={onNew}><Plus size={17} /> 新建门店</button>} />
     {brands !== null && <section className="panel brand-panel"><div className="panel-heading"><div><h2>品牌</h2></div><button className="admin-secondary" onClick={askCreateBrand}><Plus size={15} /> 新建品牌</button></div><div className="data-table-wrap"><table className="data-table"><thead><tr><th>品牌</th><th>关联门店</th><th>状态</th><th>操作</th></tr></thead><tbody>{brandList.map((brand) => <tr key={brand.id}><td><strong>{brand.name}</strong></td><td>{brand.storeCount ?? 0} 家</td><td><StatusBadge>{brand.active ? "已启用" : "已停用"}</StatusBadge></td><td><div className="table-actions"><button onClick={() => askRenameBrand(brand)}>重命名</button>{brand.active && <button className="link-danger" onClick={() => run({ title: `停用品牌「${brand.name}」？`, description: "停用后新建门店不能再选择该品牌，已有门店不受影响。", danger: true, path: API.admin.brand(brand.id), method: "PATCH", body: { name: brand.name, active: false, revision: brand.revision }, success: "品牌已停用", onSuccess: afterBrandChange })}>停用</button>}{!brand.active && <button onClick={() => run({ title: `启用品牌「${brand.name}」？`, description: "启用后新建门店可重新选择该品牌。", path: API.admin.brand(brand.id), method: "PATCH", body: { name: brand.name, active: true, revision: brand.revision }, success: "品牌已启用", onSuccess: afterBrandChange })}>启用</button>}<button className="link-danger" onClick={() => run({ title: `删除品牌「${brand.name}」？`, description: "仅当品牌没有关联门店时才能删除；已关联时请改为停用。", danger: true, path: API.admin.deleteBrand(brand.id), method: "DELETE", body: { revision: brand.revision }, success: "品牌已删除", onSuccess: afterBrandChange })}>删除</button></div></td></tr>)}</tbody></table></div></section>}
-    <section className="panel"><div className="filter-grid"><label className="admin-field"><span>城市</span><select aria-label="门店城市筛选" value={filters.cityRegionId} disabled={cityOptions.length === 0} onChange={(event) => patchFilter("cityRegionId", event.target.value)}><option value="">全部城市</option>{cityOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label><label className="admin-field"><span>品牌</span><select aria-label="门店品牌筛选" value={filters.brandId} disabled={brandList.length === 0} onChange={(event) => patchFilter("brandId", event.target.value)}><option value="">全部品牌</option>{brandList.map((brand) => <option key={brand.id} value={brand.id}>{brand.name}</option>)}</select></label>{hasFilter && <div className="admin-field filter-clear"><span>&nbsp;</span><button className="admin-secondary" onClick={() => setFilters({ cityRegionId: "", brandId: "" })}>清除筛选</button></div>}</div></section>
-    <DataPanel empty="当前授权范围内没有门店"><table className="data-table"><thead><tr><th>门店</th><th>品牌</th><th>区域</th><th>状态</th><th>打卡半径</th><th>操作</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td><strong>{row.name}</strong><small>{row.businessNo}</small></td><td>{row.brandName || "—"}</td><td>{row.regionName}<small>{row.cityName || ""}</small></td><td><StatusBadge>{row.active ? "已启用" : "已停用"}</StatusBadge></td><td>{row.radiusMeters} 米</td><td><div className="table-actions"><button onClick={() => setEditing({ ...row, latitude: row.latitudeGcj02, longitude: row.longitudeGcj02, accuracyAllowanceMaxMeters: row.accuracyAllowanceMaxMeters || 200 })}>编辑范围</button><button className="link-danger" onClick={() => run({ title: "删除这家门店？", description: "仅当门店未被任何探店任务引用时才能删除；被引用时请改为停用。", danger: true, path: API.admin.deleteStore(row.id), method: "DELETE", body: { revision: row.revision }, success: "门店已删除", onSuccess: reloadStores })}>删除</button></div></td></tr>)}</tbody></table></DataPanel>
+    <section className="panel"><div className="filter-grid"><label className="admin-field"><span>城市</span><select aria-label="门店城市筛选" value={filters.cityRegionId} disabled={cityOptions.length === 0} onChange={(event) => patchFilter("cityRegionId", event.target.value)}><option value="">全部城市</option>{cityOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label><label className="admin-field"><span>品牌</span><select aria-label="门店品牌筛选" value={filters.brandId} disabled={brandList.length === 0} onChange={(event) => patchFilter("brandId", event.target.value)}><option value="">全部品牌</option>{brandList.map((brand) => <option key={brand.id} value={brand.id}>{brand.name}</option>)}</select></label>{hasFilter && <div className="admin-field filter-clear"><span>&nbsp;</span><button className="admin-secondary" onClick={() => onFiltersChange({ cityRegionId: "", brandId: "" })}>清除筛选</button></div>}</div></section>
+    <DataPanel empty="当前授权范围内没有门店"><table className="data-table"><thead><tr><th>门店</th><th>品牌</th><th>区域</th><th>状态</th><th>打卡半径</th><th>操作</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td><strong>{row.name}</strong><small>{row.businessNo}</small></td><td>{row.brandName || "—"}</td><td>{row.regionName}<small>{row.cityName || ""}</small></td><td><StatusBadge>{row.active ? "已启用" : "已停用"}</StatusBadge></td><td>{row.radiusMeters} 米</td><td><div className="table-actions"><button onClick={() => onEdit(row.id)}>编辑范围</button><button className="link-danger" onClick={() => run({ title: "删除这家门店？", description: "仅当门店未被任何探店任务引用时才能删除；被引用时请改为停用。", danger: true, path: API.admin.deleteStore(row.id), method: "DELETE", body: { revision: row.revision }, success: "门店已删除", onSuccess: reloadStores })}>删除</button></div></td></tr>)}</tbody></table></DataPanel>
     <LoadMorePager rows={rows} hasMore={storesPage.hasMore} loadingMore={storesPage.loadingMore} moreError={storesPage.moreError} onLoadMore={storesPage.loadMore} unit="家门店" /></>;
 }
 
 function StoreEditor({ store, onBack, run, ask, brands, onBrandCreated }) {
   const [form, setForm] = useState({ active: true, ...store });
+  // 未保存修改守卫：表单快照比较（输入与地图选点都算编辑；改回原值即不脏；保存成功后基准推进）。
+  const formRef = useRef(form);
+  formRef.current = form;
+  const formBaselineRef = useRef(form);
+  useNavigationGuard(useCallback(() => JSON.stringify(formRef.current) !== JSON.stringify(formBaselineRef.current), []));
   const [regions, setRegions] = useState([]);
   const [regionsError, setRegionsError] = useState("");
   const [provinceId, setProvinceId] = useState("");
@@ -445,52 +528,35 @@ function StoreEditor({ store, onBack, run, ask, brands, onBrandCreated }) {
   const save = () => {
     if (!form.name?.trim() || !form.businessNo?.trim() || !form.regionId || !form.address?.trim()) return;
     if (!form.latitude || !form.longitude) return;
-    run({ title: "保存门店和打卡范围？", description: "系统将检查门店坐标、100–1000 米打卡半径和允许定位误差。", path: store.id ? API.admin.store(store.id) : API.admin.stores, method: store.id ? "PATCH" : "POST", body: { name: form.name.trim(), businessNo: form.businessNo.trim(), brandId: form.brandId, regionId: form.regionId, address: form.address.trim(), active: form.active, latitudeGcj02: form.latitude, longitudeGcj02: form.longitude, providerPoiId: form.providerPoiId || null, coordinateSource: form.coordinateSource, radiusMeters: Number(form.radiusMeters), accuracyAllowanceMaxMeters: Number(form.accuracyAllowanceMaxMeters), // 坐标只能通过地图选点产生：保存时带有效坐标即视为管理员已完成位置校准。
-      locationVerified: Boolean(form.latitude && form.longitude), revision: store.revision }, success: store.id ? "门店范围已保存" : "门店已创建" });
+    run({ title: "保存门店和打卡范围？", description: "系统将检查门店坐标、100–1000 米打卡半径和允许定位误差。", execute: async () => {
+      await request(store.id ? API.admin.store(store.id) : API.admin.stores, { method: store.id ? "PATCH" : "POST", body: { name: form.name.trim(), businessNo: form.businessNo.trim(), brandId: form.brandId, regionId: form.regionId, address: form.address.trim(), active: form.active, latitudeGcj02: form.latitude, longitudeGcj02: form.longitude, providerPoiId: form.providerPoiId || null, coordinateSource: form.coordinateSource, radiusMeters: Number(form.radiusMeters), accuracyAllowanceMaxMeters: Number(form.accuracyAllowanceMaxMeters), // 坐标只能通过地图选点产生：保存时带有效坐标即视为管理员已完成位置校准。
+        locationVerified: Boolean(form.latitude && form.longitude), revision: store.revision } });
+      formBaselineRef.current = { ...formRef.current };
+    }, success: store.id ? "门店范围已保存" : "门店已创建" });
   };
   return <><button className="back-link" onClick={onBack}><CaretRight size={15} /> 返回门店列表</button><PageHeader eyebrow="门店管理" title={store.id ? "编辑门店和范围" : "新建门店"} description="搜索地点后拖动地图微调，以地图中心作为门店坐标。" /><section className="panel"><div className="field-grid"><label className="admin-field"><span>门店编号</span><input value={form.businessNo} onChange={(event) => patch("businessNo", event.target.value)} /></label><label className="admin-field"><span>门店名称</span><input value={form.name} onChange={(event) => patch("name", event.target.value)} /></label><label className="admin-field"><span>品牌</span><div className="field-with-action"><select value={form.brandId || ""} onChange={(event) => patch("brandId", event.target.value)}><option value="" disabled>请选择品牌</option>{(brands || []).map((brand) => <option key={brand.id} value={brand.id}>{brand.name}</option>)}</select><button type="button" className="admin-secondary" onClick={askInlineBrand}><Plus size={14} /> 新建品牌</button></div></label>{regionsError ? <label className="admin-field"><span>区域</span><span className="form-message">{regionsError}；请先创建区域</span></label> : <><label className="admin-field"><span>省份</span><select value={provinceId} onChange={(event) => { setProvinceId(event.target.value); setCityId(""); patch("regionId", ""); }}><option value="" disabled>请选择省份</option>{provinces.map((region) => <option key={region.id} value={region.id}>{region.name}</option>)}</select></label><label className="admin-field"><span>城市</span><select value={cityId} disabled={!provinceId} onChange={(event) => { setCityId(event.target.value); patch("regionId", ""); }}><option value="" disabled>请选择城市</option>{cities.map((region) => <option key={region.id} value={region.id}>{region.name}</option>)}</select></label><label className="admin-field"><span>区县</span><select value={form.regionId || ""} disabled={!cityId} onChange={(event) => patch("regionId", event.target.value)}><option value="" disabled>请选择区县</option>{districts.map((region) => <option key={region.id} value={region.id}>{region.name}</option>)}</select></label></>}<label className="admin-field"><span>地址</span><input value={form.address || ""} onChange={(event) => patch("address", event.target.value)} /></label><label className="admin-field"><span>打卡半径（米）</span><input type="number" min="100" max="1000" value={form.radiusMeters} onChange={(event) => patch("radiusMeters", event.target.value)} /></label><label className="admin-field"><span>允许定位误差（米）</span><input type="number" min="0" max="200" value={form.accuracyAllowanceMaxMeters} onChange={(event) => patch("accuracyAllowanceMaxMeters", event.target.value)} /></label><label className="check-field store-active-field"><input type="checkbox" checked={form.active} onChange={(event) => patch("active", event.target.checked)} /><span>门店启用，可创建新任务</span></label></div><TencentStoreMap value={form} radiusMeters={Number(form.radiusMeters)} onChange={applyPoi} /><div className="editor-footer"><button className="admin-primary" onClick={save} disabled={!form.name?.trim() || !form.businessNo?.trim() || !form.brandId || !form.regionId || !form.address?.trim() || !form.latitude || !form.longitude}>保存门店</button></div></section></>;
 }
 
-function Campaigns({ data, run, ask, refresh, setToast, pager }) {
+function Campaigns({ data, onOpen, onEdit, onNew, run, ask, refresh, pager }) {
   const rows = items(data);
-  const [detail, setDetail] = useState(null);
-  // 任务向导：新建、编辑草稿、补加指派统一入口；returnTo 决定关闭后回到列表还是任务详情。
-  const [wizard, setWizard] = useState(null);
-  const [detailState, setDetailState] = useState({ loading: false, error: "" });
-  const open = async (row) => { setDetail(row); setDetailState({ loading: true, error: "" }); try { const result = await request(API.admin.campaign(row.id), { schema: CampaignDetailSchema }); setDetail(result); setDetailState({ loading: false, error: "" }); } catch (error) { setDetailState({ loading: false, error: error.message }); } };
-  // 列表页编辑：先拉取完整详情（含 storeId/commonInstruction），再进入向导
-  const editRow = async (row) => {
-    try { const full = await request(API.admin.campaign(row.id), { schema: CampaignDetailSchema }); setWizard({ campaign: full, step: 1, returnTo: "list" }); }
-    catch (error) { setToast(error.message, "error"); }
-  };
-  const closeWizard = () => {
-    const returnTo = wizard?.returnTo;
-    setWizard(null);
-    // 从详情进入的向导关闭后应回到详情；refresh 会触发列表 loading 态卸载 Campaigns、丢失 detail 状态，因此等返回列表时再刷新。
-    if (returnTo === "detail" && detail) open(detail);
-    else { setDetail(null); refresh(); }
-  };
-  if (wizard) return <CampaignWizard campaign={wizard.campaign} initialStep={wizard.step} returnTo={wizard.returnTo} onClose={closeWizard} setToast={setToast} />;
-  if (detail) return <CampaignDetail campaign={detail} state={detailState} onBack={() => { setDetail(null); refresh(); }} onEdit={() => setWizard({ campaign: detail, step: 1, returnTo: "detail" })} onAddInspector={() => setWizard({ campaign: detail, step: 2, returnTo: "detail" })} reload={() => open(detail)} run={run} ask={ask} setToast={setToast} />;
-  return <><PageHeader eyebrow="探店任务" title="探店任务与指派" description="同店多人始终使用相互隔离的独立问卷。点击任务行查看指派明细。" action={<button className="admin-primary" onClick={() => setWizard({ campaign: null, step: 1, returnTo: "list" })}><Plus size={17} /> 新建探店任务</button>} /><DataPanel empty="当前没有探店任务"><table className="data-table"><thead><tr><th>任务</th><th>门店</th><th>执行窗口</th><th>指派</th><th>逾期</th><th>状态</th><th>操作</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id} className="row-link" onClick={() => open(row)}><td><strong>{row.name}</strong><small>{row.businessNo}</small></td><td>{row.storeName}</td><td>{formatTime(row.startsAt)} 至 {formatTime(row.dueAt)}</td><td>{row.assignmentCount} 人</td><td>{row.overdueCount || 0}</td><td><StatusBadge>{toStatusLabel(row.status)}</StatusBadge></td><td onClick={(event) => event.stopPropagation()}><div className="table-actions"><button onClick={() => open(row)}>查看指派</button>{row.status === "draft" && <><button onClick={() => editRow(row)}>编辑</button><button onClick={() => run({ title: "发布这个任务？", description: "系统将检查门店位置、问卷版本、人员状态和所有指派。", path: API.admin.publishCampaign(row.id), body: { revision: row.revision }, success: "任务已发布", onSuccess: refresh })}>发布</button><button className="link-danger" onClick={() => run({ title: "删除这个任务？", description: "仅待发布任务可删除，其下未发布的指派将一并删除；已发布任务请用整体取消。", danger: true, path: API.admin.deleteCampaign(row.id), method: "DELETE", body: { revision: row.revision }, success: "任务已删除", onSuccess: refresh })}>删除</button></>}{!["completed", "cancelled"].includes(row.status) && <button className="link-danger" onClick={() => askReason(ask, { title: "整体取消任务？", description: "该任务下所有未提交的指派都会取消，探店员将在小程序中看到取消原因。", danger: true, reasonLabel: "整体取消原因", confirmLabel: "确认取消任务", path: API.admin.cancelCampaign(row.id), body: { revision: row.revision }, success: "任务已取消", onSuccess: refresh })}>整体取消</button>}</div></td></tr>)}</tbody></table></DataPanel><LoadMorePager rows={rows} hasMore={pager?.hasMore} loadingMore={pager?.loadingMore} moreError={pager?.moreError} onLoadMore={pager?.loadMore} unit="个任务" /></>;
+  // 详情/向导改由路由承载：列表行点击 → /admin/campaigns/:id；编辑 → /admin/campaigns/:id/edit。
+  return <><PageHeader eyebrow="探店任务" title="探店任务与指派" description="同店多人始终使用相互隔离的独立问卷。点击任务行查看指派明细。" action={<button className="admin-primary" onClick={onNew}><Plus size={17} /> 新建探店任务</button>} /><DataPanel empty="当前没有探店任务"><table className="data-table"><thead><tr><th>任务</th><th>门店</th><th>执行窗口</th><th>指派</th><th>逾期</th><th>状态</th><th>操作</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id} className="row-link" onClick={() => onOpen(row)}><td><strong>{row.name}</strong><small>{row.businessNo}</small></td><td>{row.storeName}</td><td>{formatTime(row.startsAt)} 至 {formatTime(row.dueAt)}</td><td>{row.assignmentCount} 人</td><td>{row.overdueCount || 0}</td><td><StatusBadge>{toStatusLabel(row.status)}</StatusBadge></td><td onClick={(event) => event.stopPropagation()}><div className="table-actions"><button onClick={() => onOpen(row)}>查看指派</button>{row.status === "draft" && <><button onClick={() => onEdit(row)}>编辑</button><button onClick={() => run({ title: "发布这个任务？", description: "系统将检查门店位置、问卷版本、人员状态和所有指派。", path: API.admin.publishCampaign(row.id), body: { revision: row.revision }, success: "任务已发布", onSuccess: refresh })}>发布</button><button className="link-danger" onClick={() => run({ title: "删除这个任务？", description: "仅待发布任务可删除，其下未发布的指派将一并删除；已发布任务请用整体取消。", danger: true, path: API.admin.deleteCampaign(row.id), method: "DELETE", body: { revision: row.revision }, success: "任务已删除", onSuccess: refresh })}>删除</button></>}{!["completed", "cancelled"].includes(row.status) && <button className="link-danger" onClick={() => askReason(ask, { title: "整体取消任务？", description: "该任务下所有未提交的指派都会取消，探店员将在小程序中看到取消原因。", danger: true, reasonLabel: "整体取消原因", confirmLabel: "确认取消任务", path: API.admin.cancelCampaign(row.id), body: { revision: row.revision }, success: "任务已取消", onSuccess: refresh })}>整体取消</button>}</div></td></tr>)}</tbody></table></DataPanel><LoadMorePager rows={rows} hasMore={pager?.hasMore} loadingMore={pager?.loadingMore} moreError={pager?.moreError} onLoadMore={pager?.loadMore} unit="个任务" /></>;
 }
 
-function CampaignDetail({ campaign, state, onBack, onEdit, onAddInspector, reload, run, ask, setToast }) {
-  const [editingAssignment, setEditingAssignment] = useState(null);
+function CampaignDetail({ campaign, onBack, onEdit, onAddInspector, onEditAssignment, reload, run, ask, setToast }) {
+  // 指派编辑器改由路由承载（/admin/campaigns/:campaignId/assignments/:assignmentId/edit）；
+  // 豁免记录、延期弹窗是对话框，保持组件内状态。
   const [exemptionView, setExemptionView] = useState(null);
   // 延期弹窗：双窗口（执行截止/问卷最终截止，均可选但至少一项）+ 原因必填，
   // 独立于通用 FormDialog——失败时弹窗保持并就地展示后端错误，已填内容不丢。
   const [extendTarget, setExtendTarget] = useState(null);
   const [statusFilter, setStatusFilter] = useState("");
-  if (state.loading) return <><button className="back-link" onClick={onBack}><CaretRight size={15} /> 返回任务列表</button><StatePanel title="正在加载指派人数…" /></>;
-  if (state.error) return <><button className="back-link" onClick={onBack}><CaretRight size={15} /> 返回任务列表</button><StatePanel title={state.error} action={<button className="admin-primary" onClick={reload}>重新加载</button>} /></>;
   const assignmentRows = campaign.assignments || [];
   const inspectExemptions = async (assignment) => {
     setExemptionView({ assignment, loading: true, error: "", items: [] });
     try { const result = await request(API.admin.exemptions(assignment.id)); setExemptionView({ assignment, loading: false, error: "", items: items(result) }); }
     catch (error) { setExemptionView({ assignment, loading: false, error: error.message, items: [] }); }
   };
-  if (editingAssignment) return <AssignmentEditor campaign={campaign} assignment={editingAssignment.id ? editingAssignment : null} onCancel={() => setEditingAssignment(null)} onSaved={() => { setEditingAssignment(null); reload(); }} run={run} />;
   const actions = campaign.status === "draft" ? <div className="page-actions"><button className="admin-secondary" onClick={onEdit}>编辑探店任务</button><button className="admin-primary" onClick={() => run({ title: "发布这个任务？", description: "所有指派将分别出现在对应探店员日程。第一阶段不发送通知。", path: API.admin.publishCampaign(campaign.id), body: { revision: campaign.revision }, success: "任务已发布", onSuccess: reload })}>发布任务</button></div> : null;
   // 指派表状态筛选：只显示出现的的状态，降低扫视负担。
   const statusCounts = {};
@@ -499,12 +565,12 @@ function CampaignDetail({ campaign, state, onBack, onEdit, onAddInspector, reloa
   const visibleAssignments = statusFilter ? assignmentRows.filter((row) => row.status === statusFilter) : assignmentRows;
   // 每行一个主按钮（按状态智能选择）+ “更多”菜单收拢低频与危险操作。
   const mainActionOf = (row) => {
-    if (row.status === "draft") return { label: "编辑要求", onClick: () => setEditingAssignment(row) };
+    if (row.status === "draft") return { label: "编辑要求", onClick: () => onEditAssignment(row) };
     if (["assigned", "in_progress", "overdue"].includes(row.status)) return { label: "延期", onClick: () => setExtendTarget(row) };
     return null;
   };
   const menuItemsOf = (row) => [
-    row.status === "assigned" && { label: "编辑要求", onClick: () => setEditingAssignment(row) },
+    row.status === "assigned" && { label: "编辑要求", onClick: () => onEditAssignment(row) },
     ["assigned", "in_progress"].includes(row.status) && { label: "豁免记录", onClick: () => inspectExemptions(row) },
     row.activeExemption ? { label: "撤销豁免", onClick: () => askRevokeExemption(ask, row) } : row.status === "assigned" ? { label: "打卡豁免", onClick: () => askExemption(ask, row) } : null,
     row.status === "draft" && { label: "删除", danger: true, onClick: () => run({ title: "删除这条未发布指派？", description: "仅当尚未建立问卷或外部引用时才能删除。", danger: true, path: API.admin.assignment(row.id), method: "DELETE", body: { revision: row.revision }, success: "未发布指派已删除", onSuccess: reload }) },
@@ -517,10 +583,10 @@ function ExemptionPanel({ state, onClose, onRevoke }) {
   return <section className="panel exemption-panel"><div className="panel-heading"><div><h2>{state.assignment.inspectorName} 的打卡豁免</h2></div><button className="admin-secondary" onClick={onClose}>关闭</button></div>{state.loading ? <p>正在加载豁免记录…</p> : state.error ? <p className="form-message">{state.error}</p> : state.items.length === 0 ? <p>当前没有打卡豁免记录</p> : <div className="exemption-list">{state.items.map((item) => <article key={item.id}><span><strong>{exemptionStatusLabel(item.status)}</strong><small>{item.validUntil ? `有效至 ${formatTime(item.validUntil)}` : formatTime(item.grantedAt)}</small></span><p>{item.reason || "未填写原因"}</p>{item.status === "active" && <button className="link-danger" onClick={() => onRevoke(item)}>撤销豁免</button>}</article>)}</div>}</section>;
 }
 
-function Questionnaires({ data, run, ask, refresh, setToast, pager }) {
+// 问卷列表页：版本/分类管理与入口；版本详情与新建问卷由路由承载
+// （/admin/questionnaires/:versionId、/admin/questionnaires/new）。
+function Questionnaires({ data, onOpen, onNew, run, ask, refresh, setToast, pager }) {
   const rows = items(data);
-  const [creating, setCreating] = useState(false);
-  const [version, setVersion] = useState(null);
   // 评估分类管理：管理员可新增/重命名/停用/删除（被题目引用时删除被拒）。加载失败时收起面板，不影响题库本身。
   const [categories, setCategories] = useState(null);
   const loadCategories = useCallback(() => {
@@ -539,64 +605,140 @@ function Questionnaires({ data, run, ask, refresh, setToast, pager }) {
     fields: [{ name: "name", label: "分类名称", required: true }], initialValues: { name: category.name },
     build: (values) => ({ name: values.name.trim(), active: category.active, revision: category.revision }), path: API.admin.questionCategory(category.id), method: "PATCH", success: "评估分类已更新", onSuccess: afterCategoryChange,
   });
-  const [questionRows, setQuestionRows] = useState([]);
-  const [selected, setSelected] = useState(null);
-  const [questionFilter, setQuestionFilter] = useState("");
-  const [detailState, setDetailState] = useState({ loading: false, error: "" });
-  const open = async (row) => {
-    setVersion(row); setQuestionFilter(""); setDetailState({ loading: true, error: "" });
-    try { const result = await request(API.admin.questions(row.id), { schema: AdminQuestionListSchema }); const nextRows = items(result); setQuestionRows(nextRows); setSelected(nextRows[0] || null); setDetailState({ loading: false, error: "" }); }
-    catch (error) { setDetailState({ loading: false, error: error.message }); }
-  };
-  if (creating) return <QuestionnaireEditor onBack={() => { setCreating(false); refresh(); }} run={run} setToast={setToast} categories={categoryList} />;
-  if (version) {
-    const checks = questionnaireChecks(questionRows);
-    const canPublish = Object.values(checks).every(Boolean);
-    const draftEditable = version.status === "draft";
-    // 左侧题目列表按评估分类筛选；分类选项直接从题目行派生（含 categoryName），分类接口异常也不影响筛选。
-    const filterOptions = [];
-    for (const question of questionRows) {
-      if (!filterOptions.some((option) => option.code === question.category)) filterOptions.push({ code: question.category, name: question.categoryName || categoryLabel(question.category) });
-    }
-    const visibleQuestions = questionFilter ? questionRows.filter((question) => question.category === questionFilter) : questionRows;
-    const enabledCount = questionRows.filter((question) => question.enabled).length;
-    const reloadQuestions = async () => {
-      try {
-        const result = await request(API.admin.questions(version.id), { schema: AdminQuestionListSchema });
-        const nextRows = items(result);
-        setQuestionRows(nextRows);
-        setSelected((current) => nextRows.find((row) => row.id === current?.id) || null);
-        // 当前筛选分类被删空时回到「全部」，避免列表看起来像加载失败。
-        if (questionFilter && !nextRows.some((row) => row.category === questionFilter)) setQuestionFilter("");
-      } catch (error) { setToast(error.message, "error"); }
-    };
-    const askMoveQuestion = (question, direction) => run({ title: `${direction === "up" ? "上移" : "下移"}第 ${question.number} 题？`, description: "将与同分类的上/下一道题交换位置，题号自动重排。", path: API.admin.moveQuestion(version.id, question.id), body: { revision: question.revision, direction }, success: `题目已${direction === "up" ? "上移" : "下移"}`, onSuccess: reloadQuestions });
-    const askToggleQuestion = (question) => run({ title: `${question.enabled ? "停用" : "启用"}第 ${question.number} 题？`, description: question.enabled ? "停用后小程序答题页不再显示该题，发布校验也不计入；题号保持不变。" : "启用后该题重新计入发布校验。", path: API.admin.question(version.id, question.id), method: "PATCH", body: { revision: question.revision, enabled: !question.enabled }, success: `题目已${question.enabled ? "停用" : "启用"}`, onSuccess: reloadQuestions });
-    const askDeleteQuestion = (question) => run({ title: `删除第 ${question.number} 题？`, description: "删除后其余题目自动重排题号；已有作答记录的题目无法删除，请改为停用。", danger: true, path: API.admin.deleteQuestion(version.id, question.id), method: "DELETE", body: { revision: question.revision }, success: "题目已删除", onSuccess: reloadQuestions });
-    const askAddQuestion = () => {
-      const activeChoices = (categories || []).filter((category) => category.active).map((category) => ({ value: category.code, label: category.name }));
-      const choices = activeChoices.length > 0 ? activeChoices : filterOptions.map((option) => ({ value: option.code, label: option.name }));
-      ask({ title: "添加题目", description: "新题将插入到所选分类最后一题之后，题号自动重排。", fields: [{ name: "category", label: "题目分类", required: true, type: "select", options: choices }, { name: "text", label: "题目内容", required: true, type: "textarea", placeholder: "例如：地面是否干净无杂物" }, { name: "maxScore", label: "分值", type: "number", placeholder: "默认 2" }], initialValues: { maxScore: 2, ...(questionFilter ? { category: questionFilter } : {}) }, build: (values) => ({ category: values.category, text: values.text.trim(), maxScore: Number(values.maxScore || 2) }), path: API.admin.createQuestion(version.id), success: "题目已添加", onSuccess: reloadQuestions });
-    };
-    const publishVersion = () => run({ title: "发布这个问卷版本？", description: "题目、题号连续性和证据配置已通过前端检查，系统将再次检查。", path: API.admin.publishQuestionnaireVersion(version.id), body: { revision: version.revision }, success: "问卷版本已发布" });
-    const passedCount = Object.values(checks).filter(Boolean).length;
-    const failedLabels = [["启用题数量", "questionCount"], ["题号连续", "numbersValid"], ["证据配置", "evidenceValid"], ["清零题数量", "scoreWipeValid"]].filter(([, key]) => !checks[key]).map(([label]) => label);
-    const action = draftEditable ? <div className="table-actions"><button className="admin-secondary" onClick={askAddQuestion}><Plus size={16} /> 添加题目</button><button className="admin-primary" disabled={!canPublish || detailState.loading} onClick={publishVersion}>发布版本</button></div> : null;
-    return <><button className="back-link" onClick={() => setVersion(null)}><CaretRight size={15} /> 返回版本列表</button><PageHeader eyebrow="问卷题库" title={`${version.name} · ${version.versionLabel}`} description={version.status === "published" ? "已发布版本不可修改。如需调整，请先复制为新草稿。" : "选择题目配置证据要求；可添加、删除、排序和停用题目。"} action={action} />{!detailState.loading && !detailState.error && <QuestionnaireChecks checks={checks} />}{detailState.loading ? <StatePanel title="正在加载题目…" /> : detailState.error ? <StatePanel title={detailState.error} action={<button className="admin-primary" onClick={() => open(version)}>重新加载</button>} /> : <section className="questionnaire-editor"><aside><div className="questionnaire-version"><span>{toStatusLabel(version.status)}</span><strong>{version.versionLabel}</strong><small>启用 {enabledCount} / 共 {questionRows.length} 题</small></div><div className="question-filter-row">{[{ code: "", name: "全部" }, ...filterOptions].map((option) => <button key={option.code || "all"} className={questionFilter === option.code ? "is-active" : ""} onClick={() => setQuestionFilter(option.code)}>{option.name}</button>)}</div><div className="question-pick-list">{visibleQuestions.map((question) => <div key={question.id} className={`question-pick-item${selected?.id === question.id ? " is-active" : ""}${question.enabled ? "" : " is-off"}`}><button className="question-pick-main" onClick={() => setSelected(question)}><span>{question.number}</span><p>{question.text}{!question.enabled && <em className="question-off-tag">已停用</em>}</p><CaretRight size={14} /></button>{draftEditable && <div className="question-pick-actions"><button aria-label={`上移第 ${question.number} 题`} title="上移" onClick={() => askMoveQuestion(question, "up")}><CaretUp size={13} /></button><button aria-label={`下移第 ${question.number} 题`} title="下移" onClick={() => askMoveQuestion(question, "down")}><CaretDown size={13} /></button><button onClick={() => askToggleQuestion(question)}>{question.enabled ? "停用" : "启用"}</button><button className="link-danger" onClick={() => askDeleteQuestion(question)}>删除</button></div>}</div>)}{visibleQuestions.length === 0 && <p className="question-pick-empty">该分类暂无题目，可点击右上角「添加题目」。</p>}</div></aside>{selected && <QuestionEvidenceEditor version={version} question={selected} onChange={(next) => { setSelected(next); setQuestionRows((current) => current.map((item) => item.id === next.id ? next : item)); }} run={run} setToast={setToast} />}{draftEditable && <footer className="questionnaire-action-bar"><span className={canPublish ? "is-passed" : "is-failed"}>检查 {passedCount}/4 通过{canPublish ? "" : `（未过：${failedLabels.join("、")}）`}</span><button className="admin-primary" disabled={!canPublish || detailState.loading} onClick={publishVersion}>发布版本</button></footer>}</section>}</>;
-  }
-  return <><PageHeader eyebrow="问卷题库" title="题库版本与证据配置" description="新建问卷草稿后可编辑题目与证据要求；已发布版本不可修改，调整必须复制为新草稿。" action={<button className="admin-primary" onClick={() => setCreating(true)}><Plus size={17} /> 新建问卷</button>} />
+  return <><PageHeader eyebrow="问卷题库" title="题库版本与证据配置" description="新建问卷草稿后可编辑题目与证据要求；已发布版本不可修改，调整必须复制为新草稿。" action={<button className="admin-primary" onClick={onNew}><Plus size={17} /> 新建问卷</button>} />
     {categories !== null && <CollapsiblePanel title="评估分类" description="小程序答题页与得分统计按此分类展示" count={categoryList.length} action={<button className="admin-secondary" onClick={askCreateCategory}><Plus size={15} /> 新建分类</button>}><div className="data-table-wrap"><table className="data-table"><thead><tr><th>分类</th><th>关联题目</th><th>状态</th><th>操作</th></tr></thead><tbody>{categoryList.map((category) => <tr key={category.id}><td><strong>{category.name}</strong></td><td>{category.questionCount ?? 0} 题</td><td><StatusBadge>{category.active ? "已启用" : "已停用"}</StatusBadge></td><td><div className="table-actions"><button onClick={() => askRenameCategory(category)}>重命名</button>{category.active && <button className="link-danger" onClick={() => run({ title: `停用分类「${category.name}」？`, description: "停用后新建问卷不能再选择该分类，已引用它的题目与发布校验不受影响。", danger: true, path: API.admin.questionCategory(category.id), method: "PATCH", body: { name: category.name, active: false, revision: category.revision }, success: "评估分类已停用", onSuccess: afterCategoryChange })}>停用</button>}{!category.active && <button onClick={() => run({ title: `启用分类「${category.name}」？`, description: "启用后新建问卷可重新选择该分类。", path: API.admin.questionCategory(category.id), method: "PATCH", body: { name: category.name, active: true, revision: category.revision }, success: "评估分类已启用", onSuccess: afterCategoryChange })}>启用</button>}<button className="link-danger" onClick={() => run({ title: `删除分类「${category.name}」？`, description: "仅当分类没有被任何题目引用时才能删除；已引用时请改为停用。", danger: true, path: API.admin.deleteQuestionCategory(category.id), method: "DELETE", body: { revision: category.revision }, success: "评估分类已删除", onSuccess: afterCategoryChange })}>删除</button></div></td></tr>)}</tbody></table></div></CollapsiblePanel>}
-    <CollapsiblePanel title="问卷版本" count={rows.length}>{rows.length === 0 ? <p className="collapsible-empty">当前没有问卷版本</p> : <div className="data-table-wrap"><table className="data-table"><thead><tr><th>问卷版本</th><th>题目检查</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td><strong>{row.name}</strong><small>{row.versionLabel}</small></td><td>{row.numberingValid ? `${row.enabledQuestionCount} 题完整` : "发布检查未通过"}</td><td><StatusBadge>{row.status === "published" ? "已发布" : row.status === "draft" ? "草稿" : toStatusLabel(row.status)}</StatusBadge></td><td>{formatTime(row.createdAt)}</td><td><div className="table-actions"><button onClick={() => open(row)}>查看题目</button>{row.status === "published" && <button onClick={() => run({ title: "复制为新草稿？", description: "题目、分值和证据要求将完整复制，源版本保持不可修改。", path: API.admin.copyQuestionnaireVersion(row.id), body: {}, success: "新草稿已创建" })}>复制为新草稿</button>}{row.status === "draft" && <><button onClick={() => open(row)}>完成检查并发布</button><button className="link-danger" onClick={() => run({ title: "删除这个问卷版本？", description: "仅草稿版本可删除，且未被任何指派引用；已发布版本请复制新草稿后废弃。", danger: true, path: API.admin.deleteQuestionnaireVersion(row.id), method: "DELETE", body: { revision: row.revision }, success: "问卷版本已删除", onSuccess: refresh })}>删除</button></>}</div></td></tr>)}</tbody></table></div>}<LoadMorePager rows={rows} hasMore={pager?.hasMore} loadingMore={pager?.loadingMore} moreError={pager?.moreError} onLoadMore={pager?.loadMore} unit="个版本" /></CollapsiblePanel></>;
+    <CollapsiblePanel title="问卷版本" count={rows.length}>{rows.length === 0 ? <p className="collapsible-empty">当前没有问卷版本</p> : <div className="data-table-wrap"><table className="data-table"><thead><tr><th>问卷版本</th><th>题目检查</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td><strong>{row.name}</strong><small>{row.versionLabel}</small></td><td>{row.numberingValid ? `${row.enabledQuestionCount} 题完整` : "发布检查未通过"}</td><td><StatusBadge>{row.status === "published" ? "已发布" : row.status === "draft" ? "草稿" : toStatusLabel(row.status)}</StatusBadge></td><td>{formatTime(row.createdAt)}</td><td><div className="table-actions"><button onClick={() => onOpen(row)}>查看题目</button>{row.status === "published" && <button onClick={() => run({ title: "复制为新草稿？", description: "题目、分值和证据要求将完整复制，源版本保持不可修改。", path: API.admin.copyQuestionnaireVersion(row.id), body: {}, success: "新草稿已创建" })}>复制为新草稿</button>}{row.status === "draft" && <><button onClick={() => onOpen(row)}>完成检查并发布</button><button className="link-danger" onClick={() => run({ title: "删除这个问卷版本？", description: "仅草稿版本可删除，且未被任何指派引用；已发布版本请复制新草稿后废弃。", danger: true, path: API.admin.deleteQuestionnaireVersion(row.id), method: "DELETE", body: { revision: row.revision }, success: "问卷版本已删除", onSuccess: refresh })}>删除</button></>}</div></td></tr>)}</tbody></table></div>}<LoadMorePager rows={rows} hasMore={pager?.hasMore} loadingMore={pager?.loadingMore} moreError={pager?.moreError} onLoadMore={pager?.loadMore} unit="个版本" /></CollapsiblePanel></>;
 }
 
+// 问卷版本详情路由：按 URL 的 versionId 拉取版本元数据与题目列表（深链接/刷新不依赖列表内存状态），
+// 选中题目（?question=）与分类筛选（?category=）由查询串驱动——切换题目是导航，脏态由题目编辑器守卫拦截。
+// reload 为后台权威刷新（版本元数据 + 题目一并更新，乐观锁/发布状态保持新鲜），不进 loading 门、
+// 不卸载编辑器：其他题目上未保存的本地草稿不会因结构性变更丢失。
+function QuestionnaireDetailRoute({ versionId, query, run, ask, setToast }) {
+  const { expire } = useAdminAuth();
+  const [state, setState] = useState({ loading: true, error: "", version: null, questionRows: [], categories: null });
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    setState({ loading: true, error: "", version: null, questionRows: [], categories: null });
+    Promise.all([
+      request(API.admin.questionnaireVersion(versionId), { schema: z.object({ version: QuestionnaireVersionRowSchema }), signal: controller.signal }),
+      request(API.admin.questions(versionId), { schema: AdminQuestionListSchema, signal: controller.signal }),
+      request(API.admin.questionCategories, { schema: ADMIN_LIST_SCHEMAS.questionCategories }).catch(() => null),
+    ]).then(([versionResult, questionsResult, categoriesResult]) => {
+      if (controller.signal.aborted) return;
+      setState({ loading: false, error: "", version: versionResult.version, questionRows: items(questionsResult), categories: categoriesResult?.items || null });
+    }).catch((loadError) => {
+      if (controller.signal.aborted) return;
+      if (loadError.kind === "session") { expire(); return; }
+      setState({ loading: false, error: loadError.message, version: null, questionRows: [], categories: null });
+    });
+    return () => controller.abort();
+  }, [versionId, attempt]);
+  // 后台刷新：结构性变更（增删移动启停）与发布后统一走这里，题目与版本元数据同步保持权威。
+  // 控制器被保留：versionId 变更或卸载时中止在途刷新，旧版本的迟到响应不得覆盖新 URL 的数据。
+  const reloadAbortRef = useRef(null);
+  useEffect(() => () => reloadAbortRef.current?.abort(), [versionId]);
+  const reload = useCallback(() => {
+    reloadAbortRef.current?.abort();
+    const controller = new AbortController();
+    reloadAbortRef.current = controller;
+    Promise.all([
+      request(API.admin.questionnaireVersion(versionId), { schema: z.object({ version: QuestionnaireVersionRowSchema }), signal: controller.signal }),
+      request(API.admin.questions(versionId), { schema: AdminQuestionListSchema, signal: controller.signal }),
+    ]).then(([versionResult, questionsResult]) => {
+      if (controller.signal.aborted) return;
+      setState((current) => ({ ...current, version: versionResult.version, questionRows: items(questionsResult) }));
+    }).catch((loadError) => {
+      if (controller.signal.aborted || loadError?.name === "AbortError") return;
+      if (loadError.kind === "session") { expire(); return; }
+      setToast(loadError.message, "error");
+    });
+  }, [versionId, expire, setToast]);
+  if (state.loading) return <><button className="back-link" onClick={() => navigate(adminPaths.questionnaires())}><CaretRight size={15} /> 返回版本列表</button><StatePanel title="正在加载题目…" /></>;
+  if (state.error) return <><button className="back-link" onClick={() => navigate(adminPaths.questionnaires())}><CaretRight size={15} /> 返回版本列表</button><StatePanel title={state.error} action={<button className="admin-primary" onClick={() => setAttempt((value) => value + 1)}>重新加载</button>} /></>;
+  const questionFilter = query.get("category") || "";
+  const selected = state.questionRows.find((row) => row.id === query.get("question")) || null;
+  const goVersion = (questionId, category) => navigate(adminPaths.questionnaireDetail(versionId, { question: questionId || undefined, category: category || undefined }));
+  const setQuestionRows = (updater) => setState((current) => ({ ...current, questionRows: typeof updater === "function" ? updater(current.questionRows) : updater }));
+  return <QuestionnaireDetail
+    version={state.version}
+    questionRows={state.questionRows}
+    setQuestionRows={setQuestionRows}
+    categories={state.categories}
+    questionFilter={questionFilter}
+    selected={selected}
+    onBack={() => navigate(adminPaths.questionnaires())}
+    onSelectQuestion={(question) => goVersion(question.id, questionFilter)}
+    onCategoryFilter={(code) => goVersion(query.get("question"), code)}
+    reload={reload}
+    run={run} ask={ask} setToast={setToast} />;
+}
+
+function QuestionnaireDetail({ version, questionRows, setQuestionRows, categories, questionFilter, selected, onBack, onSelectQuestion, onCategoryFilter, reload, run, ask, setToast }) {
+  const checks = questionnaireChecks(questionRows);
+  const canPublish = Object.values(checks).every(Boolean);
+  const draftEditable = version.status === "draft";
+  // 题目草稿未保存时禁止发布：发布以服务端已保存值为准，带着未保存草稿发布会静默丢弃修改
+  // 并把编辑器锁进旧值；这里直接禁用发布入口并给出提示（零发布请求），保存或放弃后恢复。
+  const [editorDirty, setEditorDirty] = useState(false);
+  const publishBlocked = editorDirty;
+  // 左侧题目列表按评估分类筛选；分类选项直接从题目行派生（含 categoryName），分类接口异常也不影响筛选。
+  const filterOptions = [];
+  for (const question of questionRows) {
+    if (!filterOptions.some((option) => option.code === question.category)) filterOptions.push({ code: question.category, name: question.categoryName || categoryLabel(question.category) });
+  }
+  const visibleQuestions = questionFilter ? questionRows.filter((question) => question.category === questionFilter) : questionRows;
+  const enabledCount = questionRows.filter((question) => question.enabled).length;
+  // 结构性变更后：路由层后台刷新版本元数据与题目（题号/数量/乐观锁保持权威），不打断其他未保存输入。
+  const reloadQuestions = () => reload();
+  const askMoveQuestion = (question, direction) => run({ title: `${direction === "up" ? "上移" : "下移"}第 ${question.number} 题？`, description: "将与同分类的上/下一道题交换位置，题号自动重排。", path: API.admin.moveQuestion(version.id, question.id), body: { revision: question.revision, direction }, success: `题目已${direction === "up" ? "上移" : "下移"}`, onSuccess: reloadQuestions });
+  const askToggleQuestion = (question) => run({ title: `${question.enabled ? "停用" : "启用"}第 ${question.number} 题？`, description: question.enabled ? "停用后小程序答题页不再显示该题，发布校验也不计入；题号保持不变。" : "启用后该题重新计入发布校验。", path: API.admin.question(version.id, question.id), method: "PATCH", body: { revision: question.revision, enabled: !question.enabled }, success: `题目已${question.enabled ? "停用" : "启用"}`, onSuccess: reloadQuestions });
+  const askDeleteQuestion = (question) => run({ title: `删除第 ${question.number} 题？`, description: "删除后其余题目自动重排题号；已有作答记录的题目无法删除，请改为停用。", danger: true, path: API.admin.deleteQuestion(version.id, question.id), method: "DELETE", body: { revision: question.revision }, success: "题目已删除", onSuccess: reloadQuestions });
+  const askAddQuestion = () => {
+    const activeChoices = (categories || []).filter((category) => category.active).map((category) => ({ value: category.code, label: category.name }));
+    const choices = activeChoices.length > 0 ? activeChoices : filterOptions.map((option) => ({ value: option.code, label: option.name }));
+    ask({ title: "添加题目", description: "新题将插入到所选分类最后一题之后，题号自动重排。", fields: [{ name: "category", label: "题目分类", required: true, type: "select", options: choices }, { name: "text", label: "题目内容", required: true, type: "textarea", placeholder: "例如：地面是否干净无杂物" }, { name: "maxScore", label: "分值", type: "number", placeholder: "默认 2" }], initialValues: { maxScore: 2, ...(questionFilter ? { category: questionFilter } : {}) }, build: (values) => ({ category: values.category, text: values.text.trim(), maxScore: Number(values.maxScore || 2) }), path: API.admin.createQuestion(version.id), success: "题目已添加", onSuccess: reloadQuestions });
+  };
+  // 发布成功后立即后台刷新：版本状态/乐观锁翻转为已发布，界面即刻只读。
+  const publishVersion = () => run({ title: "发布这个问卷版本？", description: "题目、题号连续性和证据配置已通过前端检查，系统将再次检查。", path: API.admin.publishQuestionnaireVersion(version.id), body: { revision: version.revision }, success: "问卷版本已发布", onSuccess: reload });
+  const passedCount = Object.values(checks).filter(Boolean).length;
+  const failedLabels = [["启用题数量", "questionCount"], ["题号连续", "numbersValid"], ["证据配置", "evidenceValid"], ["清零题数量", "scoreWipeValid"]].filter(([, key]) => !checks[key]).map(([label]) => label);
+  const action = draftEditable ? <div className="table-actions"><button className="admin-secondary" onClick={askAddQuestion}><Plus size={16} /> 添加题目</button><button className="admin-primary" disabled={!canPublish || publishBlocked} title={publishBlocked ? "请先保存或放弃当前题目的修改" : undefined} onClick={publishVersion}>发布版本</button></div> : null;
+  return <><button className="back-link" onClick={onBack}><CaretRight size={15} /> 返回版本列表</button><PageHeader eyebrow="问卷题库" title={`${version.name} · ${version.versionLabel}`} description={version.status === "published" ? "已发布版本不可修改。如需调整，请先复制为新草稿。" : "选择题目配置证据要求；可添加、删除、排序和停用题目。"} action={action} /><QuestionnaireChecks checks={checks} /><section className="questionnaire-editor"><aside><div className="questionnaire-version"><span>{toStatusLabel(version.status)}</span><strong>{version.versionLabel}</strong><small>启用 {enabledCount} / 共 {questionRows.length} 题</small></div><div className="question-filter-row">{[{ code: "", name: "全部" }, ...filterOptions].map((option) => <button key={option.code || "all"} className={questionFilter === option.code ? "is-active" : ""} onClick={() => onCategoryFilter(option.code)}>{option.name}</button>)}</div><div className="question-pick-list">{visibleQuestions.map((question) => <div key={question.id} className={`question-pick-item${selected?.id === question.id ? " is-active" : ""}${question.enabled ? "" : " is-off"}`}><button className="question-pick-main" onClick={() => onSelectQuestion(question)}><span>{question.number}</span><p>{question.text}{!question.enabled && <em className="question-off-tag">已停用</em>}</p><CaretRight size={14} /></button>{draftEditable && <div className="question-pick-actions"><button aria-label={`上移第 ${question.number} 题`} title="上移" onClick={() => askMoveQuestion(question, "up")}><CaretUp size={13} /></button><button aria-label={`下移第 ${question.number} 题`} title="下移" onClick={() => askMoveQuestion(question, "down")}><CaretDown size={13} /></button><button onClick={() => askToggleQuestion(question)}>{question.enabled ? "停用" : "启用"}</button><button className="link-danger" onClick={() => askDeleteQuestion(question)}>删除</button></div>}</div>)}{visibleQuestions.length === 0 && <p className="question-pick-empty">该分类暂无题目，可点击右上角「添加题目」。</p>}</div></aside>{selected && <QuestionEvidenceEditor key={selected.id} version={version} question={selected} onSaved={(row) => setQuestionRows((current) => current.map((item) => item.id === row.id ? row : item))} onDirtyChange={setEditorDirty} run={run} setToast={setToast} />}{draftEditable && <footer className="questionnaire-action-bar">{publishBlocked ? <span className="form-message" role="alert">当前题目有未保存的修改，保存或放弃后才能发布</span> : <span className={canPublish ? "is-passed" : "is-failed"}>检查 {passedCount}/4 通过{canPublish ? "" : `（未过：${failedLabels.join("、")}）`}</span>}<button className="admin-primary" disabled={!canPublish || publishBlocked} title={publishBlocked ? "请先保存或放弃当前题目的修改" : undefined} onClick={publishVersion}>发布版本</button></footer>}</section></>;
+}
 // 分类接口不可用时的兜底选项（与内置种子一致），保证编辑器始终可渲染。
 const FALLBACK_QUESTION_CATEGORIES = [{ code: "environment", name: "环境卫生" }, { code: "service", name: "为客服务" }, { code: "product", name: "产品品质" }];
+
+// 新建问卷路由：分类选项由路由屏自行加载（列表页分类面板不再承载编辑器数据源）。
+function QuestionnaireEditorRoute({ onBack, run, setToast }) {
+  const { expire } = useAdminAuth();
+  const [categories, setCategories] = useState(null);
+  useEffect(() => {
+    let active = true;
+    request(API.admin.questionCategories, { schema: ADMIN_LIST_SCHEMAS.questionCategories })
+      .then((result) => { if (active) setCategories(result.items); })
+      .catch((loadError) => {
+        if (!active) return;
+        // 会话失效：回登录页（保留当前 URL，登录后回到新建问卷），其余失败按分类面板降级。
+        if (loadError.kind === "session") expire();
+        else setCategories(null);
+      });
+    return () => { active = false; };
+  }, [expire]);
+  return <QuestionnaireEditor onBack={onBack} run={run} setToast={setToast} categories={categories || []} />;
+}
 
 function QuestionnaireEditor({ onBack, run, setToast, categories }) {
   const activeCategories = categories && categories.length > 0 ? categories.filter((category) => category.active) : FALLBACK_QUESTION_CATEGORIES;
   const defaultCategory = activeCategories[0]?.code || "environment";
   const [name, setName] = useState("");
   const [questions, setQuestions] = useState(Array.from({ length: 3 }, (_, index) => ({ number: index + 1, category: defaultCategory, text: "", maxScore: 2, scoreWipe: false, imageRequired: false, imageMaxCount: 3, audioRequired: false, audioMaxDurationSeconds: 10 })));
+  // 未保存修改守卫：与挂载时快照比较（名称/题目改动后改回原值即不脏）；保存成功后基准推进。
+  const draftRef = useRef({ name, questions });
+  draftRef.current = { name, questions };
+  const draftBaselineRef = useRef({ name, questions });
+  useNavigationGuard(useCallback(() => JSON.stringify(draftRef.current) !== JSON.stringify(draftBaselineRef.current), []));
   const patchQuestion = (number, field, value) => setQuestions((current) => current.map((question) => question.number === number ? { ...question, [field]: value } : question));
   const addQuestion = () => setQuestions((current) => [...current, { number: current.length + 1, category: defaultCategory, text: "", maxScore: 2, scoreWipe: false, imageRequired: false, imageMaxCount: 3, audioRequired: false, audioMaxDurationSeconds: 10 }]);
   const removeQuestion = (number) => setQuestions((current) => current.length <= 1 ? current : current.filter((question) => question.number !== number).map((question, index) => ({ ...question, number: index + 1 })));
@@ -627,7 +769,7 @@ function QuestionnaireEditor({ onBack, run, setToast, categories }) {
   const save = () => {
     const draft = validateDraft();
     if (!draft) return;
-    run({ title: "创建这个问卷版本？", description: `将创建草稿版本（${draft.filled.length} 道题），可继续编辑题目或配置证据后发布。`, path: API.admin.createQuestionnaireVersion, method: "POST", body: draft.parsed.data, success: "问卷草稿已创建", onSuccess: onBack });
+    run({ title: "创建这个问卷版本？", description: `将创建草稿版本（${draft.filled.length} 道题），可继续编辑题目或配置证据后发布。`, execute: async () => { await request(API.admin.createQuestionnaireVersion, { method: "POST", body: draft.parsed.data }); draftBaselineRef.current = { ...draftRef.current }; }, success: "问卷草稿已创建", onSuccess: onBack });
   };
   const saveAndPublish = () => {
     const draft = validateDraft();
@@ -639,7 +781,7 @@ function QuestionnaireEditor({ onBack, run, setToast, categories }) {
       if (badRow) { rowRefs.current[badRow.number]?.scrollIntoView({ behavior: "smooth", block: "center" }); setToast(`发布检查未通过：第 ${badRow.number} 题，${rowCheckError(badRow, wipeConflicts)}`, "error"); }
       return;
     }
-    run({ title: "创建并发布这个问卷版本？", description: `将创建并发布 V1，共 ${draft.filled.length} 道题。若发布失败，草稿会保留，可回列表继续处理。`, execute: async () => { const created = await request(API.admin.createQuestionnaireVersion, { method: "POST", body: draft.parsed.data }); await request(API.admin.publishQuestionnaireVersion(created.version.id), { method: "POST", body: { revision: created.version.revision } }); }, success: "问卷已发布", onSuccess: onBack });
+    run({ title: "创建并发布这个问卷版本？", description: `将创建并发布 V1，共 ${draft.filled.length} 道题。若发布失败，草稿会保留，可回列表继续处理。`, execute: async () => { const created = await request(API.admin.createQuestionnaireVersion, { method: "POST", body: draft.parsed.data }); await request(API.admin.publishQuestionnaireVersion(created.version.id), { method: "POST", body: { revision: created.version.revision } }); draftBaselineRef.current = { ...draftRef.current }; }, success: "问卷已发布", onSuccess: onBack });
   };
   return <><button className="back-link" onClick={onBack}><CaretRight size={15} /> 返回版本列表</button><PageHeader eyebrow="问卷题库" title="新建问卷" description="填写问卷名称和题目（题号自动 1–N，数量不限）。" /><section className="panel"><div className="field-grid"><label className="admin-field"><span>问卷名称</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：暗访问卷 2026 夏季版" /></label></div><div className="questionnaire-editor"><aside><div className="questionnaire-version"><span>草稿</span><strong>新建版本</strong><small>{questions.filter((question) => question.text.trim()).length} / {questions.length} 道已填写</small></div></aside><div className="questionnaire-write-main"><div className="question-write-list">{questions.map((question) => <div key={question.number} className="question-write-row" ref={(el) => { rowRefs.current[question.number] = el; }}><span className="question-write-number">{question.number}</span><select value={question.category} onChange={(event) => patchQuestion(question.number, "category", event.target.value)}>{activeCategories.map((category) => <option key={category.code} value={category.code}>{category.name}</option>)}</select><input value={question.text} onChange={(event) => patchQuestion(question.number, "text", event.target.value)} placeholder={`第 ${question.number} 题内容`} /><input className="question-write-score" type="number" min="0" max="10" value={question.maxScore} onChange={(event) => patchQuestion(question.number, "maxScore", Number(event.target.value))} /><label className="qw-evidence"><input type="checkbox" checked={question.imageRequired} onChange={(event) => patchQuestion(question.number, "imageRequired", event.target.checked)} />照片</label>{question.imageRequired && <input className="question-write-score" type="number" min="1" max="9" title="照片最多张数" value={question.imageMaxCount} onChange={(event) => patchQuestion(question.number, "imageMaxCount", Number(event.target.value))} />}<label className="qw-evidence"><input type="checkbox" checked={question.audioRequired} onChange={(event) => patchQuestion(question.number, "audioRequired", event.target.checked)} />录音</label>{question.audioRequired && <input className="question-write-score" type="number" min="1" max="60" title="录音最长秒数" value={question.audioMaxDurationSeconds} onChange={(event) => patchQuestion(question.number, "audioMaxDurationSeconds", Number(event.target.value))} />}<label className="qw-evidence"><input type="checkbox" checked={question.scoreWipe} onChange={(event) => patchQuestion(question.number, "scoreWipe", event.target.checked)} />分数清零题</label>{question.text.trim() && rowCheckError(question, wipeConflicts) && <em className="qw-error">{rowCheckError(question, wipeConflicts)}</em>}<button className="qw-remove" disabled={questions.length <= 1} onClick={() => removeQuestion(question.number)} aria-label={`删除第 ${question.number} 题`}>−</button></div>)}</div><div className="question-write-toolbar"><button className="admin-secondary" onClick={addQuestion}><Plus size={15} /> 添加题目（{questions.length} 道）</button></div></div></div><div className="editor-footer"><button className="admin-secondary" onClick={save}>保存草稿</button><button className="admin-primary" onClick={saveAndPublish}>创建并发布</button></div></section></>;
 }
@@ -659,29 +801,63 @@ function QuestionnaireChecks({ checks }) {
   return <section className="questionnaire-checks">{rows.map(([label, passed, description]) => <div key={label} className={passed ? "is-passed" : "is-failed"}><CheckCircle size={20} weight="fill" /><span><strong>{label}：{passed ? "通过" : "未通过"}</strong><small>{description}</small></span></div>)}</section>;
 }
 
-function QuestionEvidenceEditor({ version, question, onChange, run, setToast }) {
-  const evidence = question.evidence || { evidenceRequired: false, imageRequired: false, audioRequired: false, imageMaxCount: 3, audioMaxDurationSeconds: 10 };
-  const [text, setText] = useState(question.text);
-  const [maxScore, setMaxScore] = useState(question.maxScore);
-  const update = (patch) => onChange({ ...question, evidence: { ...evidence, ...patch } });
+function QuestionEvidenceEditor({ version, question, onSaved, onDirtyChange, run, setToast }) {
+  const defaultEvidence = { evidenceRequired: false, imageRequired: false, audioRequired: false, imageMaxCount: 3, audioMaxDurationSeconds: 10 };
+  const evidenceOf = (row) => row.evidence || defaultEvidence;
+  // 本地草稿模型：题目文本/分值/清零标记/证据配置的全部编辑都留在草稿里，不即时写回共享题目行；
+  // 保存成功后才把服务端返回的权威行（含新 revision）提交给父级，脏态基准同步推进到权威快照。
+  // 确认丢弃/换题后重进本编辑器（key=question.id 重挂），看到的是服务端已保存值。
+  const snapshotOf = (row) => ({ text: row.text, maxScore: Number(row.maxScore), scoreWipe: Boolean(row.scoreWipe), evidence: { ...evidenceOf(row) } });
+  const [draft, setDraft] = useState(() => snapshotOf(question));
+  const initialRef = useRef(snapshotOf(question));
+  const dirty = draft.text !== initialRef.current.text || Number(draft.maxScore) !== Number(initialRef.current.maxScore)
+    || Boolean(draft.scoreWipe) !== Boolean(initialRef.current.scoreWipe)
+    || JSON.stringify(draft.evidence) !== JSON.stringify(initialRef.current.evidence);
+  useNavigationGuard(useCallback(() => dirty, [dirty]));
+  // 脏态上报父级：发布入口在草稿未保存时禁用（避免带着旧服务端值静默发布/锁定编辑器）。
+  // 卸载（放弃草稿/取消选中/切换版本）时必须回报 false：父级不残留上一题的脏态——
+  // 否则确认丢弃后没有编辑器可「保存或放弃」，发布入口会被永久禁用。
+  // StrictMode 双调用安全：mount→cleanup(false)→mount(dirty) 收敛回真实值。
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+    return () => onDirtyChange?.(false);
+  }, [dirty, onDirtyChange]);
+  const patchDraft = (part) => setDraft((current) => ({ ...current, ...part }));
+  const patchEvidence = (evidencePatch) => setDraft((current) => ({ ...current, evidence: { ...current.evidence, ...evidencePatch } }));
+  const { text, maxScore, scoreWipe, evidence } = draft;
   const disabled = version.status === "published";
   const invalid = evidence.evidenceRequired && !evidence.imageRequired && !evidence.audioRequired;
   const save = () => {
     if (!text.trim()) { setToast("题目内容不能为空", "error"); return; }
-    run({ title: "保存题目设置？", description: "系统将检查题目内容、分值和证据要求。", path: API.admin.question(version.id, question.id), method: "PATCH", body: { revision: question.revision, text: text.trim(), maxScore: Number(maxScore), scoreWipe: Boolean(question.scoreWipe), evidence }, success: "题目配置已保存", onSuccess: () => onChange({ ...question, text: text.trim(), maxScore: Number(maxScore), evidence }) });
+    let savedRow = null;
+    run({ title: "保存题目设置？", description: "系统将检查题目内容、分值和证据要求。", execute: async () => {
+      const result = await request(API.admin.question(version.id, question.id), { method: "PATCH", schema: z.object({ question: AdminQuestionRowSchema }), body: { revision: question.revision, text: text.trim(), maxScore: Number(maxScore), scoreWipe: Boolean(scoreWipe), evidence } });
+      savedRow = result.question;
+      // 以权威行同时推进「基线」与「本地草稿」（服务端会做规范化，如去首尾空格）：
+      // 输入框立即回显保存后的值，脏态干净解除，不会因本地残留旧格式而误报未保存。
+      initialRef.current = snapshotOf(savedRow);
+      setDraft(snapshotOf(savedRow));
+    }, success: "题目配置已保存", onSuccess: () => { if (savedRow) onSaved(savedRow); } });
   };
-  return <div className="question-editor-panel"><div className="editor-heading"><div><span>{question.categoryName || categoryLabel(question.category)} · 第 {question.number} 题</span><h2>题目设置</h2></div><StatusBadge>{disabled ? "已发布" : "草稿可编辑"}</StatusBadge></div><label className="admin-field"><span>题目内容</span><textarea value={text} readOnly={disabled} rows="4" onChange={(event) => setText(event.target.value)} /></label><label className="admin-field"><span>分值</span><input type="number" min="0" max="10" disabled={disabled} value={maxScore} onChange={(event) => setMaxScore(Number(event.target.value))} /></label><label className="toggle-row"><span><strong>分数清零题</strong><small>勾选后，探员对该题选“是”时，该分类全部题目按 0 分计</small></span><input type="checkbox" disabled={disabled} checked={Boolean(question.scoreWipe)} onChange={(event) => onChange({ ...question, scoreWipe: event.target.checked })} /><i /></label><section className="evidence-settings"><div><h3>不得分证据要求</h3></div><label className="toggle-row"><span><strong>不得分时要求上传证据</strong></span><input type="checkbox" disabled={disabled} checked={evidence.evidenceRequired} onChange={(event) => update({ evidenceRequired: event.target.checked, imageRequired: event.target.checked ? evidence.imageRequired : false, audioRequired: event.target.checked ? evidence.audioRequired : false })} /><i /></label>{evidence.evidenceRequired && <div className="evidence-checks"><label><input type="checkbox" disabled={disabled} checked={evidence.imageRequired} onChange={(event) => update({ imageRequired: event.target.checked })} /><span><strong>需要图片</strong></span></label><label><input type="checkbox" disabled={disabled} checked={evidence.audioRequired} onChange={(event) => update({ audioRequired: event.target.checked })} /><span><strong>需要音频</strong></span></label></div>}{evidence.imageRequired && <label className="admin-field"><span>照片最多（张）</span><input type="number" min="1" max="9" disabled={disabled} value={evidence.imageMaxCount} onChange={(event) => update({ imageMaxCount: Number(event.target.value) })} /></label>}{evidence.audioRequired && <label className="admin-field"><span>录音最长（秒）</span><input type="number" min="1" max="60" disabled={disabled} value={evidence.audioMaxDurationSeconds} onChange={(event) => update({ audioMaxDurationSeconds: Number(event.target.value) })} /></label>}{invalid && <p className="form-message">请至少选择一种证据类型</p>}</section>{!disabled && <div className="editor-footer"><button className="admin-primary" disabled={invalid} onClick={save}>保存题目设置</button></div>}</div>;
+  return <div className="question-editor-panel"><div className="editor-heading"><div><span>{question.categoryName || categoryLabel(question.category)} · 第 {question.number} 题</span><h2>题目设置</h2></div><StatusBadge>{disabled ? "已发布" : "草稿可编辑"}</StatusBadge></div><label className="admin-field"><span>题目内容</span><textarea value={text} readOnly={disabled} rows="4" onChange={(event) => patchDraft({ text: event.target.value })} /></label><label className="admin-field"><span>分值</span><input type="number" min="0" max="10" disabled={disabled} value={maxScore} onChange={(event) => patchDraft({ maxScore: Number(event.target.value) })} /></label><label className="toggle-row"><span><strong>分数清零题</strong><small>勾选后，探员对该题选“是”时，该分类全部题目按 0 分计</small></span><input type="checkbox" disabled={disabled} checked={Boolean(scoreWipe)} onChange={(event) => patchDraft({ scoreWipe: event.target.checked })} /><i /></label><section className="evidence-settings"><div><h3>不得分证据要求</h3></div><label className="toggle-row"><span><strong>不得分时要求上传证据</strong></span><input type="checkbox" disabled={disabled} checked={evidence.evidenceRequired} onChange={(event) => patchEvidence({ evidenceRequired: event.target.checked, imageRequired: event.target.checked ? evidence.imageRequired : false, audioRequired: event.target.checked ? evidence.audioRequired : false })} /><i /></label>{evidence.evidenceRequired && <div className="evidence-checks"><label><input type="checkbox" disabled={disabled} checked={evidence.imageRequired} onChange={(event) => patchEvidence({ imageRequired: event.target.checked })} /><span><strong>需要图片</strong></span></label><label><input type="checkbox" disabled={disabled} checked={evidence.audioRequired} onChange={(event) => patchEvidence({ audioRequired: event.target.checked })} /><span><strong>需要音频</strong></span></label></div>}{evidence.imageRequired && <label className="admin-field"><span>照片最多（张）</span><input type="number" min="1" max="9" disabled={disabled} value={evidence.imageMaxCount} onChange={(event) => patchEvidence({ imageMaxCount: Number(event.target.value) })} /></label>}{evidence.audioRequired && <label className="admin-field"><span>录音最长（秒）</span><input type="number" min="1" max="60" disabled={disabled} value={evidence.audioMaxDurationSeconds} onChange={(event) => patchEvidence({ audioMaxDurationSeconds: Number(event.target.value) })} /></label>}{invalid && <p className="form-message">请至少选择一种证据类型</p>}</section>{!disabled && <div className="editor-footer"><button className="admin-primary" disabled={invalid} onClick={save}>保存题目设置</button></div>}</div>;
 }
 
-function Submissions({ run, setToast }) {
+function Submissions({ appliedQuery, onApply, onOpen, run, setToast }) {
   const { expire } = useAdminAuth();
-  const [selected, setSelected] = useState(null);
-  const [detail, setDetail] = useState(null);
-  const [detailError, setDetailError] = useState("");
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  // 提交详情改由路由承载（/admin/submissions/:id）。「已应用筛选」以列表 URL 查询串为准
+  // （白名单键）：进入详情再返回（站内/浏览器返回）筛选与结果保持，刷新/书签同样恢复；
+  // 草稿输入初值取自已应用筛选，请求契约（键名与取值）不变。
   const emptyFilters = { brandId: "", storeName: "", regionName: "", campaignName: "", businessNo: "", inspectorName: "", status: "", submittedFrom: "", submittedTo: "", minScoreRate: "", maxIssueCount: "" };
-  const [filters, setFilters] = useState(emptyFilters);
-  const [applied, setApplied] = useState(emptyFilters);
+  const applied = useMemo(() => {
+    const next = { ...emptyFilters };
+    for (const key of Object.keys(emptyFilters)) {
+      const value = appliedQuery.get(key);
+      if (value) next[key] = value;
+    }
+    return next;
+  }, [appliedQuery]);
+  const [filters, setFilters] = useState(applied); // 草稿输入：进页时以已应用筛选为初值
+  const [showAdvanced, setShowAdvanced] = useState(() => Boolean(applied.campaignName || applied.businessNo || applied.minScoreRate || applied.maxIssueCount));
   // 列表查询走 usePagedRemote：首屏与「应用筛选」都会换 path → 游标重置从第一页取 100 条；
   // 「共 X 条」使用后端 total（全量计数），追加行不影响精确总数。
   const submissionsPath = useMemo(() => {
@@ -729,14 +905,12 @@ function Submissions({ run, setToast }) {
   };
   // 文本类筛选（含状态、品牌）不进导出请求，导出前需要向用户说明
   const hasTextFilter = Boolean(filters.brandId || filters.storeName || filters.regionName || filters.campaignName || filters.businessNo || filters.inspectorName || filters.status);
-  // 应用筛选/重置都只改 applied：path 变化让 usePagedRemote 自动重置游标重查第一页。
-  const query = (nextFilters = filters) => setApplied({ ...nextFilters });
-  const reset = () => { setFilters(emptyFilters); setApplied(emptyFilters); };
-  const open = async (row) => { setSelected(row); setDetail(null); setDetailError(""); try { setDetail(await request(API.admin.submission(row.id), { schema: SubmissionDetailSchema })); } catch (error) { setDetailError(error.message); } };
-  if (selected) return <><button className="back-link" onClick={() => setSelected(null)}><CaretRight size={15} /> 返回提交列表</button><PageHeader eyebrow="提交详情" title={selected.taskName} description={`${selected.storeName} · ${formatTime(selected.submittedAt)}`} action={<button className="admin-secondary" onClick={() => run({ title: "导出这份问卷？", description: "文件中的敏感信息将被隐藏，下载链接有时效。", path: API.admin.exports, body: { submissionId: selected.id }, success: "单份问卷导出已创建" })}><DownloadSimple size={17} /> 导出这份问卷</button>} />{detailError ? <StatePanel title={detailError} action={<button className="admin-primary" onClick={() => open(selected)}>重新加载</button>} /> : !detail ? <StatePanel title="正在加载完整提交…" /> : <SubmissionDetail detail={detail} submissionId={selected.id} reload={() => open(selected)} setToast={setToast} />}</>;
+  // 应用筛选/重置都写入列表 URL：path 变化让 usePagedRemote 自动重置游标重查第一页。
+  const query = (nextFilters = filters) => onApply(nextFilters);
+  const reset = () => { setFilters(emptyFilters); onApply(emptyFilters); };
   const hasFilter = Object.values(filters).some((value) => value !== "");
   const exportResult = () => run({ title: "导出当前结果？", description: hasTextFilter ? "导出仅支持时间范围和不得分数筛选；门店、区域、探店员等文本类筛选将被忽略。" : "将按当前筛选条件生成 Excel 文件，下载链接有时效。", path: API.admin.exports, body: { filters: exportFiltersOf(filters) }, success: "筛选结果导出已创建" });
-  return <div className="submissions-page"><PageHeader eyebrow="运营管理" title="提交记录" description="查看探店员提交的完整问卷、现场证据、菜品记录和评分结果。" /><section className="panel submission-filters"><div className="filter-card-heading"><h2>筛选条件</h2></div><div className="filter-grid"><label className="admin-field"><span>品牌</span><select aria-label="品牌筛选" value={filters.brandId} disabled={options.brands.length === 0} onChange={(event) => patchFilter("brandId", event.target.value)}><option value="">全部品牌</option>{options.brands.map((brand) => <option key={brand.id} value={brand.id}>{brand.name}</option>)}</select></label><label className="admin-field"><span>门店</span><select aria-label="门店筛选" value={filters.storeName} disabled={options.stores.length === 0} onChange={(event) => patchFilter("storeName", event.target.value)}><option value="">全部门店</option>{options.stores.map((name) => <option key={name} value={name}>{name}</option>)}</select></label><label className="admin-field"><span>区域</span><select aria-label="区域筛选" value={filters.regionName} disabled={options.regions.length === 0} onChange={(event) => patchFilter("regionName", event.target.value)}><option value="">全部区域</option>{options.regions.map((name) => <option key={name} value={name}>{name}</option>)}</select></label><label className="admin-field"><span>探店员</span><select aria-label="探店员筛选" value={filters.inspectorName} disabled={inspectorOptions.length === 0} onChange={(event) => patchFilter("inspectorName", event.target.value)}><option value="">全部探店员</option>{inspectorOptions.map((name) => <option key={name} value={name}>{name}</option>)}</select></label><label className="admin-field"><span>问卷状态</span><select aria-label="问卷状态筛选" value={filters.status} onChange={(event) => patchFilter("status", event.target.value)}><option value="">全部状态</option><option value="submitted">已提交</option></select></label></div><div className="filter-grid"><div className="admin-field filter-range"><span>提交时间</span><span className="time-range"><input type="datetime-local" aria-label="提交开始时间" value={filters.submittedFrom} onChange={(event) => patchFilter("submittedFrom", event.target.value)} /> 至 <input type="datetime-local" aria-label="提交截止时间" value={filters.submittedTo} onChange={(event) => patchFilter("submittedTo", event.target.value)} /></span></div></div>{showAdvanced && <div className="filter-grid"><label className="admin-field"><span>任务</span><select aria-label="任务筛选" value={filters.campaignName} disabled={options.campaigns.length === 0} onChange={(event) => patchFilter("campaignName", event.target.value)}><option value="">全部任务</option>{options.campaigns.map((name) => <option key={name} value={name}>{name}</option>)}</select></label><label className="admin-field"><span>任务编号</span><input value={filters.businessNo} onChange={(event) => patchFilter("businessNo", event.target.value)} /></label><label className="admin-field"><span>最低得分率</span><input type="number" min="0" max="100" value={filters.minScoreRate} onChange={(event) => patchFilter("minScoreRate", event.target.value)} /></label><label className="admin-field"><span>最多不得分数</span><input type="number" min="0" value={filters.maxIssueCount} onChange={(event) => patchFilter("maxIssueCount", event.target.value)} /></label></div>}<div className="filter-actions"><button className="admin-secondary filter-toggle" onClick={() => setShowAdvanced((value) => !value)}>{showAdvanced ? <>收起高级筛选<CaretUp size={14} /></> : <>更多筛选<CaretDown size={14} /></>}</button><span className="filter-action-group"><button className="admin-secondary" onClick={reset} disabled={listPage.loading}>重置</button><button className="admin-primary" onClick={() => query()} disabled={listPage.loading}>{listPage.loading ? "正在查询…" : "应用筛选"}</button></span></div>{(listPage.error || optionsError) && <p className="form-message" role="alert">{listPage.error || optionsError}</p>}{inspectorsPage.hasMore && <div className="pager"><span>已加载 {inspectorOptions.length} 位探店员</span><button className="admin-secondary" onClick={inspectorsPage.loadMore} disabled={inspectorsPage.loadingMore}>{inspectorsPage.loadingMore ? "正在加载…" : "加载更多探店员"}</button></div>}</section><div className="results-header"><div><h2>提交结果</h2><span className="result-count">共 {listPage.data?.total ?? rows.length} 条</span>{hasTextFilter && hasFilter && <span className="result-hint">导出将忽略文本类筛选</span>}</div><button className="admin-secondary" onClick={exportResult}><DownloadSimple size={16} /> {hasFilter ? "导出当前结果" : "导出结果"}</button></div>{rows.length === 0 ? <section className="panel submission-empty"><WarningCircle size={30} weight="duotone" /><strong>{hasFilter ? "暂无匹配结果" : "暂无提交记录"}</strong><p>{hasFilter ? "尝试调整或清除当前筛选条件。" : "探店员完成并提交问卷后，记录将显示在这里。"}</p>{hasFilter && <button className="admin-secondary" onClick={reset}>清除筛选</button>}</section> : <section className="panel"><div className="data-table-wrap"><table className="data-table"><thead><tr><th>提交记录</th><th>门店/区域</th><th>探店员</th><th>提交时间</th><th>得分率</th><th>不得分</th><th>操作</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id} className="row-link" onClick={() => open(row)}><td><strong>{row.taskName}</strong><small>{row.businessNo}</small></td><td>{row.storeName}<small>{row.regionName}</small></td><td>{row.inspectorName}</td><td>{formatTime(row.submittedAt)}</td><td>{row.scoreRate}</td><td>{row.issueCount}</td><td onClick={(event) => event.stopPropagation()}><button onClick={() => open(row)}>查看详情</button></td></tr>)}</tbody></table></div><LoadMorePager rows={rows} hasMore={listPage.hasMore} loadingMore={listPage.loadingMore} moreError={listPage.moreError} onLoadMore={listPage.loadMore} unit="条记录" /></section>}</div>;
+  return <div className="submissions-page"><PageHeader eyebrow="运营管理" title="提交记录" description="查看探店员提交的完整问卷、现场证据、菜品记录和评分结果。" /><section className="panel submission-filters"><div className="filter-card-heading"><h2>筛选条件</h2></div><div className="filter-grid"><label className="admin-field"><span>品牌</span><select aria-label="品牌筛选" value={filters.brandId} disabled={options.brands.length === 0} onChange={(event) => patchFilter("brandId", event.target.value)}><option value="">全部品牌</option>{options.brands.map((brand) => <option key={brand.id} value={brand.id}>{brand.name}</option>)}</select></label><label className="admin-field"><span>门店</span><select aria-label="门店筛选" value={filters.storeName} disabled={options.stores.length === 0} onChange={(event) => patchFilter("storeName", event.target.value)}><option value="">全部门店</option>{options.stores.map((name) => <option key={name} value={name}>{name}</option>)}</select></label><label className="admin-field"><span>区域</span><select aria-label="区域筛选" value={filters.regionName} disabled={options.regions.length === 0} onChange={(event) => patchFilter("regionName", event.target.value)}><option value="">全部区域</option>{options.regions.map((name) => <option key={name} value={name}>{name}</option>)}</select></label><label className="admin-field"><span>探店员</span><select aria-label="探店员筛选" value={filters.inspectorName} disabled={inspectorOptions.length === 0} onChange={(event) => patchFilter("inspectorName", event.target.value)}><option value="">全部探店员</option>{inspectorOptions.map((name) => <option key={name} value={name}>{name}</option>)}</select></label><label className="admin-field"><span>问卷状态</span><select aria-label="问卷状态筛选" value={filters.status} onChange={(event) => patchFilter("status", event.target.value)}><option value="">全部状态</option><option value="submitted">已提交</option></select></label></div><div className="filter-grid"><div className="admin-field filter-range"><span>提交时间</span><span className="time-range"><input type="datetime-local" aria-label="提交开始时间" value={filters.submittedFrom} onChange={(event) => patchFilter("submittedFrom", event.target.value)} /> 至 <input type="datetime-local" aria-label="提交截止时间" value={filters.submittedTo} onChange={(event) => patchFilter("submittedTo", event.target.value)} /></span></div></div>{showAdvanced && <div className="filter-grid"><label className="admin-field"><span>任务</span><select aria-label="任务筛选" value={filters.campaignName} disabled={options.campaigns.length === 0} onChange={(event) => patchFilter("campaignName", event.target.value)}><option value="">全部任务</option>{options.campaigns.map((name) => <option key={name} value={name}>{name}</option>)}</select></label><label className="admin-field"><span>任务编号</span><input value={filters.businessNo} onChange={(event) => patchFilter("businessNo", event.target.value)} /></label><label className="admin-field"><span>最低得分率</span><input type="number" min="0" max="100" value={filters.minScoreRate} onChange={(event) => patchFilter("minScoreRate", event.target.value)} /></label><label className="admin-field"><span>最多不得分数</span><input type="number" min="0" value={filters.maxIssueCount} onChange={(event) => patchFilter("maxIssueCount", event.target.value)} /></label></div>}<div className="filter-actions"><button className="admin-secondary filter-toggle" onClick={() => setShowAdvanced((value) => !value)}>{showAdvanced ? <>收起高级筛选<CaretUp size={14} /></> : <>更多筛选<CaretDown size={14} /></>}</button><span className="filter-action-group"><button className="admin-secondary" onClick={reset} disabled={listPage.loading}>重置</button><button className="admin-primary" onClick={() => query()} disabled={listPage.loading}>{listPage.loading ? "正在查询…" : "应用筛选"}</button></span></div>{(listPage.error || optionsError) && <p className="form-message" role="alert">{listPage.error || optionsError}</p>}{inspectorsPage.hasMore && <div className="pager"><span>已加载 {inspectorOptions.length} 位探店员</span><button className="admin-secondary" onClick={inspectorsPage.loadMore} disabled={inspectorsPage.loadingMore}>{inspectorsPage.loadingMore ? "正在加载…" : "加载更多探店员"}</button></div>}</section><div className="results-header"><div><h2>提交结果</h2><span className="result-count">共 {listPage.data?.total ?? rows.length} 条</span>{hasTextFilter && hasFilter && <span className="result-hint">导出将忽略文本类筛选</span>}</div><button className="admin-secondary" onClick={exportResult}><DownloadSimple size={16} /> {hasFilter ? "导出当前结果" : "导出结果"}</button></div>{rows.length === 0 ? <section className="panel submission-empty"><WarningCircle size={30} weight="duotone" /><strong>{hasFilter ? "暂无匹配结果" : "暂无提交记录"}</strong><p>{hasFilter ? "尝试调整或清除当前筛选条件。" : "探店员完成并提交问卷后，记录将显示在这里。"}</p>{hasFilter && <button className="admin-secondary" onClick={reset}>清除筛选</button>}</section> : <section className="panel"><div className="data-table-wrap"><table className="data-table"><thead><tr><th>提交记录</th><th>门店/区域</th><th>探店员</th><th>提交时间</th><th>得分率</th><th>不得分</th><th>操作</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id} className="row-link" onClick={() => onOpen(row)}><td><strong>{row.taskName}</strong><small>{row.businessNo}</small></td><td>{row.storeName}<small>{row.regionName}</small></td><td>{row.inspectorName}</td><td>{formatTime(row.submittedAt)}</td><td>{row.scoreRate}</td><td>{row.issueCount}</td><td onClick={(event) => event.stopPropagation()}><button onClick={() => onOpen(row)}>查看详情</button></td></tr>)}</tbody></table></div><LoadMorePager rows={rows} hasMore={listPage.hasMore} loadingMore={listPage.loadingMore} moreError={listPage.moreError} onLoadMore={listPage.loadMore} unit="条记录" /></section>}</div>;
 }
 
 function SubmissionDetail({ detail, submissionId, reload, setToast }) {
@@ -761,7 +935,7 @@ function Exports({ data, run, pager }) {
   const reexport = (row) => run({ title: "重新导出？", description: "将按这份记录当时的导出内容和筛选条件，重新生成一个可下载的新任务。", path: API.admin.reexportExport(row.id), success: "重新导出任务已创建" });
   return <><PageHeader eyebrow="数据导出" title="导出中心" description="展示历史导出任务与结果；新的导出在「数据看板」页（当前筛选）或「提交记录」页（单份/汇总）发起。" />
     <div className="results-header"><div><h2>导出记录</h2><span className="result-count">{pager?.hasMore ? `已加载 ${rows.length}+ 条` : `共 ${rows.length} 条`}</span></div></div>
-    <DataPanel empty="还没有导出记录——在「数据看板」页点击「导出 Excel」，或在「提交记录」页导出当前结果"><table className="data-table"><thead><tr><th>文件</th><th>类型</th><th>创建人</th><th>创建时间</th><th>状态</th><th>操作</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td><strong>{row.fileName}</strong></td><td>{row.kind === "dashboard" ? "数据看板" : "提交记录"}</td><td>{row.createdByName}</td><td>{formatTime(row.createdAt)}</td><td><StatusBadge>{toStatusLabel(row.status)}</StatusBadge></td><td><div className="table-actions">{row.downloadUrl ? <a href={row.downloadUrl}>下载</a> : <span className="muted">{row.status === "failed" || row.status === "expired" ? "—" : "生成中"}</span>}<button onClick={() => reexport(row)}>重新导出</button></div></td></tr>)}</tbody></table></DataPanel>
+    <DataPanel empty="还没有导出记录——在「数据看板」页点击「导出 Excel」，或在「提交记录」页导出当前结果"><table className="data-table"><thead><tr><th>文件</th><th>类型</th><th>创建人</th><th>创建时间</th><th>状态</th><th>操作</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td><strong>{row.fileName}</strong></td><td>{exportKindLabel(row.kind)}</td><td>{row.createdByName}</td><td>{formatTime(row.createdAt)}</td><td><StatusBadge>{toStatusLabel(row.status)}</StatusBadge></td><td><div className="table-actions">{row.downloadUrl ? <a href={row.downloadUrl}>下载</a> : <span className="muted">{row.status === "failed" ? exportFailureHint(row.failureCode) : row.status === "expired" ? "—" : "生成中"}</span>}<button onClick={() => reexport(row)}>重新导出</button></div></td></tr>)}</tbody></table></DataPanel>
     <LoadMorePager rows={rows} hasMore={pager?.hasMore} loadingMore={pager?.loadingMore} moreError={pager?.moreError} onLoadMore={pager?.loadMore} unit="条记录" /></>;
 }
 
@@ -872,8 +1046,325 @@ function DataPanel({ children, empty }) {
 }
 
 function StatePanel({ title, action }) { return <section className="panel empty-business"><WarningCircle size={30} weight="duotone" /><strong>{title}</strong>{action}</section>; }
-function NoPermission() { return <StatePanel title="你没有权限访问此页面" />; }
+function NoPermission({ action }) { return <StatePanel title="你没有权限访问此页面" action={action} />; }
+// 未知/畸形路径的友好 404 页：提供返回入口，不白屏、不无限加载。
+function RouteNotFound({ onBack }) {
+  return <StatePanel title="页面不存在或链接有误" action={<button className="admin-primary" onClick={onBack}>返回运营概览</button>} />;
+}
+
+// —— 以下为详情/编辑路由屏：按 URL 参数拉取权威数据（深链接/刷新不依赖列表内存状态），
+// 请求随路由切换取消（AbortController），失败给出可重试、可返回的恢复界面。——
+
+// 用户编辑路由：按 id 拉取账号（GET /api/admin/users/:id，与列表同权限 user:manage），
+// 账号类型从主角色推导（与列表 tab 语义一致）；账号不存在/无权限时给出可返回的错误态。
+function UserEditorRoute({ userId, onBackForKind, run, reload, setToast }) {
+  const { expire } = useAdminAuth();
+  const [state, setState] = useState({ loading: true, error: "", row: null });
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    setState({ loading: true, error: "", row: null });
+    request(API.admin.userDetail(userId), { schema: z.object({ user: UserRowSchema }), signal: controller.signal })
+      .then((result) => { if (!controller.signal.aborted) setState({ loading: false, error: "", row: result.user }); })
+      .catch((loadError) => {
+        if (controller.signal.aborted) return;
+        if (loadError.kind === "session") { expire(); return; } // 会话失效：回登录页，登录后同路由继续
+        setState({ loading: false, error: loadError.message, row: null });
+      });
+    return () => controller.abort();
+  }, [userId, attempt]);
+  const backLink = <button className="back-link" onClick={() => onBackForKind(state.row?.roleCode === "inspector" ? "inspector" : "admin")}><CaretRight size={15} /> 返回用户列表</button>;
+  if (state.loading) return <>{backLink}<StatePanel title="正在加载账号数据…" /></>;
+  if (state.error) return <>{backLink}<StatePanel title={state.error} action={<button className="admin-primary" onClick={() => setAttempt((value) => value + 1)}>重新加载</button>} /></>;
+  const kind = state.row.roleCode === "inspector" ? "inspector" : "admin";
+  return <UserEditor mode="edit" kind={kind} row={state.row} onBack={() => onBackForKind(kind)} run={run} reload={reload} setToast={setToast} />;
+}
+
+// 门店编辑路由：新建直接渲染空白表单；编辑按 id 拉取门店（GET /api/admin/stores/:id，
+// 与列表同权限 store:manage 且同样受数据范围约束），坐标字段映射与列表行入口一致。
+const BLANK_STORE = { name: "", businessNo: "", brandId: "", regionName: "", address: "", latitude: null, longitude: null, radiusMeters: 300, accuracyAllowanceMaxMeters: 200 };
+function StoreEditorRoute({ storeId, onBack, run, ask }) {
+  const { expire } = useAdminAuth();
+  const [state, setState] = useState({ loading: Boolean(storeId), error: "", store: storeId ? null : BLANK_STORE });
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    if (!storeId) return undefined;
+    const controller = new AbortController();
+    setState({ loading: true, error: "", store: null });
+    request(API.admin.storeDetail(storeId), { schema: z.object({ store: StoreRowSchema }), signal: controller.signal })
+      .then((result) => {
+        if (controller.signal.aborted) return;
+        const row = result.store;
+        setState({ loading: false, error: "", store: { ...row, latitude: row.latitudeGcj02, longitude: row.longitudeGcj02, accuracyAllowanceMaxMeters: row.accuracyAllowanceMaxMeters || 200 } });
+      })
+      .catch((loadError) => {
+        if (controller.signal.aborted) return;
+        if (loadError.kind === "session") { expire(); return; }
+        setState({ loading: false, error: loadError.message, store: null });
+      });
+    return () => controller.abort();
+  }, [storeId, attempt]);
+  const backLink = <button className="back-link" onClick={onBack}><CaretRight size={15} /> 返回门店列表</button>;
+  if (state.loading) return <>{backLink}<StatePanel title="正在加载门店数据…" /></>;
+  if (state.error) return <>{backLink}<StatePanel title={state.error} action={<button className="admin-primary" onClick={() => setAttempt((value) => value + 1)}>重新加载</button>} /></>;
+  return <StoreEditor store={state.store} onBack={onBack} run={run} ask={ask} />;
+}
+
+// 任务详情路由：按 id 拉取完整详情（含指派表），随 campaignId 切换取消过期请求。
+function CampaignDetailRoute({ campaignId, onBack, run, ask, setToast }) {
+  const { expire } = useAdminAuth();
+  const [state, setState] = useState({ loading: true, error: "", campaign: null });
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    setState({ loading: true, error: "", campaign: null });
+    request(API.admin.campaign(campaignId), { schema: CampaignDetailSchema, signal: controller.signal })
+      .then((campaign) => { if (!controller.signal.aborted) setState({ loading: false, error: "", campaign }); })
+      .catch((loadError) => {
+        if (controller.signal.aborted) return;
+        if (loadError.kind === "session") { expire(); return; }
+        setState({ loading: false, error: loadError.message, campaign: null });
+      });
+    return () => controller.abort();
+  }, [campaignId, attempt]);
+  const backLink = <button className="back-link" onClick={onBack}><CaretRight size={15} /> 返回任务列表</button>;
+  if (state.loading) return <>{backLink}<StatePanel title="正在加载指派人数…" /></>;
+  if (state.error) return <>{backLink}<StatePanel title={state.error} action={<button className="admin-primary" onClick={() => setAttempt((value) => value + 1)}>重新加载</button>} /></>;
+  const reload = () => setAttempt((value) => value + 1);
+  return <CampaignDetail campaign={state.campaign} onBack={onBack}
+    onEdit={() => navigate(adminPaths.campaignEdit(campaignId))}
+    onAddInspector={() => navigate(adminPaths.campaignEdit(campaignId, 2))}
+    onEditAssignment={(row) => navigate(adminPaths.assignmentEdit(campaignId, row.id))}
+    reload={reload} run={run} ask={ask} setToast={setToast} />;
+}
+
+// 任务向导路由（URL 为准）：
+//   - 新建（campaignId=null）恒为全新上下文：组件跨 new/edit 分支被 React 位置复用，
+//     身份切换（含历史跨条目遍历）必须显式清掉旧实体，绝不在 /new 下渲染/提交别的任务。
+//   - :id 一律按 ID 拉取持久化数据——包括首次创建后的那次 replace（多一次 GET 换取确定性，
+//     POST 仍只发生一次）。不做「刚创建就跳过拉取」的脆弱优化：跨条目返回时易错配实体。
+//   - 向导按实体 ID 加 key：同一任务内换步不卸载（输入保留）；换任务/换新建流才重挂。
+//   - from=list|detail 记录进入来源（安全的站内枚举值，不充当跳转 URL）：关闭后回列表（带刷新）或回详情。
+function CampaignWizardRoute({ campaignId, step, from, onClose, setToast }) {
+  const { expire } = useAdminAuth();
+  const effectiveFrom = from || (campaignId ? "detail" : "list");
+  const [state, setState] = useState({ loading: Boolean(campaignId), error: "", campaign: null });
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    if (!campaignId) {
+      setState({ loading: false, error: "", campaign: null });
+      return undefined;
+    }
+    const controller = new AbortController();
+    setState({ loading: true, error: "", campaign: null });
+    request(API.admin.campaign(campaignId), { schema: CampaignDetailSchema, signal: controller.signal })
+      .then((campaign) => { if (!controller.signal.aborted) setState({ loading: false, error: "", campaign }); })
+      .catch((loadError) => {
+        if (controller.signal.aborted) return;
+        if (loadError.kind === "session") { expire(); return; }
+        setState({ loading: false, error: loadError.message, campaign: null });
+      });
+    return () => controller.abort();
+  }, [campaignId, attempt]);
+  const backLink = <button className="back-link" onClick={() => onClose(campaignId, effectiveFrom)}>{effectiveFrom === "list" ? "返回任务列表" : "返回任务详情"}</button>;
+  if (state.loading) return <>{backLink}<StatePanel title="正在加载任务数据…" /></>;
+  if (state.error) return <>{backLink}<StatePanel title={state.error} action={<button className="admin-primary" onClick={() => setAttempt((value) => value + 1)}>重新加载</button>} /></>;
+  return <CampaignWizard
+    key={campaignId || "new"}
+    campaign={state.campaign}
+    step={step}
+    returnTo={effectiveFrom}
+    onClose={() => onClose(campaignId, effectiveFrom)}
+    onStepChange={(next) => forceNavigate(adminPaths.campaignEdit(campaignId, next, effectiveFrom))}
+    onCampaignCreated={(id) => forceNavigate(adminPaths.campaignEdit(id, 2, "list"), { replace: true })}
+    setToast={setToast} />;
+}
+
+// 指派编辑路由：任务详情 + 指派行均按 URL 定位；指派不存在（已删除/链接有误）时给出可返回的恢复态。
+function AssignmentEditorRoute({ campaignId, assignmentId, onBack, run }) {
+  const { expire } = useAdminAuth();
+  const [state, setState] = useState({ loading: true, error: "", campaign: null });
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    setState({ loading: true, error: "", campaign: null });
+    request(API.admin.campaign(campaignId), { schema: CampaignDetailSchema, signal: controller.signal })
+      .then((campaign) => { if (!controller.signal.aborted) setState({ loading: false, error: "", campaign }); })
+      .catch((loadError) => {
+        if (controller.signal.aborted) return;
+        if (loadError.kind === "session") { expire(); return; }
+        setState({ loading: false, error: loadError.message, campaign: null });
+      });
+    return () => controller.abort();
+  }, [campaignId, attempt]);
+  const backLink = <button className="back-link" onClick={onBack}><CaretRight size={15} /> 返回指派列表</button>;
+  if (state.loading) return <>{backLink}<StatePanel title="正在加载任务数据…" /></>;
+  if (state.error) return <>{backLink}<StatePanel title={state.error} action={<button className="admin-primary" onClick={() => setAttempt((value) => value + 1)}>重新加载</button>} /></>;
+  const assignment = (state.campaign.assignments || []).find((row) => row.id === assignmentId);
+  if (!assignment) return <>{backLink}<StatePanel title="这条指派不存在或已被删除" action={<button className="admin-primary" onClick={onBack}>返回任务详情</button>} /></>;
+  return <AssignmentEditor campaign={state.campaign} assignment={assignment} onCancel={onBack} onSaved={onBack} run={run} />;
+}
+
+// —— 单份问卷导出：详情页一键导出当前提交（只绑定这一个 submissionId）———
+// 完整闭环：确认弹窗 → 创建任务 → 行内有界轮询（2s 间隔、上限 5 分钟）→ 成功出下载链接。
+// 生命周期：创建请求与轮询各自持有 AbortController，路由退出（卸载）与会话失效时一并中止，
+// 卸载后才返回的创建请求不落状态、不启动轮询；pending 期间主按钮禁用防重复任务；
+// 查询失败或轮询窗口用尽不停留在死锁态——保留已创建任务并提供「重新检查」恢复同一任务的轮询；
+// 失败/过期提供「重新生成」（重建同 submissionId 的新任务）。
+const EXPORT_POLL_INTERVAL_MS = 2000;
+const EXPORT_POLL_MAX_MS = 300000;
+const EXPORT_PENDING_STATUSES = ["queued", "processing"];
+// 失败码 → 安全、可行动的提示（稳定业务码，不含内部细节）；未知码回退通用文案，不误导用户去别处“查看原因”
+const EXPORT_FAILURE_MESSAGES = {
+  EXPORT_SUBMISSION_SCORES_MISSING: "这份提交缺少可安全导出的逐题得分数据（可能是历史数据不完整），无法生成评估表。",
+  EXPORT_SUBMISSION_NOT_FOUND: "提交记录不存在或已超出当前数据范围，任务已终止。",
+  EXPORT_SUBMISSION_REQUIRED: "导出任务未绑定提交记录，请重新发起导出。",
+  EXPORT_COS_NOT_CONFIGURED: "导出文件服务尚未配置，请联系管理员后再试。",
+};
+const exportFailureMessage = (code) => EXPORT_FAILURE_MESSAGES[code] || "导出失败，请重新生成；若反复失败请联系管理员处理。";
+
+function SubmissionExport({ submissionId, setToast }) {
+  const { expire } = useAdminAuth();
+  const [job, setJob] = useState(null);
+  const [creating, setCreating] = useState(false);
+  const [watching, setWatching] = useState(false);
+  const [stalled, setStalled] = useState(false);
+  const [error, setError] = useState("");
+  const [confirming, setConfirming] = useState(false);
+  const createRef = useRef(null);
+  const pollRef = useRef(null);
+  const stopPolling = useCallback(() => {
+    if (!pollRef.current) return;
+    window.clearTimeout(pollRef.current.timer);
+    pollRef.current.controller.abort();
+    pollRef.current = null;
+  }, []);
+  const cancelCreate = useCallback(() => {
+    if (!createRef.current) return;
+    createRef.current.controller.abort();
+    createRef.current = null;
+  }, []);
+  // 路由退出/组件卸载：同时中止在途创建请求与轮询
+  useEffect(() => () => { cancelCreate(); stopPolling(); }, [cancelCreate, stopPolling]);
+  const watch = useCallback((jobId) => {
+    stopPolling();
+    const controller = new AbortController();
+    const state = { controller, timer: null, deadline: Date.now() + EXPORT_POLL_MAX_MS };
+    pollRef.current = state;
+    setWatching(true);
+    setStalled(false);
+    const finish = () => { if (pollRef.current === state) pollRef.current = null; setWatching(false); };
+    const tick = async () => {
+      if (controller.signal.aborted || pollRef.current !== state) return;
+      try {
+        const row = await request(API.admin.export(jobId), { schema: ExportRowSchema, signal: controller.signal });
+        if (controller.signal.aborted || pollRef.current !== state) return;
+        setError("");
+        setStalled(false);
+        // 每次轮询都刷新任务态（queued→processing 的推进即时可见）
+        setJob({ id: jobId, status: row.status, downloadUrl: row.downloadUrl || null, fileName: row.fileName, failureCode: row.failureCode || null });
+        if (!EXPORT_PENDING_STATUSES.includes(row.status)) { finish(); return; }
+        if (Date.now() >= state.deadline) { finish(); setStalled(true); return; }
+        state.timer = window.setTimeout(tick, EXPORT_POLL_INTERVAL_MS);
+      } catch (pollError) {
+        if (controller.signal.aborted || pollRef.current !== state) return;
+        if (pollError.kind === "session") { finish(); expire(); return; }
+        if (["timeout", "network"].includes(pollError.kind) && Date.now() < state.deadline) {
+          state.timer = window.setTimeout(tick, EXPORT_POLL_INTERVAL_MS * 3);
+          return;
+        }
+        // 查询失败：保留已创建任务（绝不自动重复生成），转为可恢复状态
+        finish();
+        setStalled(true);
+        setError(pollError.message);
+      }
+    };
+    state.timer = window.setTimeout(tick, EXPORT_POLL_INTERVAL_MS);
+  }, [expire, stopPolling]);
+  const create = async () => {
+    if (creating || watching) return;
+    setConfirming(false);
+    setCreating(true);
+    setError("");
+    setStalled(false);
+    const controller = new AbortController();
+    const state = { controller };
+    createRef.current = state;
+    try {
+      const created = await request(API.admin.exports, { method: "POST", body: { submissionId }, signal: controller.signal });
+      if (controller.signal.aborted || createRef.current !== state) return; // 卸载后才返回：不落状态、不启动轮询
+      createRef.current = null;
+      setJob({ id: created.id, status: created.status || "queued", downloadUrl: null, fileName: null, failureCode: null });
+      setToast("单份问卷导出已创建，正在生成文件");
+      setCreating(false);
+      watch(created.id);
+    } catch (createError) {
+      if (controller.signal.aborted || createRef.current !== state) return; // 卸载/会话失效导致的中止：静默
+      createRef.current = null;
+      setCreating(false);
+      if (createError.kind === "session") { expire(); return; }
+      setError(createError.message);
+    }
+  };
+  // 恢复入口：复查同一个任务（不新建），从查询失败/暂停态回到轮询
+  const recheck = () => {
+    if (!job || creating || watching || !EXPORT_PENDING_STATUSES.includes(job.status)) return;
+    setError("");
+    watch(job.id);
+  };
+  const pending = Boolean(job && EXPORT_PENDING_STATUSES.includes(job.status));
+  const canRegenerate = Boolean(job && ["failed", "expired"].includes(job.status));
+  const statusView = () => {
+    if (error) return <span className="submission-export__message is-error" role="alert">{error}</span>;
+    if (!job) return null;
+    if (job.status === "succeeded") return <span className="submission-export__message">Excel 文件已生成；下载链接有时效，请尽快下载：<a href={job.downloadUrl}>下载 Excel</a></span>;
+    if (job.status === "failed") return <span className="submission-export__message is-error" role="alert">{exportFailureMessage(job.failureCode)}</span>;
+    if (job.status === "expired") return <span className="submission-export__message" role="alert">下载已过期，请重新生成。</span>;
+    if (stalled) return <span className="submission-export__message">任务仍在生成中，自动刷新已暂停。</span>;
+    return <span className="submission-export__message">{job.status === "processing" ? "正在生成 Excel 文件…" : "导出任务排队中…"}</span>;
+  };
+  return <div className="submission-export-bar">
+    <button className="admin-secondary" disabled={pending || creating} onClick={() => setConfirming(true)}>
+      <DownloadSimple size={17} /> {creating ? "正在创建导出任务…" : pending ? "导出进行中…" : "导出这份问卷 Excel"}
+    </button>
+    {statusView()}
+    {pending && !watching && <button className="admin-secondary" disabled={creating} onClick={recheck}>重新检查</button>}
+    {canRegenerate && <button className="admin-secondary" disabled={creating} onClick={create}>重新生成</button>}
+    <Modal open={confirming} title="导出这份问卷？" description={`将只为这一条提交记录（编号 ${submissionId.slice(0, 8)}）生成 Excel 评估表，下载链接有时效。`} confirmLabel={creating ? "创建中…" : "确认导出"} onCancel={() => !creating && setConfirming(false)} onConfirm={creating ? undefined : create} />
+  </div>;
+}
+
+// 提交详情路由：按 id 拉取完整提交；页头字段取自详情载荷（生产端点返回任务/门店/时间）。
+function SubmissionDetailRoute({ submissionId, parentList, run, setToast }) {
+  const { expire } = useAdminAuth();
+  const [state, setState] = useState({ loading: true, error: "", detail: null });
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    setState({ loading: true, error: "", detail: null });
+    request(API.admin.submission(submissionId), { schema: SubmissionDetailSchema, signal: controller.signal })
+      .then((detail) => { if (!controller.signal.aborted) setState({ loading: false, error: "", detail }); })
+      .catch((loadError) => {
+        if (controller.signal.aborted) return;
+        if (loadError.kind === "session") { expire(); return; }
+        setState({ loading: false, error: loadError.message, detail: null });
+      });
+    return () => controller.abort();
+  }, [submissionId, attempt]);
+  // 返回链接携带白名单内的父列表筛选（?list= 仅由站内构造），直接书签打开时退化为未过滤列表。
+  const backLink = <button className="back-link" onClick={() => navigate(`/admin/submissions${listSearchOf("submissions", parentList)}`)}><CaretRight size={15} /> 返回提交列表</button>;
+  if (state.loading) return <>{backLink}<StatePanel title="正在加载完整提交…" /></>;
+  if (state.error) return <>{backLink}<StatePanel title={state.error} action={<button className="admin-primary" onClick={() => setAttempt((value) => value + 1)}>重新加载</button>} /></>;
+  const detail = state.detail;
+  const description = [detail.storeName, detail.submittedAt ? formatTime(detail.submittedAt) : ""].filter(Boolean).join(" · ");
+  return <>{backLink}<PageHeader eyebrow="提交详情" title={detail.taskName || "提交详情"} description={description} /><SubmissionExport submissionId={submissionId} setToast={setToast} /><SubmissionDetail detail={detail} submissionId={submissionId} reload={() => setAttempt((value) => value + 1)} setToast={setToast} /></>;
+}
 function items(data) { return Array.isArray(data) ? data : data?.items || []; }
+// 导出任务类型展示名：submission=单份问卷（提交详情发起），dashboard=数据看板，submissions=提交汇总
+function exportKindLabel(kind) { return ({ submission: "单份问卷", dashboard: "数据看板", submissions: "提交记录" })[kind] || "提交记录"; }
+// 导出失败短提示（列表行内展示；稳定业务码映射，未知码显示通用“导出失败”）
+const EXPORT_FAILURE_HINTS = { EXPORT_SUBMISSION_SCORES_MISSING: "缺少可导出的得分数据", EXPORT_SUBMISSION_NOT_FOUND: "提交超出数据范围", EXPORT_SUBMISSION_REQUIRED: "任务未绑定提交", EXPORT_COS_NOT_CONFIGURED: "文件服务未配置" };
+function exportFailureHint(code) { return EXPORT_FAILURE_HINTS[code] || "导出失败"; }
 function roleLabel(role) { return ({ super_admin: "超级管理员", auditor: "审计员", operations_admin: "运营管理员", reviewer: "复核人员", store_manager: "门店负责人" })[role] || "管理员"; }
 function categoryLabel(category) { return ({ environment: "环境卫生", service: "为客服务", product: "产品品质" })[category] || "问卷题目"; }
 function dishStatusLabel(status) { return ({ ordered: "已点", substituted: "已替代", unavailable: "已售罄", skipped: "未点", extra: "额外菜品" })[status] || "状态待确认"; }
@@ -897,6 +1388,19 @@ function ExtendDialog({ assignment, onClose, onDone, setToast }) {
   const [problems, setProblems] = useState([]);
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+  const extendTitleId = useId();
+  // 未保存保护：已填内容与初始（全空）不一致即脏——返回/前进、菜单、刷新、退出登录先经统一确认；
+  // 弹窗自身取消/遮罩关闭在脏态下先弹「放弃填写内容」；失败弹窗保持可继续编辑，保护保留。
+  const fieldsRef = useRef({ dueAt: "", deadline: "", reason: "" });
+  fieldsRef.current = { dueAt, deadline, reason };
+  const isDirty = () => Boolean(fieldsRef.current.dueAt || fieldsRef.current.deadline || fieldsRef.current.reason.trim());
+  useNavigationGuard(useCallback(() => isDirty(), []));
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const attemptClose = () => {
+    if (pending) return;
+    if (isDirty()) { setConfirmDiscard(true); return; }
+    onClose();
+  };
   const submit = async () => {
     if (pending) return;
     const nextProblems = [];
@@ -919,9 +1423,10 @@ function ExtendDialog({ assignment, onClose, onDone, setToast }) {
       setError(submitError.message);
     }
   };
-  return <div className="modal-backdrop" role="presentation" onMouseDown={() => !pending && onClose()}>
-    <section className="modal-card modal-card--form" role="dialog" aria-modal="true" aria-labelledby="extend-dialog-title" onMouseDown={(event) => event.stopPropagation()}>
-      <h2 id="extend-dialog-title">延期这条指派？</h2>
+  return <>
+    <div className="modal-backdrop" role="presentation" onMouseDown={attemptClose}>
+    <section className="modal-card modal-card--form" role="dialog" aria-modal="true" aria-labelledby={extendTitleId} onMouseDown={(event) => event.stopPropagation()}>
+      <h2 id={extendTitleId}>延期这条指派？</h2>
       <p>两个截止时间至少填写一项；逾期指派延期后将恢复为进行中。</p>
       <div className="extend-current"><span>当前执行截止：{formatTime(assignment.dueAt)}</span><span>当前问卷最终截止：{formatTime(assignment.questionnaireDeadlineAt)}</span></div>
       <div className="form-dialog-fields">
@@ -932,11 +1437,15 @@ function ExtendDialog({ assignment, onClose, onDone, setToast }) {
       {problems.map((problem) => <p key={problem} className="form-message" role="alert">{problem}</p>)}
       {error ? <p className="form-message" role="alert">{error}</p> : null}
       <div className="modal-actions">
-        <button className="button button--ghost" disabled={pending} onClick={onClose}>取消</button>
+        <button className="button button--ghost" disabled={pending} onClick={attemptClose}>取消</button>
         <button className="button button--primary" disabled={pending} onClick={submit}>{pending ? "处理中…" : "确认延期"}</button>
       </div>
     </section>
-  </div>;
+    </div>
+    {confirmDiscard && (
+      <Modal open title="放弃填写的内容？" description="关闭弹窗将丢失已填写但未提交的内容。" danger confirmLabel="放弃内容" cancelLabel="继续填写" onCancel={() => setConfirmDiscard(false)} onConfirm={() => { setConfirmDiscard(false); onClose(); }} />
+    )}
+  </>;
 }
 function askExemption(ask, assignment) {
   ask({ title: "创建单次打卡豁免？", description: "豁免最长 30 分钟，并会在首次开始问卷时自动消费。", success: "单次打卡豁免已创建", path: API.admin.exemptions(assignment.id), confirmLabel: "创建豁免", fields: [{ name: "reason", label: "打卡豁免原因", type: "textarea", required: true }], build: (values) => ({ assignmentRevision: assignment.revision, reason: values.reason.trim(), validForMinutes: 30 }) });

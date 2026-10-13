@@ -103,6 +103,21 @@ describe.sequential("render deployment smoke", () => {
     expect(assetResponse.statusCode).toBe(200);
     expect(assetResponse.headers["content-type"]).toContain("text/javascript");
 
+    // Admin 客户端路由深链接（真实构建产物）：无扩展名页面路径回退 Admin index.html（未知页面
+    // 由前端渲染友好 404），带扩展名的缺失资源严格 404（不用 index 冒充构建缺口）。
+    const deepLink = await app.inject({ method: "GET", url: "/admin/campaigns/campaign-one" });
+    expect(deepLink.statusCode).toBe(200);
+    expect(deepLink.headers["content-type"]).toContain("text/html");
+    expect(deepLink.headers["cache-control"]).toBe("no-cache");
+    expect(deepLink.body).toContain("/admin/assets/");
+    const unknownAdminPage = await app.inject({ method: "GET", url: "/admin/some/where" });
+    expect(unknownAdminPage.statusCode).toBe(200);
+    expect(unknownAdminPage.headers["content-type"]).toContain("text/html");
+    expect(unknownAdminPage.body).toContain("/admin/assets/");
+    const missingAdminAsset = await app.inject({ method: "GET", url: "/admin/assets/missing.js" });
+    expect(missingAdminAsset.statusCode).toBe(404);
+    expect(missingAdminAsset.body).not.toContain("/admin/assets/");
+
     // 未知 API 不被静态回退遮蔽。
     const apiNotFound = await app.inject({ method: "GET", url: "/api/not-exist" });
     expect(apiNotFound.statusCode).toBe(404);

@@ -119,7 +119,7 @@ export function SchedulePage() {
     if (navigatingIdRef.current) return; // 防重复：跳转期间禁止再次触发
     navigatingIdRef.current = id;
     setNavigatingId(id);
-    navigate(`/task?assignmentId=${encodeURIComponent(id)}`); // 成功即整页切换（卡片文案「正在打开…」由 navigatingId 驱动）
+    navigate(`/task?assignmentId=${encodeURIComponent(id)}&source=schedule`); // 成功即整页切换（卡片文案「正在打开…」由 navigatingId 驱动）
   };
 
   const viewState = loading ? "loading" : errorBlocking ? "error" : groups.length === 0 ? "empty" : "ready";

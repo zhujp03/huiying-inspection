@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { z } from "zod";
 import { CaretDown, Plus, WarningCircle } from "@phosphor-icons/react";
 import { API, AdminUserOptionSchema, AssignmentUpsertSchema, BrandRowSchema, CampaignDetailSchema, CampaignWriteSchema, QuestionnaireVersionRowSchema, StoreRowSchema, listSchema } from "../../../../packages/contracts/index.js";
 import { request } from "../api/client.js";
+import { useAdminAuth } from "../auth/AdminAuth.jsx";
+import { useNavigationGuard } from "../router.jsx";
 import { brandGroups, businessNoOptions, cascadeFromStore, storeOptions } from "../utils/store-cascade.js";
 
 // 游标分页 schema 派生：zod 默认 strip 未知字段，需显式声明 nextCursor 才能读到「加载更多」游标
@@ -42,6 +44,16 @@ const STEPS = [
   { n: 3, label: "确认并发布" },
 ];
 
+// 行业务字段的稳定序列化：作为「已保存基线」参与脏比较（改动后改回原值即视为干净，保存也只挑真变更行）。
+function rowBusinessJson(row) {
+  return JSON.stringify({
+    inspectorId: row.inspectorId, questionnaireVersionId: row.questionnaireVersionId, taskType: row.taskType,
+    startsAt: row.startsAt, dueAt: row.dueAt, budgetLimit: row.budgetLimit, receiptRequired: row.receiptRequired,
+    specialInstruction: row.specialInstruction,
+    dishRequirements: row.dishRequirements.map((dish) => ({ plannedName: dish.plannedName, quantity: Number(dish.quantity), required: Boolean(dish.required), allowSubstitution: Boolean(dish.allowSubstitution) })),
+  });
+}
+
 function seedRows(detail) {
   return (detail.assignments || []).map((assignment) => ({
     key: assignment.id, id: assignment.id, inspectorId: assignment.inspectorId || "", questionnaireVersionId: assignment.questionnaireVersionId || "",
@@ -49,12 +61,16 @@ function seedRows(detail) {
     budgetLimit: assignment.budgetLimit ?? 0, receiptRequired: Boolean(assignment.receiptRequired), specialInstruction: assignment.specialInstruction || "",
     dishRequirements: (assignment.dishRequirements || []).map((dish) => ({ plannedName: dish.plannedName, quantity: dish.quantity, required: Boolean(dish.required), allowSubstitution: Boolean(dish.allowSubstitution) })),
     status: assignment.status, revision: assignment.revision, dirty: false, expanded: false,
-  }));
+  })).map((row) => ({ ...row, baseline: rowBusinessJson(row) }));
 }
 
-export function CampaignWizard({ campaign, initialStep = 1, returnTo = "list", onClose, setToast }) {
+export function CampaignWizard({ campaign, step: stepProp = 1, returnTo = "list", onClose, onStepChange, onCampaignCreated, setToast }) {
+  const { expire } = useAdminAuth();
+  // editing 以已落库的 campaignState.id 为准：创建成功后立即翻转为编辑态（URL 已同步 replace）。
   const editing = Boolean(campaign?.id);
-  const [step, setStep] = useState(initialStep);
+  const [step, setStep] = useState(stepProp);
+  // URL 查询串驱动向导步：返回/前进带来的 step 变化同步进来（组件保持挂载，未保存输入不丢）。
+  useEffect(() => { setStep(stepProp); }, [stepProp]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [options, setOptions] = useState({ stores: [], users: [], versions: [], brands: [] });
@@ -75,6 +91,17 @@ export function CampaignWizard({ campaign, initialStep = 1, returnTo = "list", o
   const UNBRANDED = "__unbranded__"; // 级联里"未分品牌"组的哨兵值（组 brandId 为 null）
   const [brandValue, setBrandValue] = useState(""); // 第 1 步门店级联：品牌（提交真值仍是 form.storeId）
   const [businessNoValue, setBusinessNoValue] = useState(""); // 第 1 步门店级联：店号
+  // 未保存修改守卫：与挂载/保存后的快照比较（第 1 步表单 + 指派行各有一份基线）。
+  // 改动后改回原值即不脏；新增行（未落库）与删除已保存行视为脏；保存成功后对应基线推进。
+  const formRef = useRef(form);
+  formRef.current = form;
+  const formBaselineRef = useRef(form);
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
+  const removedRowsRef = useRef(removedRows);
+  removedRowsRef.current = removedRows;
+  const rowsChanged = () => removedRowsRef.current.length > 0 || rowsRef.current.some((row) => !row.id || rowBusinessJson(row) !== row.baseline);
+  useNavigationGuard(useCallback(() => JSON.stringify(formRef.current) !== JSON.stringify(formBaselineRef.current) || rowsChanged(), []));
 
   useEffect(() => {
     const controller = new AbortController();
@@ -86,7 +113,12 @@ export function CampaignWizard({ campaign, initialStep = 1, returnTo = "list", o
     ]).then(([stores, users, versions, brands]) => {
       setOptions({ stores: stores.items, users: users.items, versions: versions.items, brands: brands.items });
       setCursors({ stores: stores.nextCursor ?? null, users: users.nextCursor ?? null, versions: versions.nextCursor ?? null });
-    }).catch((loadError) => { if (!controller.signal.aborted) setError(loadError.message); })
+    }).catch((loadError) => {
+      if (controller.signal.aborted) return;
+      // 会话失效：回登录页（保留当前向导 URL，登录后回到原步）；其余失败就地报错可重试。
+      if (loadError.kind === "session") { expire(); return; }
+      setError(loadError.message);
+    })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, []);
@@ -189,12 +221,17 @@ export function CampaignWizard({ campaign, initialStep = 1, returnTo = "list", o
       if (campaignState.id) {
         const result = await request(API.admin.campaign(campaignState.id), { method: "PATCH", body: built.payload });
         setCampaignState((current) => ({ ...current, revision: result.campaign.revision }));
+        formBaselineRef.current = { ...formRef.current }; // 第 1 步保存成功：任务信息基线推进
+        goStep(2);
       } else {
         const result = await request(API.admin.campaigns, { method: "POST", body: built.payload });
         setCampaignState({ id: result.campaign.id, revision: result.campaign.revision });
+        formBaselineRef.current = { ...formRef.current };
+        setStep(2);
+        // 首次创建：URL replace 为已保存草稿的编辑地址（step=2），刷新落到持久化数据，不会重复 POST。
+        onCampaignCreated?.(result.campaign.id, result.campaign.revision);
         setToast("任务草稿已创建，请继续指派探店员");
       }
-      setStep(2);
     } catch (saveError) { setError(saveError.message); }
     finally { setBusy(false); }
   };
@@ -238,7 +275,8 @@ export function CampaignWizard({ campaign, initialStep = 1, returnTo = "list", o
         revision += 1;
       }
       for (const row of rows) {
-        if (!row.dirty) continue;
+        // 只保存真变更行：改回基线的行不再提交（row.dirty 仅用于「已保存草稿」标记显示）。
+        if (row.id && rowBusinessJson(row) === row.baseline) continue;
         const payload = AssignmentUpsertSchema.parse(assignmentPayload(row, revision));
         const saved = row.id
           ? await request(API.admin.assignment(row.id), { method: "PATCH", body: payload })
@@ -251,7 +289,7 @@ export function CampaignWizard({ campaign, initialStep = 1, returnTo = "list", o
       setCampaignState({ id: fresh.id, revision: fresh.revision });
       setRows(seedRows(fresh));
       setRemovedRows([]);
-      setStep(3);
+      goStep(3);
     } catch (saveError) { setError(saveError.message); }
     finally { setBusy(false); }
   };
@@ -270,12 +308,17 @@ export function CampaignWizard({ campaign, initialStep = 1, returnTo = "list", o
     setBusy(true);
     try {
       await request(API.admin.publishCampaign(campaignState.id), { method: "POST", body: { revision: campaignState.revision } });
+      // 发布成功：任务与指派全部落库，基线整体推进。
+      formBaselineRef.current = { ...formRef.current };
+      setRows((current) => current.map((row) => ({ ...row, baseline: rowBusinessJson(row) })));
+      setRemovedRows([]);
       setToast("任务已发布，指派已同步到探店员日程");
       onClose(true);
     } catch (publishError) { setError(publishError.message); }
     finally { setBusy(false); }
   };
-  const goStep = (target) => { setError(""); setStep(target); };
+  // 步骤切换 = 站内导航（push）：URL 携带 step，返回/前进可回到对应步；组件不卸载，输入保留。
+  const goStep = (target) => { setError(""); setStep(target); onStepChange?.(target); };
   const cancel = () => {
     if (!editing && campaignState.id && rows.length === 0) setToast("任务草稿已保存在任务列表，可继续编辑或删除");
     onClose(false);

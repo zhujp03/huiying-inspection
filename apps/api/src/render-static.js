@@ -6,6 +6,8 @@
 //     项目根、.env、本地证据目录（/var/data）绝不在可服务范围内。
 //   - 不遮蔽 API：未注册的 /api、/health、/metrics 等路径一律 JSON 404，不回退 index；
 //     带扩展名的缺失资源（如构建缺口的 .js/.css）返回 404，不用 index 冒充。
+//   - Admin 深链接：/admin/* 下静态资源未命中时，仅对路由表白名单内的真实页面路径
+//     回退 Admin index.html（支持直接打开/刷新客户端路由），其余路径仍 404。
 //   - 无新依赖：内置 MIME 表 + node:fs 流式读取；hashed 资源 immutable 长缓存，index no-cache。
 import { createReadStream, existsSync } from "node:fs";
 import { stat, realpath } from "node:fs/promises";
@@ -79,17 +81,43 @@ export function registerRenderStaticRoutes(app, { webDist = defaultDist("web"), 
 
   const api404 = (request, reply) => reply.code(404).send({ error: { code: "ROUTE_NOT_FOUND", message: `Route ${request.method}:${request.url} not found`, requestId: request.id } });
 
-  // Admin：/admin 308 到 /admin/（目录语义）；入口 only——Admin 无路由器，不把 index 冒充任意路径。
+  // Admin 客户端路由回退规则（/admin/*，静态资源未命中时）：
+  //   无扩展名且无路径穿越痕迹的路径 → 回退 Admin index.html。Admin 是真实 pathname 路由的
+  //   SPA：未知页面路径由前端渲染友好 404 页（HTTP 仍 200 交由应用表达），同时天然覆盖未来
+  //   新增路由，不需要服务端白名单跟进。
+  //   带扩展名（.js/.css/.html/任意）的缺失资源 → 严格 404，不用 index 冒充（构建缺口不遮掩）；
+  //   解码后含「..」或「\0」的路径 → 严格 404（目录/符号链接逃逸在 statWithin 双重校验之外
+  //   再拒一次，绝不读 dist 外文件）；非 GET/HEAD 与 /api、/health、/metrics 不受影响。
+  const isLikelyAdminPagePath = (relative) => {
+    let decoded = relative;
+    try {
+      decoded = decodeURIComponent(relative);
+    } catch {
+      return false; // 畸形百分号编码按缺失资源处理
+    }
+    if (!decoded || decoded.includes("\0") || decoded.includes("..")) return false;
+    if (decoded.endsWith("/")) decoded = decoded.replace(/\/+$/, "");
+    if (!decoded) return false;
+    // assets/ 目录内是构建产物的领地（hashed 文件都带扩展名）：无论是否带扩展名，缺失一律 404。
+    if (decoded === "assets" || decoded.startsWith("assets/") || decoded.startsWith(`assets${sep}`)) return false;
+    return !extname(decoded);
+  };
+
+  // Admin：/admin 308 到 /admin/（目录语义）；入口与无扩展名的客户端页面路径回退 index。
   app.get("/admin", (_request, reply) => reply.redirect("/admin/", 308));
   app.get("/admin/", (_request, reply) => sendIndex(reply, adminDist));
   app.get("/admin/index.html", (_request, reply) => sendIndex(reply, adminDist));
   app.get("/admin/*", async (request, reply) => {
     const relative = String(request.params["*"] || "");
     const found = await statWithin(adminDist, relative);
-    if (!found) throw notFound("静态资源不存在");
-    // vite hashed 资源长缓存；其余（如 favicon）短缓存。
-    reply.header("cache-control", relative.startsWith(`assets${sep}`) || relative.startsWith("assets/") ? "public, max-age=31536000, immutable" : "public, max-age=300");
-    return sendFile(reply, found);
+    if (found) {
+      // vite hashed 资源长缓存；其余（如 favicon）短缓存。
+      reply.header("cache-control", relative.startsWith(`assets${sep}`) || relative.startsWith("assets/") ? "public, max-age=31536000, immutable" : "public, max-age=300");
+      return sendFile(reply, found);
+    }
+    // 静态资源未命中：客户端页面路径（无扩展名）回退 index，交由前端路由渲染（含友好 404 页）。
+    if (!isLikelyAdminPagePath(relative)) throw notFound("静态资源不存在");
+    return sendIndex(reply, adminDist);
   });
 
   // H5：根入口；hash 路由只有 / 一个入口，其余未注册路径走 notFound 回退（见下）。

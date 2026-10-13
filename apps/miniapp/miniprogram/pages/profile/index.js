@@ -32,7 +32,8 @@ Page({
       success: (result) => { if (result.confirm) wx.reLaunch({ url: "/pages/login/index?mode=forgot" }); },
     });
   },
-  openPrivacy() { wx.navigateTo({ url: "/pages/location/index", fail: () => wx.showToast({ title: "暂时无法打开定位说明", icon: "none" }) }); },
+  // source=profile：定位说明页完成/返回时回到「我的」（原生返回同样落回本页）。
+  openPrivacy() { wx.navigateTo({ url: "/pages/location/index?source=profile", fail: () => wx.showToast({ title: "暂时无法打开定位说明", icon: "none" }) }); },
   openHelp() { wx.navigateTo({ url: "/pages/help/index", fail: () => wx.showToast({ title: "暂时无法打开填写帮助", icon: "none" }) }); },
   // 退出登录：先确认，退出期间防重复；API 失败仍按会话安全逻辑跳转并给出明确反馈。
   confirmLogout() {

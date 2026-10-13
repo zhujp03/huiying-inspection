@@ -153,6 +153,7 @@ Page({
     await this.pending(async () => {
       const session = await login({ username: this.data.username, password: this.data.password });
       const status = session.user?.status;
+      // 登录成功仍先经定位说明页（隐私/授权策略保留）；location 完成后进首页（不再固定日程）。
       if (status === "approved_active") wx.redirectTo({ url: "/pages/location/index" });
       else this.setData({ step: "status", accountStatus: status, rejectedReason: session.user?.rejectedReason || "" });
       this.updateView();

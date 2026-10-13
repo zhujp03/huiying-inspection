@@ -63,7 +63,7 @@ export function ProfilePage() {
         </div>
       </Card>
       <Card flush>
-        <div className="list-row" onClick={() => navigate("/location")} role="button">
+        <div className="list-row" onClick={() => navigate("/location?source=profile")} role="button">
           <span className="list-row__label">隐私与定位</span><span className="list-chevron">›</span>
         </div>
         <div className="list-row" onClick={() => navigate("/help")} role="button">

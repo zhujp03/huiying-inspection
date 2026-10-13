@@ -65,8 +65,9 @@ Page({
   goTask() {
     if (this.data.navigating || !this.data.task) return;
     this.setData({ navigating: true });
+    // source=home：任务页返回键据此回到首页（而非固定日程）。
     wx.navigateTo({
-      url: `/pages/task/index?assignmentId=${encodeURIComponent(this.data.task.id)}`,
+      url: `/pages/task/index?assignmentId=${encodeURIComponent(this.data.task.id)}&source=home`,
       complete: () => this.setData({ navigating: false }),
     });
   },

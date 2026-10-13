@@ -377,6 +377,11 @@ button:active { transform: translateY(1px); }
 .filter-bar input { width: 100%; border: 0; outline: 0; font-size: 13px; }
 .back-link { margin-bottom: 17px; padding: 0; border: 0; background: transparent; color: #70747b; font-size: 12px; cursor: pointer; }
 .back-link svg { transform: rotate(180deg); vertical-align: middle; }
+/* 提交详情单份问卷导出条：按钮 + 行内任务状态（排队/生成中/下载/失败重试） */
+.submission-export-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 18px; padding: 10px 14px; background: white; border: 1px solid var(--line); }
+.submission-export__message { color: var(--muted); font-size: 13px; }
+.submission-export__message a { color: var(--orange); font-weight: 650; }
+.submission-export__message.is-error { color: #c23a2b; }
 .campaign-summary { display: grid; grid-template-columns: repeat(4, 1fr); margin-bottom: 18px; background: white; border: 1px solid var(--line); }
 .campaign-summary > div { min-height: 82px; padding: 16px; display: flex; flex-direction: column; gap: 10px; border-right: 1px solid var(--line); }
 .campaign-summary > div:last-child { border: 0; }

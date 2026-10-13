@@ -58,6 +58,7 @@
       "provider": "wx1fe8d9a3cb067a75"
     }
   },
+  "lazyCodeLoading": "requiredComponents",
   "style": "v2",
   "sitemapLocation": "sitemap.json"
 }

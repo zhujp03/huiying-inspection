@@ -1,5 +1,6 @@
 import { getAssignment, getDraft, saveOtherRecords, submitQuestionnaire } from "../../services/api.js";
 import { clearDraft, getDraft as getLocalDraft, markDraftSynced, saveDraft as saveLocalDraft } from "../../store/survey.js";
+import { backToParentOrRedirect, sanitizeSource } from "../../utils/navigation.js";
 import { secureUuid } from "../../utils/business.js";
 
 Page({
@@ -31,6 +32,8 @@ Page({
       questionnaireVersionId: options.questionnaireVersionId,
       revision: Number(options.revision || 0),
     };
+    // 任务链来源（菜品页写入）：只读回跳任务详情时原样带回。
+    this.source = sanitizeSource(options.source);
     await this.load();
   },
 
@@ -40,7 +43,7 @@ Page({
       const assignment = await getAssignment(this.routeMeta.assignmentId);
       if (assignment.status === "submitted") {
         wx.showToast({ title: "该任务已提交", icon: "none" });
-        wx.redirectTo({ url: `/pages/task/index?assignmentId=${encodeURIComponent(this.routeMeta.assignmentId)}` });
+        wx.redirectTo({ url: `/pages/task/index?assignmentId=${encodeURIComponent(this.routeMeta.assignmentId)}&source=${this.source || ""}` });
         return;
       }
       const result = await getDraft(this.routeMeta.attemptId);
@@ -49,7 +52,7 @@ Page({
       }
       if (["submitting", "processing", "submitted"].includes(result.attempt.status)) {
         wx.showToast({ title: result.attempt.status === "submitted" ? "该任务已提交" : "问卷正在提交", icon: "none" });
-        wx.redirectTo({ url: `/pages/task/index?assignmentId=${encodeURIComponent(this.routeMeta.assignmentId)}` });
+        wx.redirectTo({ url: `/pages/task/index?assignmentId=${encodeURIComponent(this.routeMeta.assignmentId)}&source=${this.source || ""}` });
         return;
       }
       const meta = { ...this.routeMeta, revision: result.attempt.revision };
@@ -89,13 +92,17 @@ Page({
 
   keyboard(event) { this.setData({ keyboardOpen: Number(event.detail.height || 0) > 0 }); },
 
+  // 返回菜品：仅当紧邻父页确为同任务菜品页才原生返回；直达进入/无关栈不算证据，
+  // 此时 redirectTo 携全量参数的规范菜品页，绝不落到无关任务或退出小程序。
   async back() {
     if (this.locked()) return;
     const saved = await this.saveRecords();
     if (!saved) return;
-    const pages = getCurrentPages();
-    if (pages.length > 1) wx.navigateBack();
-    else wx.redirectTo({ url: routeUrl("/pages/dishes/index", this.routeMeta) });
+    backToParentOrRedirect({
+      parentRoute: "pages/dishes/index",
+      meta: { assignmentId: this.routeMeta.assignmentId, attemptId: this.routeMeta.attemptId },
+      fallbackUrl: `${routeUrl("/pages/dishes/index", this.routeMeta)}&source=${this.source || ""}`,
+    });
   },
 
   async confirm() {

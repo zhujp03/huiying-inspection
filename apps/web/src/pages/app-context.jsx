@@ -1,6 +1,8 @@
 // 页面共享上下文（第 3 段）：
-// App.jsx 为 Provider，value = { publicConfig, session, navigate(to), back(fallback),
-// replace(to), toast(message), redirectToLogin() }。
+// App.jsx 为 Provider，value = { publicConfig, session, navigate(to),
+// back(fallback, expectParent?), replace(to), toast(message), redirectToLogin() }。
+// back：仅当应用内导航日志存在上一条（且 expectParent(previous) 校验通过，未提供则只要求
+// 存在）才 history.back()；否则 replace 到 fallback 规范路由（router/nav-history.js）。
 // 无全局订阅：session/publicConfig 由 App 在路由变化与自身状态更新时重读/透传（inventory §4.2）。
 import { createContext, useContext } from "react";
 
