@@ -127,30 +127,41 @@ test("登出状态下打开深链接：登录后返回目标页面", async ({ pa
   await expect(page.getByLabel("门店名称")).toHaveValue("静安嘉里中心店");
 });
 
-test("会话过期回登录页且重新登录后回到目标路由", async ({ page }) => {
+test("会话过期显示重登遮罩且重新登录后回到目标路由", async ({ page }) => {
   await login(page);
   await page.route("**/api/admin/campaigns*", (route) => route.fulfill({ status: 401, contentType: "application/json", body: JSON.stringify({ error: { code: "SESSION_EXPIRED" } }) }));
+  await page.route("**/api/me", (route) => route.fulfill({ status: 401, contentType: "application/json", body: JSON.stringify({ error: { code: "SESSION_EXPIRED" } }) }));
   await page.getByRole("button", { name: "探店任务" }).click();
-  await expect(page.getByRole("heading", { name: "管理员登录" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "登录已过期，请重新登录" })).toBeVisible();
   await expect(page).toHaveURL(/\/admin\/campaigns$/); // 意图路由保留在地址栏
   await page.unroute("**/api/admin/campaigns*");
   await page.getByLabel("管理员账号").fill("ops");
   await page.getByLabel("密码").fill("correct-password");
   await page.getByRole("button", { name: "登录" }).click();
+  // 过期期间列表落在可重试错误态：重登后一键恢复
+  await page.getByRole("button", { name: "重新加载" }).click();
   await expect(page.getByRole("heading", { name: "探店任务与指派" })).toBeVisible();
   await expect(page).toHaveURL(/\/admin\/campaigns$/);
 });
 
-test("问卷版本深链接会话失效回登录且登录后恢复", async ({ page }) => {
+test("问卷版本深链接会话失效切登录遮罩且登录后恢复", async ({ page }) => {
   await login(page);
-  await page.route("**/api/admin/questionnaire-versions/**", (route) => route.fulfill({ status: 401, contentType: "application/json", body: JSON.stringify({ error: { code: "SESSION_EXPIRED" } }) }));
-  await page.goto("/admin/questionnaires/version-draft?question=draft-question-2");
-  await expect(page.getByRole("heading", { name: "管理员登录" })).toBeVisible();
-  await expect(page).toHaveURL(/\/admin\/questionnaires\/version-draft/);
-  await page.unroute("**/api/admin/questionnaire-versions/**");
+  // 会话失效发生在「已加载的应用」里：恢复探测与该版本的详情请求一并被拒（列表端点不受拦截）
+  await page.route("**/api/me", (route) => route.fulfill({ status: 401, contentType: "application/json", body: JSON.stringify({ error: { code: "SESSION_EXPIRED", requestId: "fixture-request" } }) }));
+  await page.route("**/api/admin/questionnaire-versions/version-draft*", (route) => route.fulfill({ status: 401, contentType: "application/json", body: JSON.stringify({ error: { code: "SESSION_EXPIRED", requestId: "fixture-request" } }) }));
+  await page.getByRole("button", { name: "问卷题库" }).click();
+  await page.getByRole("row", { name: /秋季草稿版/ }).getByRole("button", { name: "查看题目" }).click();
+  await expect(page.getByRole("heading", { name: "登录已过期，请重新登录" })).toBeVisible();
+  await expect(page).toHaveURL(/\/admin\/questionnaires\/version-draft/); // 意图路由保留在地址栏
+  await page.unroute("**/api/admin/questionnaire-versions/version-draft*");
+  await page.unroute("**/api/me");
   await page.getByLabel("管理员账号").fill("ops");
   await page.getByLabel("密码").fill("correct-password");
   await page.getByRole("button", { name: "登录" }).click();
+  // 过期期间详情落在可重试错误态：重登后一键恢复，再进入选中题目
+  await page.getByRole("button", { name: "重新加载" }).click();
+  await expect(page.getByRole("heading", { name: "秋季暗访问卷" })).toBeVisible();
+  await page.locator(".question-pick-main", { hasText: "地面是否干净无杂物" }).click();
   await expect(page.getByRole("heading", { name: "题目设置" })).toBeVisible();
   await expect(page).toHaveURL(/question=draft-question-2/);
 });
@@ -697,8 +708,8 @@ test("反复取消的返回不破坏历史：取消两次后仍可正常确认�
 test("门店品牌筛选在编辑往返（站内/浏览器返回/新建）后保持", async ({ page }) => {
   await login(page);
   await page.getByRole("button", { name: "门店管理" }).click();
-  await page.getByLabel("门店品牌筛选").selectOption("brand-one");
-  await expect(page).toHaveURL(/\/admin\/stores\?brandId=brand-one$/);
+  await page.getByLabel("门店品牌筛选").selectOption("1a6fd7a0-1111-4111-8111-000000000001");
+  await expect(page).toHaveURL(/\/admin\/stores\?brandId=1a6fd7a0-1111-4111-8111-000000000001$/);
   await expect(page.getByRole("row", { name: /静安嘉里中心店/ })).toBeVisible();
   await expect(page.getByRole("row", { name: /浦东世纪公园店/ })).toHaveCount(0);
   await expect(page.getByText("压测门店 227 号店")).toHaveCount(0);
@@ -706,23 +717,23 @@ test("门店品牌筛选在编辑往返（站内/浏览器返回/新建）后保
   await page.getByRole("row", { name: /静安嘉里中心店/ }).getByRole("button", { name: "编辑范围" }).click();
   await expect(page).toHaveURL(/\/admin\/stores\/store-one\/edit\?list=/);
   await page.getByRole("button", { name: "返回门店列表" }).click();
-  await expect(page).toHaveURL(/\/admin\/stores\?brandId=brand-one$/);
+  await expect(page).toHaveURL(/\/admin\/stores\?brandId=1a6fd7a0-1111-4111-8111-000000000001$/);
   await expect(page.getByRole("row", { name: /静安嘉里中心店/ })).toBeVisible();
   await expect(page.getByRole("row", { name: /浦东世纪公园店/ })).toHaveCount(0);
   // 浏览器返回同样保持
   await page.getByRole("row", { name: /静安嘉里中心店/ }).getByRole("button", { name: "编辑范围" }).click();
   await page.goBack();
-  await expect(page).toHaveURL(/\/admin\/stores\?brandId=brand-one$/);
+  await expect(page).toHaveURL(/\/admin\/stores\?brandId=1a6fd7a0-1111-4111-8111-000000000001$/);
   await expect(page.getByRole("row", { name: /静安嘉里中心店/ })).toBeVisible();
   // 新建门店入口携带父上下文，返回后筛选仍保持
   await page.getByRole("button", { name: "新建门店" }).click();
   await page.getByRole("button", { name: "返回门店列表" }).click();
-  await expect(page).toHaveURL(/\/admin\/stores\?brandId=brand-one$/);
+  await expect(page).toHaveURL(/\/admin\/stores\?brandId=1a6fd7a0-1111-4111-8111-000000000001$/);
 });
 
 test("门店列表筛选 URL 刷新可恢复", async ({ page }) => {
   await login(page);
-  await page.goto("/admin/stores?brandId=brand-one");
+  await page.goto("/admin/stores?brandId=1a6fd7a0-1111-4111-8111-000000000001");
   await expect(page.getByRole("row", { name: /静安嘉里中心店/ })).toBeVisible();
   await expect(page.getByRole("row", { name: /浦东世纪公园店/ })).toHaveCount(0);
 });
@@ -976,7 +987,7 @@ test("在途的旧版本后台刷新不会覆盖新版本数据", async ({ page 
 });
 
 async function wizardFillStore(page) {
-  await page.getByLabel(new RegExp("^品牌")).selectOption("brand-one");
+  await page.getByLabel(new RegExp("^品牌")).selectOption("1a6fd7a0-1111-4111-8111-000000000001");
   await page.getByLabel(new RegExp("^店号")).selectOption("JD-SH-001");
   await page.getByLabel(new RegExp("^店名")).selectOption("store-one");
 }

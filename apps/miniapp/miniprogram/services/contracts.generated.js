@@ -21,6 +21,8 @@ export const API = Object.freeze({
     "updateCampaign": (id) => [id].reduce((value, parameter) => value.replace(/:[^/]+/, encodeURIComponent(parameter)), "/api/admin/campaigns/:id"),
     "campaignAssignments": (id) => [id].reduce((value, parameter) => value.replace(/:[^/]+/, encodeURIComponent(parameter)), "/api/admin/campaigns/:id/assignments"),
     "cancelCampaign": (id) => [id].reduce((value, parameter) => value.replace(/:[^/]+/, encodeURIComponent(parameter)), "/api/admin/campaigns/:id/cancel"),
+    "campaignCleanup": (id) => [id].reduce((value, parameter) => value.replace(/:[^/]+/, encodeURIComponent(parameter)), "/api/admin/campaigns/:id/cleanup"),
+    "campaignCleanupPreview": (id) => [id].reduce((value, parameter) => value.replace(/:[^/]+/, encodeURIComponent(parameter)), "/api/admin/campaigns/:id/cleanup-preview"),
     "publishCampaign": (id) => [id].reduce((value, parameter) => value.replace(/:[^/]+/, encodeURIComponent(parameter)), "/api/admin/campaigns/:id/publish"),
     "exportList": "/api/admin/exports",
     "exports": "/api/admin/exports",

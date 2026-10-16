@@ -9,6 +9,14 @@ import { consumeRateLimit } from "./rate-limit.js";
 const now = () => new Date();
 const addMinutes = (minutes) => new Date(Date.now() + minutes * 60_000);
 const businessError = (code, message, statusCode = 422, options = {}) => Object.assign(new Error(message), { code, statusCode, ...options });
+// 会话时长集中定义（分钟）：管理端默认 120 分钟闲置 + 12 小时绝对上限（长工作流不掉线，仍受绝对上限兜底），
+// 探员/申请态 12 小时闲置 + 30 天绝对上限。创建会话、DB 滑动续期与浏览器 cookie 续期都引用这里，避免多处漂移。
+const SESSION_DURATIONS = Object.freeze({
+  admin: Object.freeze({ idleMinutes: 120, absoluteMinutes: 12 * 60 }),
+  inspector: Object.freeze({ idleMinutes: 12 * 60, absoluteMinutes: 30 * 24 * 60 }),
+  application_status: Object.freeze({ idleMinutes: 12 * 60, absoluteMinutes: 30 * 24 * 60 }),
+});
+const durationsFor = (kind) => SESSION_DURATIONS[kind] || SESSION_DURATIONS.inspector;
 // disable/enable 不做乐观并发控制，revision 可选；审批路由仍用 RegistrationDecisionSchema（revision 必填）。
 const UserStatusChangeSchema = z.object({ reason: z.string().trim().min(1).max(1000).optional() });
 // scopeLabel：按角色与数据范围返回有信息量的文案——super_admin/无显式范围的管理员为全部数据，
@@ -32,6 +40,16 @@ export function registerAuthRoutes(app, { pool, config, passwordService, provide
   if (key && key.length !== 32) throw new Error("PHONE_ENCRYPTION_KEY_BASE64 must decode to 32 bytes");
   const tokenHash = (value) => hmac(config.AUTH_TOKEN_HMAC_KEY, value);
   const phoneHash = (phone) => hmac(config.AUTH_TOKEN_HMAC_KEY, normalizePhone(phone));
+  // 管理端 CSRF 令牌由会话令牌单向派生（HMAC，不泄露会话令牌本身）：同一会话内令牌稳定，
+  // 多个标签页共享不再互踢；登录与 /api/me 返回同一令牌，数据库只存其摘要用于比对。
+  const csrfTokenFor = (rawToken) => hmac(config.AUTH_TOKEN_HMAC_KEY, `admin-csrf:${rawToken}`);
+  // cookie 滑动续期统一在 onSend 落 Set-Cookie：handler 阶段只标记，登出等显式 clearCookie 优先
+  // （先清标记再清 cookie），续期值不超过剩余绝对寿命，绝不无限续期。
+  app.addHook("onSend", async (request, reply) => {
+    const renewal = request.adminCookieRenewal;
+    if (!renewal) return;
+    reply.setCookie("junde_admin_session", renewal.value, { httpOnly: true, sameSite: "strict", secure: config.NODE_ENV === "production", path: "/api", maxAge: renewal.maxAge });
+  });
   const unavailable = async () => { throw businessError("AUTH_NOT_CONFIGURED", "认证服务暂未配置", 503, { retryable: true }); };
   const transaction = async (work) => {
     const client = await pool.connect();
@@ -40,11 +58,10 @@ export function registerAuthRoutes(app, { pool, config, passwordService, provide
   };
   const createSession = async (client, user, kind, role = null) => {
     const rawToken = opaqueToken();
-    const csrfToken = kind === "admin" ? opaqueToken() : null;
-    const idleMinutes = kind === "admin" ? 30 : 12 * 60;
-    const absoluteMinutes = kind === "admin" ? 12 * 60 : 30 * 24 * 60;
+    const durations = durationsFor(kind);
+    const csrfToken = kind === "admin" ? csrfTokenFor(rawToken) : null;
     await client.query(`INSERT INTO auth_sessions (id, user_id, token_hmac, kind, session_version, csrf_secret_hash, idle_expires_at, absolute_expires_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, [uuidv7(), user.id, tokenHash(rawToken), kind, user.session_version, csrfToken ? tokenHash(csrfToken) : null, addMinutes(idleMinutes), addMinutes(absoluteMinutes)]);
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, [uuidv7(), user.id, tokenHash(rawToken), kind, user.session_version, csrfToken ? tokenHash(csrfToken) : null, addMinutes(durations.idleMinutes), addMinutes(durations.absoluteMinutes)]);
     return { rawToken, csrfToken, session: { user: await publicUser(client, user, role), ...(["inspector", "application_status"].includes(kind) ? { accessToken: rawToken } : {}), ...(kind === "admin" ? { csrfToken } : {}) } };
   };
   const requireConfigured = (handler) => configured ? handler : unavailable;
@@ -174,7 +191,11 @@ export function registerAuthRoutes(app, { pool, config, passwordService, provide
       }
       return created;
     });
-    if (admin) reply.setCookie("junde_admin_session", session.rawToken, { httpOnly: true, sameSite: "strict", secure: config.NODE_ENV === "production", path: "/api", maxAge: 30 * 60 });
+    if (admin) {
+      // 登录 cookie 的 maxAge 与闲置窗口一致（此时距绝对上限必然更远）：之后由 onSend 在每个
+      // 有效请求上续写，活跃管理员不再被固定 30 分钟的 cookie 逼下线。
+      reply.setCookie("junde_admin_session", session.rawToken, { httpOnly: true, sameSite: "strict", secure: config.NODE_ENV === "production", path: "/api", maxAge: durationsFor("admin").idleMinutes * 60 });
+    }
     return session.session;
   });
   app.post("/api/auth/login", login(false));
@@ -190,18 +211,29 @@ export function registerAuthRoutes(app, { pool, config, passwordService, provide
       WHERE s.token_hmac = $1 AND s.revoked_at IS NULL AND s.idle_expires_at > now() AND s.absolute_expires_at > now()`, [tokenHash(raw)]);
     const session = result.rows[0];
     if (!session || session.session_version !== session.current_session_version) throw businessError("SESSION_EXPIRED", "登录已失效，请重新登录", 401);
-    // 滑动续期：每次有效请求刷新闲置窗口（admin 30 分钟，探店员 12 小时），
-    // 持续操作不掉线；absolute_expires_at 仍为绝对上限兜底。
-    const idleMinutes = session.kind === "admin" ? 30 : 12 * 60;
-    await pool.query("UPDATE auth_sessions SET idle_expires_at = now() + make_interval(mins => $2), last_seen_at = now() WHERE id = $1", [session.id, idleMinutes]);
+    // 滑动续期：每次有效请求刷新闲置窗口（admin 120 分钟，探店员 12 小时），
+    // 持续操作不掉线；absolute_expires_at 仍为绝对上限兜底——idle 一律被 absolute 收口
+    //（满足 idle <= absolute 表约束），绝不因续期越过绝对上限。
+    const durations = durationsFor(session.kind);
+    await pool.query("UPDATE auth_sessions SET idle_expires_at = least(now() + make_interval(mins => $2), absolute_expires_at), last_seen_at = now() WHERE id = $1", [session.id, durations.idleMinutes]);
+    session.rawTokenUsed = raw;
+    // admin cookie 会话标记浏览器 cookie 续期：maxAge 取「闲置窗口」与「距绝对上限剩余秒数」
+    // 的较小值——cookie 跟随会话活性滚动，但绝不越过绝对上限变相永续。探员 bearer 会话不涉及。
+    if (!bearer && session.kind === "admin") {
+      const remainingSeconds = Math.floor((new Date(session.absolute_expires_at).getTime() - Date.now()) / 1000);
+      const maxAge = Math.min(durations.idleMinutes * 60, remainingSeconds);
+      if (maxAge > 0) request.adminCookieRenewal = { value: cookie, maxAge };
+    }
     return session;
   };
   app.get("/api/me", requireConfigured(async (request) => {
     const session = await sessionFor(request);
     const roleResult = session.kind === "admin" ? await pool.query(`SELECT r.code FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = $1 AND ur.revoked_at IS NULL ORDER BY r.code LIMIT 1`, [session.user_id]) : { rows: [] };
     const role = roleResult.rows[0]?.code;
-    const csrfToken = session.kind === "admin" ? opaqueToken() : null;
-    if (csrfToken) await pool.query("UPDATE auth_sessions SET csrf_secret_hash = $2,last_seen_at = now() WHERE id = $1", [session.id, tokenHash(csrfToken)]);
+    // CSRF 令牌按会话稳定派生（不再每次 /api/me 轮换）：多标签页共享同一令牌互不失效。
+    // 旧版本会话的摘要还是轮换残留，这里一次性迁移为派生令牌的摘要，让存量会话也无缝续用。
+    const csrfToken = session.kind === "admin" && session.rawTokenUsed ? csrfTokenFor(session.rawTokenUsed) : null;
+    if (csrfToken && session.csrf_secret_hash !== tokenHash(csrfToken)) await pool.query("UPDATE auth_sessions SET csrf_secret_hash = $2 WHERE id = $1", [session.id, tokenHash(csrfToken)]);
     // 权限集合（用户全部角色的权限并集）：前端菜单按权限显隐（如 audit:read 控制操作审计入口）
     const permissions = session.kind === "admin"
       ? (await pool.query(`SELECT DISTINCT p.code FROM user_roles ur JOIN role_permissions rp ON rp.role_id = ur.role_id JOIN permissions p ON p.id = rp.permission_id
@@ -216,6 +248,8 @@ export function registerAuthRoutes(app, { pool, config, passwordService, provide
     try {
       await writeAudit(pool, session, session.kind === "admin" ? "admin_logout" : "inspector_logout", "user", session.user_id);
     } catch { /* 审计写入失败不影响登出 */ }
+    // 显式登出必须撤销 onSend 的 cookie 续期标记，再清 cookie：绝不让续期把已登出的 cookie 写回浏览器。
+    delete request.adminCookieRenewal;
     reply.clearCookie("junde_admin_session", { path: "/api" });
     return reply.code(204).send();
   });

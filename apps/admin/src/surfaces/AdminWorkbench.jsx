@@ -8,7 +8,7 @@ import {
 import {
   ADMIN_LIST_SCHEMAS, API, AdminQuestionListSchema, AdminQuestionRowSchema, AdminUserOptionSchema, ArchiveRestoreStatusSchema, BrandRowSchema, CampaignDetailSchema,
   CampaignRowSchema, ExportRowSchema, QuestionnaireVersionCreateSchema, QuestionnaireVersionRowSchema, RegionRowSchema, RegistrationRowSchema,
-  StoreRowSchema, SubmissionDetailSchema, SubmissionRowSchema, UserCreateSchema, UserRowSchema, UserUpdateSchema, listSchema, toStatusLabel,
+  StoreRowSchema, StoreWriteSchema, SubmissionDetailSchema, SubmissionRowSchema, UserCreateSchema, UserRowSchema, UserUpdateSchema, listSchema, toStatusLabel,
 } from "../../../../packages/contracts/index.js";
 import { request } from "../api/client.js";
 import { useAdminAuth } from "../auth/AdminAuth.jsx";
@@ -18,6 +18,7 @@ import { Modal, FormDialog, StatusBadge, Toast, PageHeader } from "../components
 import { AssignmentEditor } from "../components/AssignmentEditor.jsx";
 import { ReceiptComparison } from "../components/ReceiptComparison.jsx";
 import { CampaignWizard } from "../components/CampaignWizard.jsx";
+import { CampaignCleanupDialog } from "../components/CampaignCleanupDialog.jsx";
 import { TencentStoreMap } from "../components/TencentStoreMap.jsx";
 import { Dashboard } from "./Dashboard.jsx";
 
@@ -64,6 +65,11 @@ const PAGED_LIST_SCHEMAS = {
   inspectorOptions: listSchema(AdminUserOptionSchema, NEXT_CURSOR_FIELD),
 };
 
+// 确认弹窗错误态允许原位「重试」的稳定业务码：这些失败要么发生在任何业务写入之前
+// （限流/认证未配置/CSRF），要么事务已整体回滚（数据库繁忙/序列化冲突），重试不会造成重复写入。
+// 其余失败（含网络超时后的未知结果）只提供「返回修改」，不盲目重放 POST。
+const SAFE_RETRY_CODES = new Set(["CSRF_INVALID", "RATE_LIMITED", "AUTH_BUSY", "AUTH_NOT_CONFIGURED", "DATABASE_BUSY"]);
+
 export function AdminWorkbench() {
   const { session, logout, expire } = useAdminAuth();
   const role = session.user.role;
@@ -96,10 +102,18 @@ export function AdminWorkbench() {
   const needsList = route?.screen === "list";
   const listPage = usePagedRemote({ path: needsList && listAllowed ? ENDPOINTS[page] : null, schema: PAGED_LIST_SCHEMAS[page], refreshKey, expire });
 
-  const refresh = () => setRefreshKey((value) => value + 1);
-  const run = useCallback(async ({ title, description, danger = false, path, method = "POST", body, execute, success, onSuccess }) => {
-    setConfirm({ title, description, danger, pending: false, action: async () => {
-      setConfirm((current) => ({ ...current, pending: true }));
+  const refresh = useCallback(() => setRefreshKey((value) => value + 1), []);
+  // 确认弹窗统一动作执行：失败不再「一错就关」——
+  //   会话过期：弹窗保持打开（含上下文），切换到登录遮罩，重登后可原位重试；
+  //   明确安全的失败（限流/库繁忙/CSRF 刷新等，均发生在业务写入前或已回滚）：就地提供「重试」；
+  //   其余错误：弹窗展示服务端原因，「返回修改」回到可编辑表单，输入一律不丢。
+  // 重试安全性：仅对「单请求动作」（path/method 形态，401/安全码均发生在写入前）或显式声明
+  // 检查点安全（retryableExecute，execute 内部只续跑未完成步骤）的复合动作提供原位重试；
+  // 任意复合 execute 盲目重跑可能带旧 revision 重放已完成的第一段写入，一律只给「返回修改」。
+  const run = useCallback(({ title, description, danger = false, path, method = "POST", body, execute, success, onSuccess, retryableExecute = false }) => {
+    const canRetry = Boolean(path) || Boolean(retryableExecute);
+    const action = async () => {
+      setConfirm((current) => (current ? { ...current, pending: true, error: "", retryable: false } : current));
       try {
         if (execute) await execute();
         else await request(path, { method, body });
@@ -108,12 +122,17 @@ export function AdminWorkbench() {
         refresh();
         onSuccess?.();
       } catch (actionError) {
-        setConfirm(null);
-        if (actionError.kind === "session") expire();
-        else notify(actionError.message, "error");
+        if (actionError.kind === "session") {
+          setConfirm((current) => (current ? { ...current, pending: false, error: "登录已过期，请重新登录后再试", retryable: canRetry } : null));
+          expire();
+          return;
+        }
+        const retryable = canRetry && SAFE_RETRY_CODES.has(actionError.code);
+        setConfirm((current) => (current ? { ...current, pending: false, error: actionError.message, retryable } : null));
       }
-    } });
-  }, [expire]);
+    };
+    setConfirm({ title, description, danger, pending: false, error: "", retryable: false, action });
+  }, [expire, notify, refresh]);
 
   const ask = useCallback((config) => setFormDialog({ ...config, pending: false, error: "" }), []);
   const submitFormDialog = async (values) => {
@@ -130,7 +149,8 @@ export function AdminWorkbench() {
       if (!config.skipRefresh) refresh();
       config.onSuccess?.();
     } catch (actionError) {
-      if (actionError.kind === "session") { setFormDialog(null); expire(); }
+      // 会话过期弹窗保持打开：切到登录遮罩，重登（同账号）后已填内容仍在，可直接重试。
+      if (actionError.kind === "session") { setFormDialog({ ...config, pending: false, error: "登录已过期，请重新登录后再试" }); expire(); }
       // 失败：弹窗保持，已填内容与保护不丢，后端错误就地展示（FormDialog 的 error 槽）。
       else setFormDialog({ ...config, pending: false, error: actionError.message });
     }
@@ -166,7 +186,7 @@ export function AdminWorkbench() {
       if (listPage.error) return <StatePanel title={listPage.error} action={<button className="admin-primary" onClick={refresh}>重新加载</button>} />;
       if (pageId === "users") return <UsersPage tab={query.get("tab")} onTab={(tab) => navigate(adminPaths.users(tab))} onNew={(kind) => navigate(adminPaths.userNew(kind))} onEdit={(row) => navigate(adminPaths.userEdit(row.id))} run={run} ask={ask} setToast={notify} />;
       if (pageId === "stores") return <Stores query={query} onFiltersChange={(next) => navigate(adminPaths.stores(next))} onNew={() => navigate(adminPaths.storeNew(query.toString()))} onEdit={(storeId) => navigate(adminPaths.storeEdit(storeId, query.toString()))} run={run} ask={ask} />;
-      if (pageId === "campaigns") return <Campaigns data={listPage.data} onOpen={(row) => navigate(adminPaths.campaignDetail(row.id))} onEdit={(row) => navigate(adminPaths.campaignEdit(row.id, undefined, "list"))} onNew={() => navigate(adminPaths.campaignNew())} run={run} ask={ask} pager={listPage} />;
+      if (pageId === "campaigns") return <Campaigns data={listPage.data} onOpen={(row) => navigate(adminPaths.campaignDetail(row.id))} onEdit={(row) => navigate(adminPaths.campaignEdit(row.id, undefined, "list"))} onNew={() => navigate(adminPaths.campaignNew())} run={run} ask={ask} pager={listPage} canCleanup={role === "super_admin"} refresh={refresh} setToast={notify} />;
       if (pageId === "questionnaires") return <Questionnaires data={listPage.data} onOpen={(row) => navigate(adminPaths.questionnaireDetail(row.id))} onNew={() => navigate(adminPaths.questionnaireNew())} run={run} ask={ask} refresh={refresh} setToast={notify} pager={listPage} />;
       if (pageId === "submissions") return <Submissions appliedQuery={query} onApply={(next) => navigate(adminPaths.submissions(next))} onOpen={(row) => navigate(adminPaths.submissionDetail(row.id, query.toString()))} run={run} setToast={notify} />;
       if (pageId === "exports") return <Exports data={listPage.data} run={run} pager={listPage} />;
@@ -180,7 +200,7 @@ export function AdminWorkbench() {
       }
       return <UserEditorRoute userId={params.id} onBackForKind={(kind) => navigate(adminPaths.users(kind))} run={run} reload={refresh} setToast={notify} />;
     }
-    if (pageId === "stores") return <StoreEditorRoute storeId={screen === "store-new" ? null : params.id} onBack={() => navigate(`/admin/stores${listSearchOf("stores", query.get("list"))}`)} run={run} ask={ask} />;
+    if (pageId === "stores") return <StoreEditorRoute storeId={screen === "store-new" ? null : params.id} onBack={() => navigate(`/admin/stores${listSearchOf("stores", query.get("list"))}`)} onCreated={(createdId) => forceNavigate(adminPaths.storeEdit(createdId, query.toString()), { replace: true })} ask={ask} notify={notify} />;
     if (pageId === "campaigns") {
       // closeWizard：from=list（列表进入/新建）关闭回列表并刷新；from=detail（详情进入）回任务详情（详情路由重查）。
       const closeWizard = (wizardId, from) => {
@@ -200,7 +220,7 @@ export function AdminWorkbench() {
     return <NoPermission />;
   };
 
-  return <div className="admin-shell"><aside className="admin-sidebar"><div className="admin-logo"><span>汇</span><div><strong>汇盈探店</strong><small>运营管理中心</small></div></div><nav>{allowedNav.map(({ id, label, icon: Icon }) => <button key={id} className={page === id ? "is-active" : ""} onClick={() => navigate(adminPaths.page(id))}><Icon size={19} weight={page === id ? "fill" : "regular"} /><span>{label}</span></button>)}</nav><div className="admin-user"><div>{session.user.displayName.slice(0, 1)}</div><span><strong>{session.user.displayName}</strong><small>{roleLabel(role)}</small>{session.user.scopeLabel ? <small className="user-scope">{session.user.scopeLabel}</small> : null}</span><button aria-label="退出登录" onClick={() => guardedAction(logout)}><SignOut size={18} /></button></div></aside><section className="admin-main"><main className="admin-content">{renderScreen()}</main></section><Toast toast={toast} onClose={() => setToastState(null)} /><Modal open={Boolean(confirm)} title={confirm?.title} description={confirm?.description} danger={confirm?.danger} confirmLabel={confirm?.pending ? "处理中…" : "确认"} onCancel={() => !confirm?.pending && setConfirm(null)} onConfirm={confirm?.pending ? undefined : confirm?.action} /><FormDialog open={Boolean(formDialog)} title={formDialog?.title} description={formDialog?.description} danger={formDialog?.danger} fields={formDialog?.fields} initialValues={formDialog?.initialValues} pending={formDialog?.pending} error={formDialog?.error} confirmLabel={formDialog?.confirmLabel} onConfirm={submitFormDialog} onCancel={() => !formDialog?.pending && setFormDialog(null)} />{/* 离开确认始终最上层：脏态弹窗/编辑器之上仍可点按 */}<Modal open={Boolean(leaveConfirm)} title="有未保存的修改" description="离开当前页面将丢失未保存的内容。" danger confirmLabel="放弃并离开" cancelLabel="留在本页" onCancel={() => resolveLeave(false)} onConfirm={() => resolveLeave(true)} /></div>;
+  return <div className="admin-shell"><aside className="admin-sidebar"><div className="admin-logo"><span>汇</span><div><strong>汇盈探店</strong><small>运营管理中心</small></div></div><nav>{allowedNav.map(({ id, label, icon: Icon }) => <button key={id} className={page === id ? "is-active" : ""} onClick={() => navigate(adminPaths.page(id))}><Icon size={19} weight={page === id ? "fill" : "regular"} /><span>{label}</span></button>)}</nav><div className="admin-user"><div>{session.user.displayName.slice(0, 1)}</div><span><strong>{session.user.displayName}</strong><small>{roleLabel(role)}</small>{session.user.scopeLabel ? <small className="user-scope">{session.user.scopeLabel}</small> : null}</span><button aria-label="退出登录" onClick={() => guardedAction(logout)}><SignOut size={18} /></button></div></aside><section className="admin-main"><main className="admin-content">{renderScreen()}</main></section><Toast toast={toast} onClose={() => setToastState(null)} /><Modal open={Boolean(confirm)} title={confirm?.title} description={confirm?.description} danger={confirm?.danger} error={confirm?.error} confirmLabel={confirm?.pending ? "处理中…" : confirm?.error ? (confirm.retryable ? "重试" : "返回修改") : "确认"} cancelLabel={confirm?.error ? "关闭" : "取消"} onCancel={() => !confirm?.pending && setConfirm(null)} onConfirm={confirm?.pending ? undefined : confirm?.error && !confirm.retryable ? () => setConfirm(null) : confirm?.action} /><FormDialog open={Boolean(formDialog)} title={formDialog?.title} description={formDialog?.description} danger={formDialog?.danger} fields={formDialog?.fields} initialValues={formDialog?.initialValues} pending={formDialog?.pending} error={formDialog?.error} confirmLabel={formDialog?.confirmLabel} onConfirm={submitFormDialog} onCancel={() => !formDialog?.pending && setFormDialog(null)} />{/* 离开确认始终最上层：脏态弹窗/编辑器之上仍可点按 */}<Modal open={Boolean(leaveConfirm)} title="有未保存的修改" description="离开当前页面将丢失未保存的内容。" danger confirmLabel="放弃并离开" cancelLabel="留在本页" onCancel={() => resolveLeave(false)} onConfirm={() => resolveLeave(true)} /></div>;
 }
 
 // 任务向导 step 查询串（详情页「添加探店员」直达 ?step=2）；非法值安全回退第 1 步。
@@ -243,11 +263,12 @@ function usePagedRemote({ path, schema, refreshKey = 0, expire }) {
       cursorRef.current = nextRows.length ? nextRows.at(-1).id : null;
       setLoading(false);
     }).catch((loadError) => {
-      if (loadError.kind === "session") { expire(); return; }
       if (controller.signal.aborted || (loadError.kind === "timeout" && controller.signal.aborted)) return;
-      setRows([]); setNextCursor(null); setTotal(null); cursorRef.current = null;
+      // 会话过期：列表呈现可重试的错误态（登录遮罩之上重登后点「重新加载」即可恢复），不留死 loading
       setError(loadError.message);
+      setRows([]); setNextCursor(null); setTotal(null); cursorRef.current = null;
       setLoading(false);
+      if (loadError.kind === "session") expire();
     });
     return () => controller.abort();
   }, [path, schema, refreshKey, expire]);
@@ -471,37 +492,117 @@ function Stores({ query, onFiltersChange, onNew, onEdit, run, ask }) {
     <LoadMorePager rows={rows} hasMore={storesPage.hasMore} loadingMore={storesPage.loadingMore} moreError={storesPage.moreError} onLoadMore={storesPage.loadMore} unit="家门店" /></>;
 }
 
-function StoreEditor({ store, onBack, run, ask, brands, onBrandCreated }) {
+// 门店表单校验：本地友好提示先行（对齐 StoreWriteSchema 的业务约束），再用契约 schema 兜底；
+// STORE_FIELD_ORDER 决定「聚焦第一个错误字段」的顺序。
+const STORE_FIELD_ORDER = ["businessNo", "name", "brandId", "regionId", "address", "coordinate", "radiusMeters", "accuracyAllowanceMaxMeters"];
+const storeFieldId = (field) => `store-field-${field}`;
+const hasStoreCoordinate = (form) => form.latitude !== null && form.latitude !== undefined && form.latitude !== "" && form.longitude !== null && form.longitude !== undefined && form.longitude !== "";
+
+function storeBodyOf(form) {
+  return {
+    name: String(form.name || "").trim(),
+    businessNo: String(form.businessNo || "").trim(),
+    brandId: form.brandId || undefined,
+    regionId: form.regionId || undefined,
+    address: String(form.address || "").trim(),
+    latitudeGcj02: hasStoreCoordinate(form) ? Number(form.latitude) : undefined,
+    longitudeGcj02: hasStoreCoordinate(form) ? Number(form.longitude) : undefined,
+    providerPoiId: form.providerPoiId || null,
+    coordinateSource: form.coordinateSource || "manual_adjusted",
+    radiusMeters: Number(form.radiusMeters),
+    accuracyAllowanceMaxMeters: Number(form.accuracyAllowanceMaxMeters),
+    // 坐标只能通过地图选点产生：保存时带有效坐标即视为管理员已完成位置校准。
+    locationVerified: hasStoreCoordinate(form),
+    active: Boolean(form.active),
+  };
+}
+
+function validateStoreForm(form) {
+  const errors = {};
+  const businessNo = String(form.businessNo || "").trim();
+  const name = String(form.name || "").trim();
+  const address = String(form.address || "").trim();
+  if (!businessNo) errors.businessNo = "请填写门店编号";
+  else if (businessNo.length > 64) errors.businessNo = "门店编号最多 64 个字符";
+  if (!name) errors.name = "请填写门店名称";
+  else if (name.length > 200) errors.name = "门店名称最多 200 个字符";
+  if (!form.brandId) errors.brandId = "请选择品牌";
+  if (!form.regionId) errors.regionId = "请选择省市区县";
+  if (!address) errors.address = "请填写详细地址";
+  else if (address.length > 500) errors.address = "地址最多 500 个字符";
+  if (!hasStoreCoordinate(form)) errors.coordinate = "请在地图上搜索并选择门店位置";
+  const radius = Number(form.radiusMeters);
+  if (!Number.isInteger(radius) || radius < 100 || radius > 1000) errors.radiusMeters = "打卡半径须为 100–1000 米之间的整数";
+  const accuracy = Number(form.accuracyAllowanceMaxMeters);
+  if (!Number.isInteger(accuracy) || accuracy < 0 || accuracy > 200) errors.accuracyAllowanceMaxMeters = "允许定位误差须为 0–200 米之间的整数";
+  const parsed = StoreWriteSchema.safeParse(storeBodyOf(form));
+  if (!parsed.success) {
+    for (const issue of parsed.error.issues) {
+      const key = String(issue.path[0] || "");
+      const field = key === "latitudeGcj02" || key === "longitudeGcj02" ? "coordinate" : key;
+      if (STORE_FIELD_ORDER.includes(field) && !errors[field]) errors[field] = issue.message;
+    }
+  }
+  return { errors };
+}
+
+function StoreEditor({ store, onBack, onCreated, ask, notify, brands }) {
+  const { expire } = useAdminAuth();
   const [form, setForm] = useState({ active: true, ...store });
+  // 权威快照：保存成功后推进（id/revision/规范化字段），下一次保存基于新 revision，
+  // 不会 409，也不会因「新建后再次保存」重复创建。
+  const [serverStore, setServerStore] = useState(store);
   // 未保存修改守卫：表单快照比较（输入与地图选点都算编辑；改回原值即不脏；保存成功后基准推进）。
   const formRef = useRef(form);
   formRef.current = form;
   const formBaselineRef = useRef(form);
   useNavigationGuard(useCallback(() => JSON.stringify(formRef.current) !== JSON.stringify(formBaselineRef.current), []));
-  const [regions, setRegions] = useState([]);
-  const [regionsError, setRegionsError] = useState("");
+  const [fieldErrors, setFieldErrors] = useState({});
+  // 保存确认弹窗状态机：pending 提交中；error 非空展示原因（retryable 提供原位重试）；
+  // 会话过期时弹窗保持现场，登录遮罩之上重登后可直接重试。
+  const [saveState, setSaveState] = useState(null);
+  // 乐观锁冲突：保存期间内容被他人更新——展示服务器最新字段供对照，用户选择保留谁的内容。
+  const [conflict, setConflict] = useState(null);
+  // 新建时的真实编号撞车：服务器上同编号是内容不同的他人门店——保留全部输入，绝不采纳/改写。
+  const [duplicateStore, setDuplicateStore] = useState(null);
+  // 区域列表：加载/失败/空态严格区分；失败给可重试错误态（含会话过期），重试不影响任何已填内容，
+  // 省市联动的已选值在重试成功后按已保存的 regionId 恢复。
+  const [regionsState, setRegionsState] = useState({ status: "loading", regions: [], error: "" });
+  const [regionAttempt, setRegionAttempt] = useState(0);
   const [provinceId, setProvinceId] = useState("");
   const [cityId, setCityId] = useState("");
   useEffect(() => {
     let active = true;
-    request(API.admin.regions, { schema: listSchema(RegionRowSchema) }).then((result) => {
+    const controller = new AbortController();
+    setRegionsState((current) => ({ ...current, status: "loading", error: "" }));
+    request(API.admin.regions, { schema: listSchema(RegionRowSchema), signal: controller.signal }).then((result) => {
       if (!active) return;
-      setRegions(result.items);
+      setRegionsState({ status: "ready", regions: result.items, error: "" });
       const selected = result.items.find((region) => region.id === form.regionId);
       if (selected?.parentId) {
         const city = result.items.find((region) => region.id === selected.parentId);
         setCityId(city?.id || "");
         setProvinceId(city?.parentId || "");
       }
-    }).catch((error) => { if (active) setRegionsError(error.message); });
-    return () => { active = false; };
+    }).catch((loadError) => {
+      if (!active || controller.signal.aborted) return;
+      setRegionsState({ status: "error", regions: [], error: loadError.kind === "session" ? "登录已失效，请重新登录后再试" : loadError.message });
+      if (loadError.kind === "session") expire();
+    });
+    return () => { active = false; controller.abort(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.id]);
-  const patch = (field, value) => setForm((current) => ({ ...current, [field]: value }));
+  }, [regionAttempt, expire]);
+  const regions = regionsState.regions;
+  const patch = (field, value) => {
+    setForm((current) => ({ ...current, [field]: value }));
+    const related = field === "latitude" || field === "longitude" ? "coordinate" : field;
+    setFieldErrors((current) => (current[related] ? Object.fromEntries(Object.entries(current).filter(([key]) => key !== related)) : current));
+  };
   // 地图选点回调：合并坐标/地址，并按 POI 区县名称自动匹配三级联动；
   // 匹配不到（如区县不在库）时只填地址，区域留给用户手动选。
   const applyPoi = (location) => {
     setForm((current) => ({ ...current, ...location }));
+    setFieldErrors((current) => Object.fromEntries(Object.entries(current).filter(([key]) => key !== "coordinate")));
     if (location.district) {
       const district = regions.find((region) => region.level === 3 && region.name === location.district);
       if (district) {
@@ -509,13 +610,24 @@ function StoreEditor({ store, onBack, run, ask, brands, onBrandCreated }) {
         setCityId(city?.id || "");
         setProvinceId(city?.parentId || "");
         setForm((current) => ({ ...current, regionId: district.id }));
+        setFieldErrors((current) => Object.fromEntries(Object.entries(current).filter(([key]) => key !== "regionId")));
       }
     }
   };
   const provinces = regions.filter((region) => region.level === 1);
   const cities = regions.filter((region) => region.level === 2 && region.parentId === provinceId);
   const districts = regions.filter((region) => region.level === 3 && region.parentId === cityId);
-  // 表单内快捷新建品牌：创建成功后自动选为当前门店的品牌，无需退回列表页。
+  // 品牌选项：启用中的品牌 + 当前已选品牌（停用也保留显示并标注，后端保存时要求启用中的品牌）。
+  const brandList = brands.brands || [];
+  const selectedBrand = brandList.find((brand) => brand.id === form.brandId) || null;
+  const brandOptions = form.brandId
+    ? [selectedBrand
+        ? { ...selectedBrand, inactive: !selectedBrand.active }
+        : { id: form.brandId, name: `${serverStore.brandName || "所选品牌"}（未出现在品牌列表，请重试加载）`, inactive: true },
+      ...brandList.filter((brand) => brand.active && brand.id !== form.brandId)]
+    : brandList.filter((brand) => brand.active);
+  const selectedInactive = Boolean(selectedBrand && !selectedBrand.active);
+  // 表单内快捷新建品牌：创建成功后自动选为当前门店的品牌，并重载权威品牌列表，无需退回列表页。
   const askInlineBrand = () => ask({
     title: "新建品牌", description: "创建成功后将自动选为当前门店的品牌。",
     fields: [{ name: "name", label: "品牌名称", required: true, placeholder: "例如：肯德基" }],
@@ -523,24 +635,135 @@ function StoreEditor({ store, onBack, run, ask, brands, onBrandCreated }) {
       const result = await request(API.admin.createBrand, { method: "POST", body: { name: values.name.trim(), active: true } });
       patch("brandId", result.brand.id);
     },
-    success: "品牌已创建", skipRefresh: true, onSuccess: onBrandCreated,
+    success: "品牌已创建", skipRefresh: true, onSuccess: () => brands.reload(),
   });
-  const save = () => {
-    if (!form.name?.trim() || !form.businessNo?.trim() || !form.regionId || !form.address?.trim()) return;
-    if (!form.latitude || !form.longitude) return;
-    run({ title: "保存门店和打卡范围？", description: "系统将检查门店坐标、100–1000 米打卡半径和允许定位误差。", execute: async () => {
-      await request(store.id ? API.admin.store(store.id) : API.admin.stores, { method: store.id ? "PATCH" : "POST", body: { name: form.name.trim(), businessNo: form.businessNo.trim(), brandId: form.brandId, regionId: form.regionId, address: form.address.trim(), active: form.active, latitudeGcj02: form.latitude, longitudeGcj02: form.longitude, providerPoiId: form.providerPoiId || null, coordinateSource: form.coordinateSource, radiusMeters: Number(form.radiusMeters), accuracyAllowanceMaxMeters: Number(form.accuracyAllowanceMaxMeters), // 坐标只能通过地图选点产生：保存时带有效坐标即视为管理员已完成位置校准。
-        locationVerified: Boolean(form.latitude && form.longitude), revision: store.revision } });
-      formBaselineRef.current = { ...formRef.current };
-    }, success: store.id ? "门店范围已保存" : "门店已创建" });
+  const adoptAuthoritative = (row) => {
+    const authoritative = mapStoreRow(row);
+    setServerStore(authoritative);
+    setForm(authoritative);
+    formBaselineRef.current = authoritative;
+    setFieldErrors({});
+    return authoritative;
   };
-  return <><button className="back-link" onClick={onBack}><CaretRight size={15} /> 返回门店列表</button><PageHeader eyebrow="门店管理" title={store.id ? "编辑门店和范围" : "新建门店"} description="搜索地点后拖动地图微调，以地图中心作为门店坐标。" /><section className="panel"><div className="field-grid"><label className="admin-field"><span>门店编号</span><input value={form.businessNo} onChange={(event) => patch("businessNo", event.target.value)} /></label><label className="admin-field"><span>门店名称</span><input value={form.name} onChange={(event) => patch("name", event.target.value)} /></label><label className="admin-field"><span>品牌</span><div className="field-with-action"><select value={form.brandId || ""} onChange={(event) => patch("brandId", event.target.value)}><option value="" disabled>请选择品牌</option>{(brands || []).map((brand) => <option key={brand.id} value={brand.id}>{brand.name}</option>)}</select><button type="button" className="admin-secondary" onClick={askInlineBrand}><Plus size={14} /> 新建品牌</button></div></label>{regionsError ? <label className="admin-field"><span>区域</span><span className="form-message">{regionsError}；请先创建区域</span></label> : <><label className="admin-field"><span>省份</span><select value={provinceId} onChange={(event) => { setProvinceId(event.target.value); setCityId(""); patch("regionId", ""); }}><option value="" disabled>请选择省份</option>{provinces.map((region) => <option key={region.id} value={region.id}>{region.name}</option>)}</select></label><label className="admin-field"><span>城市</span><select value={cityId} disabled={!provinceId} onChange={(event) => { setCityId(event.target.value); patch("regionId", ""); }}><option value="" disabled>请选择城市</option>{cities.map((region) => <option key={region.id} value={region.id}>{region.name}</option>)}</select></label><label className="admin-field"><span>区县</span><select value={form.regionId || ""} disabled={!cityId} onChange={(event) => patch("regionId", event.target.value)}><option value="" disabled>请选择区县</option>{districts.map((region) => <option key={region.id} value={region.id}>{region.name}</option>)}</select></label></>}<label className="admin-field"><span>地址</span><input value={form.address || ""} onChange={(event) => patch("address", event.target.value)} /></label><label className="admin-field"><span>打卡半径（米）</span><input type="number" min="100" max="1000" value={form.radiusMeters} onChange={(event) => patch("radiusMeters", event.target.value)} /></label><label className="admin-field"><span>允许定位误差（米）</span><input type="number" min="0" max="200" value={form.accuracyAllowanceMaxMeters} onChange={(event) => patch("accuracyAllowanceMaxMeters", event.target.value)} /></label><label className="check-field store-active-field"><input type="checkbox" checked={form.active} onChange={(event) => patch("active", event.target.checked)} /><span>门店启用，可创建新任务</span></label></div><TencentStoreMap value={form} radiusMeters={Number(form.radiusMeters)} onChange={applyPoi} /><div className="editor-footer"><button className="admin-primary" onClick={save} disabled={!form.name?.trim() || !form.businessNo?.trim() || !form.brandId || !form.regionId || !form.address?.trim() || !form.latitude || !form.longitude}>保存门店</button></div></section></>;
+  const focusField = (field) => {
+    const host = document.getElementById(storeFieldId(field));
+    if (!host) return;
+    host.scrollIntoView({ behavior: "smooth", block: "center" });
+    host.querySelector("input, select, textarea, button")?.focus({ preventScroll: true });
+  };
+  // 新建保存结果的对账：以「发起请求那一刻的请求体快照」为准，而不是等待期间可能被继续编辑的表单。
+  // 仅当服务器上同编号记录与本次提交的全部可编辑字段一致（数值按数字比较）时，才认定「上次保存
+  // 已成功（响应丢失/不可用）」并自动切换为编辑该记录；编号相同但内容不同的门店是他人的记录，
+  // 绝不自动采纳或改写——保留全部输入，弹窗说明并给出「修改编号 / 核对现有门店」的明确出路。
+  const storeSnapshotsMatch = (row, attempted) => (
+    row.businessNo === attempted.businessNo
+    && row.name === attempted.name
+    && (row.brandId || null) === (attempted.brandId || null)
+    && (row.regionId || null) === (attempted.regionId || null)
+    && row.address === attempted.address
+    && Number(row.latitudeGcj02) === Number(attempted.latitudeGcj02)
+    && Number(row.longitudeGcj02) === Number(attempted.longitudeGcj02)
+    && Number(row.radiusMeters) === Number(attempted.radiusMeters)
+    && Number(row.accuracyAllowanceMaxMeters ?? 200) === Number(attempted.accuracyAllowanceMaxMeters)
+    && Boolean(row.active) === Boolean(attempted.active)
+  );
+  const reconcileExistingStore = async (attempted) => {
+    const businessNo = attempted.businessNo;
+    if (!businessNo) return false;
+    let row = null;
+    try {
+      const result = await request(`${API.admin.stores}?limit=10&businessNo=${encodeURIComponent(businessNo)}`, { schema: PAGED_LIST_SCHEMAS.stores });
+      row = result.items.find((item) => item.businessNo === businessNo) || null;
+    } catch { return false; } // 对账查询失败：按原始保存错误处理
+    if (!row) return false;
+    if (storeSnapshotsMatch(row, attempted)) {
+      // 等待对账期间表单又有新的本地修改：绝不静默覆盖，转为可读的不确定态交由用户处理。
+      if (JSON.stringify(storeBodyOf(formRef.current)) !== JSON.stringify(attempted)) {
+        setSaveState({ pending: false, error: "上一次保存可能已成功（服务器上已存在编号与内容一致的门店），但表单在此之后又有新的修改。请返回核对后再保存。", retryable: false });
+        return true;
+      }
+      const authoritative = adoptAuthoritative(row);
+      setSaveState(null);
+      notify("该门店编号已存在且内容一致：上一次保存已成功，已切换为编辑现有门店");
+      onCreated?.(authoritative.id);
+      return true;
+    }
+    setDuplicateStore({ row });
+    setSaveState(null);
+    return true;
+  };
+  const openConflict = async (base) => {
+    try {
+      const result = await request(API.admin.storeDetail(base.id), { schema: z.object({ store: StoreRowSchema }) });
+      setSaveState(null);
+      setConflict(result.store);
+    } catch (fetchError) {
+      if (fetchError.kind === "session") {
+        setSaveState({ pending: false, error: "登录已过期，请重新登录后再试", retryable: true });
+        expire();
+        return;
+      }
+      setSaveState({ pending: false, error: `无法获取服务器最新内容：${fetchError.message}`, retryable: false });
+    }
+  };
+  const performSave = async (base = serverStore) => {
+    setSaveState((current) => (current ? { ...current, pending: true, error: "", retryable: false } : { pending: true, error: "", retryable: false }));
+    const editing = Boolean(base.id);
+    const body = { ...storeBodyOf(formRef.current), ...(editing ? { revision: Number(base.revision) } : {}) };
+    const attempted = { ...body }; // 发起请求时的快照：后续对账/采纳只看它，不受等待期间表单继续编辑的影响
+    try {
+      const result = await request(editing ? API.admin.store(base.id) : API.admin.stores, { method: editing ? "PATCH" : "POST", schema: z.object({ store: StoreRowSchema }), body });
+      adoptAuthoritative(result.store);
+      setSaveState(null);
+      notify(editing ? "门店范围已保存" : "门店已创建");
+      if (!editing) onCreated?.(result.store.id);
+    } catch (saveError) {
+      // 旧身份的迟到响应（认证代际已切换）：只就地展示，不触发过期遮罩、不进入任何恢复流。
+      if (saveError.stale) { setSaveState({ pending: false, error: saveError.message, retryable: false }); return; }
+      if (saveError.kind === "session") {
+        // 弹窗保持现场：登录遮罩之上重登（同账号）后可直接重试，输入不丢。
+        setSaveState({ pending: false, error: "登录已过期，请重新登录后再试", retryable: true });
+        expire();
+        return;
+      }
+      if (editing && saveError.code === "REVISION_CONFLICT") { await openConflict(base); return; }
+      // 新建结果不确定（编号冲突/超时/网络中断/响应不可用）：先按唯一编号对账。
+      if (!editing && (saveError.code === "STORE_CONFLICT" || ["timeout", "network", "contract"].includes(saveError.kind))) {
+        if (await reconcileExistingStore(attempted)) return;
+      }
+      setSaveState({ pending: false, error: saveError.message, retryable: SAFE_RETRY_CODES.has(saveError.code) });
+    }
+  };
+  const beginSave = () => {
+    const { errors } = validateStoreForm(formRef.current);
+    setFieldErrors(errors);
+    const firstInvalid = STORE_FIELD_ORDER.find((field) => errors[field]);
+    if (firstInvalid) { focusField(firstInvalid); return; }
+    setSaveState({ pending: false, error: "", retryable: false });
+  };
+  const saveWithServerRevision = () => {
+    if (!conflict) return;
+    const base = conflict;
+    setServerStore(mapStoreRow(base));
+    setConflict(null);
+    setSaveState({ pending: false, error: "", retryable: false });
+    performSave(base);
+  };
+  const adoptServerVersion = () => {
+    if (!conflict) return;
+    adoptAuthoritative(conflict);
+    setConflict(null);
+    notify("已采用服务器上的最新内容");
+  };
+  return <><button className="back-link" onClick={onBack}><CaretRight size={15} /> 返回门店列表</button><PageHeader eyebrow="门店管理" title={store.id ? "编辑门店和范围" : "新建门店"} description="搜索地点后拖动地图微调，以地图中心作为门店坐标。" /><section className="panel"><div className="field-grid"><label className="admin-field" id={storeFieldId("businessNo")}><span>门店编号</span><input value={form.businessNo} onChange={(event) => patch("businessNo", event.target.value)} />{fieldErrors.businessNo && <p className="form-message" role="alert">{fieldErrors.businessNo}</p>}</label><label className="admin-field" id={storeFieldId("name")}><span>门店名称</span><input value={form.name} onChange={(event) => patch("name", event.target.value)} />{fieldErrors.name && <p className="form-message" role="alert">{fieldErrors.name}</p>}</label><label className="admin-field" id={storeFieldId("brandId")}><span>品牌</span><div className="field-with-action">{brands.error ? <span className="form-message">品牌列表加载失败：{brands.error}</span> : !brands.brands ? <span>正在加载品牌…</span> : <select value={form.brandId || ""} onChange={(event) => patch("brandId", event.target.value)}><option value="" disabled>请选择品牌</option>{brandOptions.map((brand) => <option key={brand.id} value={brand.id}>{brand.name}{brand.inactive ? "（已停用）" : ""}</option>)}</select>}<button type="button" className="admin-secondary" onClick={askInlineBrand}><Plus size={14} /> 新建品牌</button>{brands.error && <button type="button" className="admin-secondary" onClick={brands.reload}>重试</button>}</div>{fieldErrors.brandId ? <p className="form-message" role="alert">{fieldErrors.brandId}</p> : selectedInactive ? <p className="form-message">当前品牌已停用：需先在「门店管理 → 品牌」中启用后才能保存（服务端保存时同样校验）。</p> : null}</label>{regionsState.status !== "ready" ? (regionsState.status === "error" ? <div className="admin-field" id={storeFieldId("regionId")}><span>区域</span><span className="form-message">区域列表加载失败：{regionsState.error}</span><div className="table-actions"><button type="button" className="admin-secondary" onClick={() => setRegionAttempt((value) => value + 1)}>重试</button></div></div> : <label className="admin-field" id={storeFieldId("regionId")}><span>区域</span><span>正在加载区域…</span></label>) : regions.length === 0 ? <label className="admin-field" id={storeFieldId("regionId")}><span>区域</span><span className="form-message">暂无可用区域；请先创建区域</span></label> : <><label className="admin-field"><span>省份</span><select value={provinceId} onChange={(event) => { setProvinceId(event.target.value); setCityId(""); patch("regionId", ""); }}><option value="" disabled>请选择省份</option>{provinces.map((region) => <option key={region.id} value={region.id}>{region.name}</option>)}</select></label><label className="admin-field"><span>城市</span><select value={cityId} disabled={!provinceId} onChange={(event) => { setCityId(event.target.value); patch("regionId", ""); }}><option value="" disabled>请选择城市</option>{cities.map((region) => <option key={region.id} value={region.id}>{region.name}</option>)}</select></label><label className="admin-field" id={storeFieldId("regionId")}><span>区县</span><select value={form.regionId || ""} disabled={!cityId} onChange={(event) => patch("regionId", event.target.value)}><option value="" disabled>请选择区县</option>{districts.map((region) => <option key={region.id} value={region.id}>{region.name}</option>)}</select>{fieldErrors.regionId && <p className="form-message" role="alert">{fieldErrors.regionId}</p>}</label></>}<label className="admin-field" id={storeFieldId("address")}><span>地址</span><input value={form.address || ""} onChange={(event) => patch("address", event.target.value)} />{fieldErrors.address && <p className="form-message" role="alert">{fieldErrors.address}</p>}</label><label className="admin-field" id={storeFieldId("radiusMeters")}><span>打卡半径（米）</span><input type="number" min="100" max="1000" value={form.radiusMeters} onChange={(event) => patch("radiusMeters", event.target.value)} />{fieldErrors.radiusMeters && <p className="form-message" role="alert">{fieldErrors.radiusMeters}</p>}</label><label className="admin-field" id={storeFieldId("accuracyAllowanceMaxMeters")}><span>允许定位误差（米）</span><input type="number" min="0" max="200" value={form.accuracyAllowanceMaxMeters} onChange={(event) => patch("accuracyAllowanceMaxMeters", event.target.value)} />{fieldErrors.accuracyAllowanceMaxMeters && <p className="form-message" role="alert">{fieldErrors.accuracyAllowanceMaxMeters}</p>}</label><label className="check-field store-active-field"><input type="checkbox" checked={form.active} onChange={(event) => patch("active", event.target.checked)} /><span>门店启用，可创建新任务</span></label></div><div id={storeFieldId("coordinate")}><TencentStoreMap value={form} radiusMeters={Number(form.radiusMeters)} onChange={applyPoi} />{fieldErrors.coordinate && <p className="form-message" role="alert">{fieldErrors.coordinate}</p>}</div><div className="editor-footer"><button className="admin-primary" onClick={beginSave} disabled={Boolean(saveState?.pending)}>{saveState?.pending ? "正在保存…" : "保存门店"}</button></div></section><Modal open={Boolean(saveState)} title="保存门店和打卡范围？" description="系统将检查门店坐标、100–1000 米打卡半径和允许定位误差。" danger={Boolean(saveState?.error)} error={saveState?.error} confirmLabel={saveState?.pending ? "保存中…" : saveState?.error ? (saveState.retryable ? "重试" : "返回修改") : "确认保存"} cancelLabel={saveState?.error ? "关闭" : "取消"} onCancel={() => !saveState?.pending && setSaveState(null)} onConfirm={saveState?.pending ? undefined : saveState?.error && !saveState.retryable ? () => setSaveState(null) : () => performSave()} />{duplicateStore && <div className="modal-backdrop" role="presentation" onMouseDown={() => setDuplicateStore(null)}><section className="modal-card modal-card--form" role="dialog" aria-modal="true" aria-labelledby="store-duplicate-title" onMouseDown={(event) => event.stopPropagation()}><h2 id="store-duplicate-title">门店编号已被其他门店使用</h2><p>编号「{duplicateStore.row.businessNo}」已属于现有门店「{duplicateStore.row.name}」（{duplicateStore.row.regionName || "未知区域"} · {duplicateStore.row.address}），内容与你正在新建的门店不同，因此没有自动关联或覆盖。</p><p>你填写的内容全部保留：可修改门店编号后重新保存；也可先核对现有门店再决定（核对会离开本页，未保存内容需确认放弃）。</p><div className="modal-actions"><button className="button button--ghost" onClick={() => setDuplicateStore(null)}>返回修改</button><button className="button button--danger" onClick={() => { const target = duplicateStore.row.id; setDuplicateStore(null); navigate(adminPaths.storeEdit(target)); }}>查看现有门店</button><button className="button button--primary" onClick={() => { setDuplicateStore(null); focusField("businessNo"); }}>修改门店编号</button></div></section></div>}{conflict && <div className="modal-backdrop" role="presentation" onMouseDown={() => setConflict(null)}><section className="modal-card modal-card--form" role="dialog" aria-modal="true" aria-labelledby="store-conflict-title" onMouseDown={(event) => event.stopPropagation()}><h2 id="store-conflict-title">门店已被他人更新</h2><p>保存时内容已被其他人修改。以下是服务器最新内容；你的修改仍保留在表单中，可选择保留谁的内容。</p><div className="conflict-server-fields"><div><span>门店编号</span><strong>{conflict.businessNo}</strong></div><div><span>门店名称</span><strong>{conflict.name}</strong></div><div><span>品牌</span><strong>{conflict.brandName || "—"}</strong></div><div><span>区域</span><strong>{conflict.regionName}</strong></div><div><span>地址</span><strong>{conflict.address}</strong></div><div><span>打卡半径</span><strong>{conflict.radiusMeters} 米</strong></div><div><span>允许定位误差</span><strong>{conflict.accuracyAllowanceMaxMeters ?? 200} 米</strong></div><div><span>启用状态</span><strong>{conflict.active ? "已启用" : "已停用"}</strong></div></div><div className="modal-actions"><button className="button button--ghost" onClick={() => setConflict(null)}>返回修改</button><button className="button button--danger" onClick={adoptServerVersion}>采用服务器内容</button><button className="button button--primary" onClick={saveWithServerRevision}>以我的修改为准保存</button></div></section></div>}</>;
 }
 
-function Campaigns({ data, onOpen, onEdit, onNew, run, ask, refresh, pager }) {
+function Campaigns({ data, onOpen, onEdit, onNew, run, ask, refresh, pager, canCleanup = false, setToast }) {
   const rows = items(data);
+  // 测试任务数据清理（仅 super_admin、仅已整体取消的任务）：先预览计数与阻断原因，再输名称确认。
+  const [cleanupTarget, setCleanupTarget] = useState(null);
   // 详情/向导改由路由承载：列表行点击 → /admin/campaigns/:id；编辑 → /admin/campaigns/:id/edit。
-  return <><PageHeader eyebrow="探店任务" title="探店任务与指派" description="同店多人始终使用相互隔离的独立问卷。点击任务行查看指派明细。" action={<button className="admin-primary" onClick={onNew}><Plus size={17} /> 新建探店任务</button>} /><DataPanel empty="当前没有探店任务"><table className="data-table"><thead><tr><th>任务</th><th>门店</th><th>执行窗口</th><th>指派</th><th>逾期</th><th>状态</th><th>操作</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id} className="row-link" onClick={() => onOpen(row)}><td><strong>{row.name}</strong><small>{row.businessNo}</small></td><td>{row.storeName}</td><td>{formatTime(row.startsAt)} 至 {formatTime(row.dueAt)}</td><td>{row.assignmentCount} 人</td><td>{row.overdueCount || 0}</td><td><StatusBadge>{toStatusLabel(row.status)}</StatusBadge></td><td onClick={(event) => event.stopPropagation()}><div className="table-actions"><button onClick={() => onOpen(row)}>查看指派</button>{row.status === "draft" && <><button onClick={() => onEdit(row)}>编辑</button><button onClick={() => run({ title: "发布这个任务？", description: "系统将检查门店位置、问卷版本、人员状态和所有指派。", path: API.admin.publishCampaign(row.id), body: { revision: row.revision }, success: "任务已发布", onSuccess: refresh })}>发布</button><button className="link-danger" onClick={() => run({ title: "删除这个任务？", description: "仅待发布任务可删除，其下未发布的指派将一并删除；已发布任务请用整体取消。", danger: true, path: API.admin.deleteCampaign(row.id), method: "DELETE", body: { revision: row.revision }, success: "任务已删除", onSuccess: refresh })}>删除</button></>}{!["completed", "cancelled"].includes(row.status) && <button className="link-danger" onClick={() => askReason(ask, { title: "整体取消任务？", description: "该任务下所有未提交的指派都会取消，探店员将在小程序中看到取消原因。", danger: true, reasonLabel: "整体取消原因", confirmLabel: "确认取消任务", path: API.admin.cancelCampaign(row.id), body: { revision: row.revision }, success: "任务已取消", onSuccess: refresh })}>整体取消</button>}</div></td></tr>)}</tbody></table></DataPanel><LoadMorePager rows={rows} hasMore={pager?.hasMore} loadingMore={pager?.loadingMore} moreError={pager?.moreError} onLoadMore={pager?.loadMore} unit="个任务" /></>;
+  return <><PageHeader eyebrow="探店任务" title="探店任务与指派" description="同店多人始终使用相互隔离的独立问卷。点击任务行查看指派明细。" action={<button className="admin-primary" onClick={onNew}><Plus size={17} /> 新建探店任务</button>} /><DataPanel empty="当前没有探店任务"><table className="data-table"><thead><tr><th>任务</th><th>门店</th><th>执行窗口</th><th>指派</th><th>逾期</th><th>状态</th><th>操作</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id} className="row-link" onClick={() => onOpen(row)}><td><strong>{row.name}</strong><small>{row.businessNo}</small></td><td>{row.storeName}</td><td>{formatTime(row.startsAt)} 至 {formatTime(row.dueAt)}</td><td>{row.assignmentCount} 人</td><td>{row.overdueCount || 0}</td><td><StatusBadge>{toStatusLabel(row.status)}</StatusBadge></td><td onClick={(event) => event.stopPropagation()}><div className="table-actions"><button onClick={() => onOpen(row)}>查看指派</button>{row.status === "draft" && <><button onClick={() => onEdit(row)}>编辑</button><button onClick={() => run({ title: "发布这个任务？", description: "系统将检查门店位置、问卷版本、人员状态和所有指派。", path: API.admin.publishCampaign(row.id), body: { revision: row.revision }, success: "任务已发布", onSuccess: refresh })}>发布</button><button className="link-danger" onClick={() => run({ title: "删除这个任务？", description: "仅待发布任务可删除，其下未发布的指派将一并删除；已发布任务请用整体取消。", danger: true, path: API.admin.deleteCampaign(row.id), method: "DELETE", body: { revision: row.revision }, success: "任务已删除", onSuccess: refresh })}>删除</button></>}{!["completed", "cancelled"].includes(row.status) && <button className="link-danger" onClick={() => askReason(ask, { title: "整体取消任务？", description: "该任务下所有未提交的指派都会取消，探店员将在小程序中看到取消原因。", danger: true, reasonLabel: "整体取消原因", confirmLabel: "确认取消任务", path: API.admin.cancelCampaign(row.id), body: { revision: row.revision }, success: "任务已取消", onSuccess: refresh })}>整体取消</button>}{canCleanup && row.status === "cancelled" && <button className="link-danger" onClick={() => setCleanupTarget(row)}>清理测试数据</button>}</div></td></tr>)}</tbody></table></DataPanel><LoadMorePager rows={rows} hasMore={pager?.hasMore} loadingMore={pager?.loadingMore} moreError={pager?.moreError} onLoadMore={pager?.loadMore} unit="个任务" />{cleanupTarget && <CampaignCleanupDialog campaign={cleanupTarget} onClose={() => setCleanupTarget(null)} onDone={() => { setCleanupTarget(null); refresh(); setToast("任务测试数据已清理"); }} setToast={setToast} />}</>;
 }
 
 function CampaignDetail({ campaign, onBack, onEdit, onAddInspector, onEditAssignment, reload, run, ask, setToast }) {
@@ -630,11 +853,11 @@ function QuestionnaireDetailRoute({ versionId, query, run, ask, setToast }) {
       setState({ loading: false, error: "", version: versionResult.version, questionRows: items(questionsResult), categories: categoriesResult?.items || null });
     }).catch((loadError) => {
       if (controller.signal.aborted) return;
-      if (loadError.kind === "session") { expire(); return; }
-      setState({ loading: false, error: loadError.message, version: null, questionRows: [], categories: null });
+      setState({ loading: false, error: loadError.message, version: null, questionRows: [], categories: null }); // 会话过期也呈现可重试错误态
+      if (loadError.kind === "session") expire();
     });
     return () => controller.abort();
-  }, [versionId, attempt]);
+  }, [versionId, attempt, expire]);
   // 后台刷新：结构性变更（增删移动启停）与发布后统一走这里，题目与版本元数据同步保持权威。
   // 控制器被保留：versionId 变更或卸载时中止在途刷新，旧版本的迟到响应不得覆盖新 URL 的数据。
   const reloadAbortRef = useRef(null);
@@ -720,9 +943,9 @@ function QuestionnaireEditorRoute({ onBack, run, setToast }) {
       .then((result) => { if (active) setCategories(result.items); })
       .catch((loadError) => {
         if (!active) return;
-        // 会话失效：回登录页（保留当前 URL，登录后回到新建问卷），其余失败按分类面板降级。
+        // 会话失效：切登录遮罩（保留当前 URL，登录后回到新建问卷），其余失败按分类面板降级。
+        setCategories(null);
         if (loadError.kind === "session") expire();
-        else setCategories(null);
       });
     return () => { active = false; };
   }, [expire]);
@@ -1068,11 +1291,11 @@ function UserEditorRoute({ userId, onBackForKind, run, reload, setToast }) {
       .then((result) => { if (!controller.signal.aborted) setState({ loading: false, error: "", row: result.user }); })
       .catch((loadError) => {
         if (controller.signal.aborted) return;
-        if (loadError.kind === "session") { expire(); return; } // 会话失效：回登录页，登录后同路由继续
+        if (loadError.kind === "session") { expire(); return; } // 会话失效：切登录遮罩，登录后同路由继续
         setState({ loading: false, error: loadError.message, row: null });
       });
     return () => controller.abort();
-  }, [userId, attempt]);
+  }, [userId, attempt, expire]);
   const backLink = <button className="back-link" onClick={() => onBackForKind(state.row?.roleCode === "inspector" ? "inspector" : "admin")}><CaretRight size={15} /> 返回用户列表</button>;
   if (state.loading) return <>{backLink}<StatePanel title="正在加载账号数据…" /></>;
   if (state.error) return <>{backLink}<StatePanel title={state.error} action={<button className="admin-primary" onClick={() => setAttempt((value) => value + 1)}>重新加载</button>} /></>;
@@ -1082,8 +1305,10 @@ function UserEditorRoute({ userId, onBackForKind, run, reload, setToast }) {
 
 // 门店编辑路由：新建直接渲染空白表单；编辑按 id 拉取门店（GET /api/admin/stores/:id，
 // 与列表同权限 store:manage 且同样受数据范围约束），坐标字段映射与列表行入口一致。
+// 品牌选项由路由屏自行加载（权威品牌列表），加载失败可在表单内重试、不影响已填内容。
 const BLANK_STORE = { name: "", businessNo: "", brandId: "", regionName: "", address: "", latitude: null, longitude: null, radiusMeters: 300, accuracyAllowanceMaxMeters: 200 };
-function StoreEditorRoute({ storeId, onBack, run, ask }) {
+const mapStoreRow = (row) => ({ ...row, latitude: row.latitudeGcj02, longitude: row.longitudeGcj02, accuracyAllowanceMaxMeters: row.accuracyAllowanceMaxMeters || 200 });
+function StoreEditorRoute({ storeId, onBack, onCreated, ask, notify }) {
   const { expire } = useAdminAuth();
   const [state, setState] = useState({ loading: Boolean(storeId), error: "", store: storeId ? null : BLANK_STORE });
   const [attempt, setAttempt] = useState(0);
@@ -1094,20 +1319,40 @@ function StoreEditorRoute({ storeId, onBack, run, ask }) {
     request(API.admin.storeDetail(storeId), { schema: z.object({ store: StoreRowSchema }), signal: controller.signal })
       .then((result) => {
         if (controller.signal.aborted) return;
-        const row = result.store;
-        setState({ loading: false, error: "", store: { ...row, latitude: row.latitudeGcj02, longitude: row.longitudeGcj02, accuracyAllowanceMaxMeters: row.accuracyAllowanceMaxMeters || 200 } });
+        setState({ loading: false, error: "", store: mapStoreRow(result.store) });
       })
       .catch((loadError) => {
         if (controller.signal.aborted) return;
-        if (loadError.kind === "session") { expire(); return; }
-        setState({ loading: false, error: loadError.message, store: null });
+        setState({ loading: false, error: loadError.message, store: null }); // 会话过期也给出可重试错误态，重登后可重新加载
+        if (loadError.kind === "session") expire();
       });
     return () => controller.abort();
-  }, [storeId, attempt]);
+  }, [storeId, attempt, expire]);
+  const brands = useAdminBrands({ expire });
   const backLink = <button className="back-link" onClick={onBack}><CaretRight size={15} /> 返回门店列表</button>;
   if (state.loading) return <>{backLink}<StatePanel title="正在加载门店数据…" /></>;
   if (state.error) return <>{backLink}<StatePanel title={state.error} action={<button className="admin-primary" onClick={() => setAttempt((value) => value + 1)}>重新加载</button>} /></>;
-  return <StoreEditor store={state.store} onBack={onBack} run={run} ask={ask} />;
+  return <StoreEditor store={state.store} onBack={onBack} onCreated={onCreated} ask={ask} notify={notify} brands={brands} />;
+}
+
+// 权威品牌列表（编辑/新建路由独立加载，不再依赖列表页内存状态）：
+// 失败给出可重试错误（表单输入不受影响）；expire 交由会话层切登录遮罩。
+function useAdminBrands({ expire }) {
+  const [state, setState] = useState({ brands: null, error: "" });
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+    request(API.admin.brands, { schema: ADMIN_LIST_SCHEMAS.brands, signal: controller.signal })
+      .then((result) => { if (active) setState({ brands: result.items, error: "" }); })
+      .catch((loadError) => {
+        if (!active || controller.signal.aborted) return;
+        setState({ brands: null, error: loadError.message }); // 会话过期同样落到错误态（表单内重试可恢复）
+        if (loadError.kind === "session") expire();
+      });
+    return () => { active = false; controller.abort(); };
+  }, [attempt, expire]);
+  return { brands: state.brands, error: state.error, reload: () => setAttempt((value) => value + 1) };
 }
 
 // 任务详情路由：按 id 拉取完整详情（含指派表），随 campaignId 切换取消过期请求。
@@ -1122,11 +1367,11 @@ function CampaignDetailRoute({ campaignId, onBack, run, ask, setToast }) {
       .then((campaign) => { if (!controller.signal.aborted) setState({ loading: false, error: "", campaign }); })
       .catch((loadError) => {
         if (controller.signal.aborted) return;
-        if (loadError.kind === "session") { expire(); return; }
-        setState({ loading: false, error: loadError.message, campaign: null });
+        setState({ loading: false, error: loadError.message, campaign: null }); // 会话过期也呈现可重试错误态
+        if (loadError.kind === "session") expire();
       });
     return () => controller.abort();
-  }, [campaignId, attempt]);
+  }, [campaignId, attempt, expire]);
   const backLink = <button className="back-link" onClick={onBack}><CaretRight size={15} /> 返回任务列表</button>;
   if (state.loading) return <>{backLink}<StatePanel title="正在加载指派人数…" /></>;
   if (state.error) return <>{backLink}<StatePanel title={state.error} action={<button className="admin-primary" onClick={() => setAttempt((value) => value + 1)}>重新加载</button>} /></>;
@@ -1161,11 +1406,11 @@ function CampaignWizardRoute({ campaignId, step, from, onClose, setToast }) {
       .then((campaign) => { if (!controller.signal.aborted) setState({ loading: false, error: "", campaign }); })
       .catch((loadError) => {
         if (controller.signal.aborted) return;
-        if (loadError.kind === "session") { expire(); return; }
-        setState({ loading: false, error: loadError.message, campaign: null });
+        setState({ loading: false, error: loadError.message, campaign: null }); // 会话过期也呈现可重试错误态
+        if (loadError.kind === "session") expire();
       });
     return () => controller.abort();
-  }, [campaignId, attempt]);
+  }, [campaignId, attempt, expire]);
   const backLink = <button className="back-link" onClick={() => onClose(campaignId, effectiveFrom)}>{effectiveFrom === "list" ? "返回任务列表" : "返回任务详情"}</button>;
   if (state.loading) return <>{backLink}<StatePanel title="正在加载任务数据…" /></>;
   if (state.error) return <>{backLink}<StatePanel title={state.error} action={<button className="admin-primary" onClick={() => setAttempt((value) => value + 1)}>重新加载</button>} /></>;
@@ -1192,11 +1437,11 @@ function AssignmentEditorRoute({ campaignId, assignmentId, onBack, run }) {
       .then((campaign) => { if (!controller.signal.aborted) setState({ loading: false, error: "", campaign }); })
       .catch((loadError) => {
         if (controller.signal.aborted) return;
-        if (loadError.kind === "session") { expire(); return; }
-        setState({ loading: false, error: loadError.message, campaign: null });
+        setState({ loading: false, error: loadError.message, campaign: null }); // 会话过期也呈现可重试错误态
+        if (loadError.kind === "session") expire();
       });
     return () => controller.abort();
-  }, [campaignId, attempt]);
+  }, [campaignId, attempt, expire]);
   const backLink = <button className="back-link" onClick={onBack}><CaretRight size={15} /> 返回指派列表</button>;
   if (state.loading) return <>{backLink}<StatePanel title="正在加载任务数据…" /></>;
   if (state.error) return <>{backLink}<StatePanel title={state.error} action={<button className="admin-primary" onClick={() => setAttempt((value) => value + 1)}>重新加载</button>} /></>;
@@ -1346,11 +1591,11 @@ function SubmissionDetailRoute({ submissionId, parentList, run, setToast }) {
       .then((detail) => { if (!controller.signal.aborted) setState({ loading: false, error: "", detail }); })
       .catch((loadError) => {
         if (controller.signal.aborted) return;
-        if (loadError.kind === "session") { expire(); return; }
-        setState({ loading: false, error: loadError.message, detail: null });
+        setState({ loading: false, error: loadError.message, detail: null }); // 会话过期也呈现可重试错误态
+        if (loadError.kind === "session") expire();
       });
     return () => controller.abort();
-  }, [submissionId, attempt]);
+  }, [submissionId, attempt, expire]);
   // 返回链接携带白名单内的父列表筛选（?list= 仅由站内构造），直接书签打开时退化为未过滤列表。
   const backLink = <button className="back-link" onClick={() => navigate(`/admin/submissions${listSearchOf("submissions", parentList)}`)}><CaretRight size={15} /> 返回提交列表</button>;
   if (state.loading) return <>{backLink}<StatePanel title="正在加载完整提交…" /></>;

@@ -271,6 +271,8 @@ export function registerBatch2Routes(app, { pool, config }) {
     const params = [query.cursor || null, query.limit + 1];
     if (query.brandId) { params.push(query.brandId); conditions.push(`s.brand_id = $${params.length}`); }
     if (query.cityRegionId) { params.push(query.cityRegionId); conditions.push(`r.parent_id = $${params.length}`); }
+    // businessNo 精确匹配：新建门店冲突/结果不确定时的唯一编号对账（前端按编号找回已保存实体）
+    if (query.businessNo) { params.push(query.businessNo); conditions.push(`s.business_no = $${params.length}`); }
     // 范围受限管理员：列表静默过滤（与 batch5/stats 同构的三层子树 + store 精确）
     if (!hasFullScope(session.scopes)) { params.push(session.user_id); conditions.push(storeScopeFilter({ scopes: session.scopes, storeAlias: "s", regionAlias: "r", userParam: `$${params.length}` })); }
     const result = await pool.query(`${selectStore} WHERE ${conditions.join(" AND ")} ORDER BY s.id ${order.sql} LIMIT $2`, params);

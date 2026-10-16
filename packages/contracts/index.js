@@ -80,10 +80,11 @@ export const BrandWriteSchema = z.object({
   revision: RevisionSchema.optional(),
 });
 export const BrandRowSchema = z.object({ id: IdSchema, name: z.string(), active: z.boolean(), storeCount: z.number().optional(), revision: RevisionSchema });
-// 门店列表筛选：品牌 + 城市（区县的上级地级市区域）
+// 门店列表筛选：品牌 + 城市（区县的上级地级市区域）+ 门店编号精确匹配（新建冲突后对账复用）
 export const StoreListQuerySchema = CursorPageSchema.extend({
   brandId: SecureUuidSchema.optional(),
   cityRegionId: SecureUuidSchema.optional(),
+  businessNo: z.string().trim().min(1).max(64).optional(),
 });
 export const EvidenceRequirementWriteSchema = z.object({
   evidenceRequired: z.boolean(),
@@ -162,6 +163,15 @@ export const DishRequirementsReplaceSchema = z.object({ revision: RevisionSchema
 export const CheckinExemptionCreateSchema = z.object({ assignmentRevision: RevisionSchema, reason: z.string().trim().min(1).max(1000), validForMinutes: z.number().int().min(1).max(30) });
 export const CheckinExemptionRevokeSchema = z.object({ revision: RevisionSchema, reason: z.string().trim().min(1).max(1000) });
 export const RevisionReasonSchema = z.object({ revision: RevisionSchema, reason: z.string().trim().min(1).max(1000) });
+// 测试任务数据清理（super_admin 专用）：预览返回各业务行数与阻断原因；确认需逐字输入任务名称 + revision。
+export const CampaignCleanupPreviewSchema = z.object({
+  campaign: z.object({ id: IdSchema, name: z.string(), businessNo: z.string(), status: z.string(), storeName: z.string(), revision: RevisionSchema, cancelReason: z.string().nullable().optional() }),
+  counts: z.record(z.string(), z.number().int().nonnegative()),
+  blockers: z.array(z.object({ code: z.string(), message: z.string() })),
+  cleanupAllowed: z.boolean(),
+});
+export const CampaignCleanupConfirmSchema = z.object({ revision: RevisionSchema, confirmName: z.string().trim().min(1).max(200) });
+export const CampaignCleanupResultSchema = z.object({ deleted: z.literal(true), counts: z.record(z.string(), z.number().int().nonnegative()) });
 // 延期双窗口：dueAt=执行截止，questionnaireDeadlineAt=问卷最终截止；至少填一项，允许只延其一。
 export const AssignmentExtendSchema = RevisionReasonSchema.extend({ dueAt: z.string().datetime().optional(), questionnaireDeadlineAt: z.string().datetime().optional() })
   .refine((value) => value.dueAt !== undefined || value.questionnaireDeadlineAt !== undefined, { message: "请至少填写一项延期时间" });

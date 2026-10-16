@@ -24,6 +24,8 @@ export const routeSchemas = Object.freeze([
   { key: "admin.updateCampaign", method: "PATCH", url: "/api/admin/campaigns/:id", schema: { params: z.object({"id": z.string().min(1)}) } },
   { key: "admin.campaignAssignments", method: "POST", url: "/api/admin/campaigns/:id/assignments", schema: { params: z.object({"id": z.string().min(1)}) } },
   { key: "admin.cancelCampaign", method: "POST", url: "/api/admin/campaigns/:id/cancel", schema: { params: z.object({"id": z.string().min(1)}) } },
+  { key: "admin.campaignCleanup", method: "POST", url: "/api/admin/campaigns/:id/cleanup", schema: { params: z.object({"id": z.string().min(1)}) } },
+  { key: "admin.campaignCleanupPreview", method: "GET", url: "/api/admin/campaigns/:id/cleanup-preview", schema: { params: z.object({"id": z.string().min(1)}) } },
   { key: "admin.publishCampaign", method: "POST", url: "/api/admin/campaigns/:id/publish", schema: { params: z.object({"id": z.string().min(1)}) } },
   { key: "admin.exportList", method: "GET", url: "/api/admin/exports", schema: { params: z.object({}) } },
   { key: "admin.exports", method: "POST", url: "/api/admin/exports", schema: { params: z.object({}) } },

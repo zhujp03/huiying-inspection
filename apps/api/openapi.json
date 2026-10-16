@@ -277,6 +277,32 @@
         }
       }
     },
+    "/api/admin/campaigns/{id}/cleanup": {
+      "post": {
+        "operationId": "admin_campaignCleanup",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/admin/campaigns/{id}/cleanup-preview": {
+      "get": {
+        "operationId": "admin_campaignCleanupPreview",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
     "/api/admin/campaigns/{id}/publish": {
       "post": {
         "operationId": "admin_publishCampaign",

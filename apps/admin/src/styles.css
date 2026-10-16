@@ -846,3 +846,25 @@ button:active { transform: translateY(1px); }
 .questionnaire-action-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
 .questionnaire-action-bar .is-passed { color: #2f8f68; font-size: 13px; }
 .questionnaire-action-bar .is-failed { color: #c84d3b; font-size: 13px; }
+
+/* —— 会话过期遮罩（App.jsx ProtectedAdmin）：工作台保活挂载，遮罩全屏不可透视 —— */
+.admin-reauth-overlay { position: fixed; inset: 0; z-index: 1400; display: grid; place-items: center; overflow: auto; padding: 24px; background: #f4f5f7; }
+.admin-reauth-overlay .admin-login-page { position: static; min-height: auto; }
+.admin-shielded-layer.is-shielded { visibility: hidden; }
+/* 恢复失败页（网络/服务不可用）的卡片动作区 */
+.admin-login-card .form-message { margin: 0 0 14px; }
+/* 门店编辑器逐字段校验提示：紧贴字段下方 */
+.admin-field .form-message { margin: 6px 0 0; text-align: left; }
+.field-with-action .form-message { margin: 0; }
+/* 冲突对照：服务器最新内容与本地修改的并排摘要 */
+.conflict-server-fields { display: grid; gap: 6px; margin: 14px 0 4px; padding: 12px 14px; border: 1px solid #f0d9d4; border-radius: 10px; background: #fdf6f4; text-align: left; font-size: 13px; }
+.conflict-server-fields div { display: flex; justify-content: space-between; gap: 12px; }
+.conflict-server-fields span { color: var(--muted); flex: none; }
+.conflict-server-fields strong { color: var(--ink); font-weight: 600; text-align: right; word-break: break-all; }
+/* 测试任务清理弹窗：计数清单与阻断原因 */
+.cleanup-count-list { display: grid; gap: 6px; margin: 12px 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: #fafbfc; text-align: left; font-size: 13px; }
+.cleanup-count-list div { display: flex; justify-content: space-between; gap: 12px; }
+.cleanup-count-list strong { font-weight: 650; }
+.cleanup-blockers { display: grid; gap: 8px; margin: 12px 0 4px; padding: 12px 14px; border: 1px solid #f0d9d4; border-radius: 10px; background: #fdf6f4; text-align: left; font-size: 13px; color: #8c3a2b; }
+.cleanup-confirm-input { margin: 14px 0 4px; text-align: left; }
+.cleanup-confirm-input input { width: 100%; min-height: 40px; }

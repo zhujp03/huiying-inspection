@@ -17,7 +17,7 @@ export function EmptyState({ icon: Icon, title, description, action }) {
   );
 }
 
-export function Modal({ open, title, description, confirmLabel = "确定", cancelLabel = "取消", onConfirm, onCancel, danger = false }) {
+export function Modal({ open, title, description, error = "", confirmLabel = "确定", cancelLabel = "取消", onConfirm, onCancel, danger = false }) {
   // 每个实例独立的无障碍标题 id：同屏多个弹窗（如「保存题目设置？」确认 + 「有未保存的修改」
   // 离开警告）时，可访问名称互不串扰、顶层提示可被准确定位。
   const titleId = useId();
@@ -25,14 +25,15 @@ export function Modal({ open, title, description, confirmLabel = "确定", cance
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onCancel}>
       <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby={titleId} onMouseDown={(event) => event.stopPropagation()}>
-        <div className={`modal-card__icon ${danger ? "is-danger" : ""}`}>
-          {danger ? <WarningCircle size={26} weight="fill" /> : <Check size={24} weight="bold" />}
+        <div className={`modal-card__icon ${danger || error ? "is-danger" : ""}`}>
+          {danger || error ? <WarningCircle size={26} weight="fill" /> : <Check size={24} weight="bold" />}
         </div>
         <h2 id={titleId}>{title}</h2>
         {description ? <p>{description}</p> : null}
+        {error ? <p className="form-message" role="alert">{error}</p> : null}
         <div className="modal-actions">
           <button className="button button--ghost" onClick={onCancel}>{cancelLabel}</button>
-          <button className={`button ${danger ? "button--danger" : "button--primary"}`} onClick={onConfirm}>{confirmLabel}</button>
+          <button className={`button ${danger || error ? "button--danger" : "button--primary"}`} onClick={onConfirm}>{confirmLabel}</button>
         </div>
       </section>
     </div>

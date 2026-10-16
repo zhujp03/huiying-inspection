@@ -9,6 +9,7 @@ import { createPasswordService } from "./auth/passwords.js";
 import { missingProviders } from "./auth/providers.js";
 import { createMetrics, renderMetrics } from "./observability/metrics.js";
 import { registerAuthRoutes } from "./auth/routes.js";
+import { registerCampaignCleanupRoutes } from "./admin/campaign-cleanup.js";
 import { registerBatch2Routes } from "./batch2/routes.js";
 import { registerBatch3Routes } from "./batch3/routes.js";
 import { registerBatch4Routes } from "./batch4/routes.js";
@@ -96,6 +97,7 @@ export function buildApp({ config, pool, providers, storage, staticDirs, logger 
     return renderMetrics({ pool, metrics, startedAt });
   });
   registerAuthRoutes(app, { pool, config, passwordService: createPasswordService({ maxConcurrency: config.AUTH_HASH_MAX_CONCURRENCY, maxQueue: config.AUTH_HASH_MAX_QUEUE }), providers: providers || missingProviders() });
+  registerCampaignCleanupRoutes(app, { pool, config });
   registerBatch2Routes(app, { pool, config });
   registerBatch3Routes(app, { pool, cos: app.jundeCos });
   registerBatch4Routes(app, { pool, cos: app.jundeCos, config });

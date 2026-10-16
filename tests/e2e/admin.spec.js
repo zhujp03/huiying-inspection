@@ -66,11 +66,15 @@ test("服务失败显示业务化错误并允许重试", async ({ page }) => {
   await expect(page.getByRole("button", { name: "重新加载" })).toBeVisible();
 });
 
-test("会话失效返回登录页", async ({ page }) => {
+test("会话过期显示原位重登遮罩（登录后可回到当前路由）", async ({ page }) => {
   await login(page);
+  // 模拟真实过期：业务请求与 /api/me 探测都被拒绝（客户端会先核对 cookie 真实身份）
   await page.route("**/api/admin/campaigns*", (route) => route.fulfill({ status: 401, contentType: "application/json", body: JSON.stringify({ error: { code: "SESSION_EXPIRED" } }) }));
+  await page.route("**/api/me", (route) => route.fulfill({ status: 401, contentType: "application/json", body: JSON.stringify({ error: { code: "SESSION_EXPIRED" } }) }));
   await page.getByRole("button", { name: "探店任务" }).click();
-  await expect(page.getByRole("heading", { name: "管理员登录" })).toBeVisible();
+  // 过期不再整页跳回登录：工作台被遮罩覆盖并提示重新登录，重登后按当前路由恢复
+  await expect(page.getByRole("heading", { name: "登录已过期，请重新登录" })).toBeVisible();
+  await expect(page.getByText("暗访执行工作台")).toBeHidden();
 });
 
 test("探店任务指派、题库五十题、空导出和审计页面", async ({ page }) => {
@@ -103,13 +107,13 @@ test("审批 revision 冲突转换为业务提示", async ({ page }) => {
   await expect(page.getByText("内容已更新，请刷新后重试")).toBeVisible();
 });
 
-test("父任务表单使用服务端门店并保存完整时间窗口", async ({ page }) => {
+test("父任务表单使用服务端门店并保存完整时间窗口", async ({ page }, testInfo) => {
   await login(page);
   await page.getByRole("button", { name: "探店任务" }).click();
   await page.getByRole("button", { name: "新建探店任务" }).click();
   await expect(page.getByRole("heading", { name: "新建探店任务" })).toBeVisible();
   await page.getByLabel("任务名称").fill("秋季暗访计划");
-  await wizardStoreSelect(page, "品牌").selectOption("brand-one");
+  await wizardStoreSelect(page, "品牌").selectOption("1a6fd7a0-1111-4111-8111-000000000001");
   await wizardStoreSelect(page, "店号").selectOption("JD-SH-001");
   // JD-SH-001 在建新园组内对应两家门店，不会自动收敛，需手选店名
   await wizardStoreSelect(page, "店名").selectOption("store-one");
@@ -119,7 +123,7 @@ test("父任务表单使用服务端门店并保存完整时间窗口", async ({
   await page.getByLabel("探店结束时间").fill("14:00");
   await page.getByLabel("问卷最终截止").fill("2026-07-20T20:00");
   await page.getByLabel("共用说明").fill("保持自然就餐，关注高峰期服务。");
-  await page.screenshot({ path: "tests/visual/admin-campaign-wizard.png", fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath("admin-campaign-wizard.png"), fullPage: true });
   await page.getByRole("button", { name: "下一步：指派探店员" }).click();
   await expect(page.getByText("任务草稿已创建，请继续指派探店员")).toBeVisible();
   await expect(page.getByRole("button", { name: "添加探店员" })).toBeVisible();
@@ -135,7 +139,7 @@ test("父任务表单门店三级级联选择与组切换清空", async ({ page 
   await expect(wizardStoreSelect(page, "品牌")).toBeEnabled();
   await expect(wizardStoreSelect(page, "店号")).toBeDisabled();
   await expect(wizardStoreSelect(page, "店名")).toBeDisabled();
-  await wizardStoreSelect(page, "品牌").selectOption("brand-one");
+  await wizardStoreSelect(page, "品牌").selectOption("1a6fd7a0-1111-4111-8111-000000000001");
   await expect(wizardStoreSelect(page, "店号")).toBeEnabled();
   const noOptions = await wizardStoreSelect(page, "店号").locator("option").evaluateAll((options) => options.filter((option) => option.value).map((option) => option.value));
   expect(noOptions).toEqual(["JD-SH-001"]);
@@ -162,7 +166,7 @@ test("父任务表单门店三级级联选择与组切换清空", async ({ page 
   await expect(wizardStoreSelect(page, "店名")).toHaveValue("store-two");
 });
 
-test("任务指派完整保存问卷、时间、预算和菜品", async ({ page }) => {
+test("任务指派完整保存问卷、时间、预算和菜品", async ({ page }, testInfo) => {
   let savedAssignment;
   page.on("request", (request) => { if (request.method() === "POST" && request.url().endsWith("/api/admin/campaigns/campaign-one/assignments")) savedAssignment = request.postDataJSON(); });
   await login(page);
@@ -179,7 +183,7 @@ test("任务指派完整保存问卷、时间、预算和菜品", async ({ page 
   await row.getByRole("checkbox", { name: "要求上传消费小票" }).check();
   await row.getByLabel("个人特别说明").fill("重点观察迎宾和巡台。");
   await row.getByLabel("菜品名称").fill("招牌烤鸭");
-  await page.screenshot({ path: "tests/visual/admin-assignment-editor.png", fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath("admin-assignment-editor.png"), fullPage: true });
   await page.getByRole("button", { name: "下一步：确认并发布" }).click();
   await expect(page.getByRole("heading", { name: /指派明细/ })).toBeVisible();
   expect(savedAssignment.receiptRequired).toBe(true);
@@ -187,7 +191,7 @@ test("任务指派完整保存问卷、时间、预算和菜品", async ({ page 
   expect(savedAssignment.inspectorId).toBe("user-inspector-two");
 });
 
-test("提交筛选、分类得分、菜品和审计详情", async ({ page }) => {
+test("提交筛选、分类得分、菜品和审计详情", async ({ page }, testInfo) => {
   await login(page);
   await page.getByRole("button", { name: "提交记录" }).click();
   await page.getByLabel("门店筛选").selectOption("静安嘉里中心店");
@@ -195,7 +199,7 @@ test("提交筛选、分类得分、菜品和审计详情", async ({ page }) => 
   await page.getByRole("button", { name: "应用筛选" }).click();
   await expect(page.getByRole("button", { name: "应用筛选" })).toBeVisible();
   await expect(page.getByRole("cell", { name: "周雨晴" })).toBeVisible();
-  await page.screenshot({ path: "tests/visual/admin-submission-filters.png", fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath("admin-submission-filters.png"), fullPage: true });
   await page.getByRole("button", { name: "查看详情" }).click();
   await expect(page.getByText("环境卫生")).toBeVisible();
   await expect(page.getByText("招牌烤鸭").first()).toBeVisible();
@@ -208,8 +212,8 @@ test("提交筛选、分类得分、菜品和审计详情", async ({ page }) => 
   await expect(page.getByText("价格已人工核对")).toBeVisible();
   await expect(page.getByText("提交审计记录")).toBeVisible();
   await expect(page.locator(".submission-question-list article")).toHaveCount(50);
-  await page.screenshot({ path: "tests/visual/admin-submission-detail-full.png", fullPage: true });
-  await page.locator(".receipt-comparison").screenshot({ path: "tests/visual/admin-receipt-comparison.png" });
+  await page.screenshot({ path: testInfo.outputPath("admin-submission-detail-full.png"), fullPage: true });
+  await page.locator(".receipt-comparison").screenshot({ path: testInfo.outputPath("admin-receipt-comparison.png") });
 });
 
 test("提交记录导出携带至多不得分数筛选且不含旧键", async ({ page }) => {
@@ -244,13 +248,13 @@ test("审批默认待审核并支持已批准、未通过和已停用筛选", as
   await expect(page.locator(".registration-panel").getByText("赵书瑞")).toBeVisible();
 });
 
-test("门店编辑展示地图业务失败和启停控件", async ({ page }) => {
+test("门店编辑展示地图业务失败和启停控件", async ({ page }, testInfo) => {
   await login(page);
   await page.getByRole("button", { name: "门店管理" }).click();
   await page.getByRole("row", { name: /静安嘉里中心店/ }).getByRole("button", { name: "编辑范围" }).click();
   await expect(page.locator(".map-footer").getByText("地图服务尚未配置，请联系管理员")).toBeVisible();
   await expect(page.getByRole("checkbox", { name: "门店启用，可创建新任务" })).toBeChecked();
-  await page.screenshot({ path: "tests/visual/admin-store-map-unconfigured.png", fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath("admin-store-map-unconfigured.png"), fullPage: true });
 });
 
 test("问卷详情显示发布检查", async ({ page }) => {
@@ -413,8 +417,8 @@ test("门店品牌筛选切换后游标重置并从首页重新查询", async ({
   await page.getByRole("button", { name: "加载更多" }).click();
   await expect(page.getByText("压测门店 227 号店")).toBeVisible();
   // 切筛选 = 换 path 重查：请求带 brandId 且不含 cursor，追加行不残留
-  const filterRequest = page.waitForRequest((request) => request.url().includes("/api/admin/stores?") && request.url().includes("brandId=brand-one"));
-  await page.getByLabel("门店品牌筛选").selectOption("brand-one");
+  const filterRequest = page.waitForRequest((request) => request.url().includes("/api/admin/stores?") && request.url().includes("brandId=1a6fd7a0-1111-4111-8111-000000000001"));
+  await page.getByLabel("门店品牌筛选").selectOption("1a6fd7a0-1111-4111-8111-000000000001");
   const matched = await filterRequest;
   expect(matched.url()).not.toContain("cursor=");
   await expect(page.getByRole("row", { name: /静安嘉里中心店/ })).toBeVisible();

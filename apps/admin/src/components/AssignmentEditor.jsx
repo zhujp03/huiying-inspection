@@ -97,6 +97,10 @@ export function AssignmentEditor({ campaign, assignment, onCancel, onSaved, run 
   const patch = (field, value) => setForm((current) => ({ ...current, [field]: value }));
   const patchDish = (index, patchValue) => patch("dishRequirements", form.dishRequirements.map((dish, dishIndex) => dishIndex === index ? { ...dish, ...patchValue } : dish));
   const removeDish = (index) => patch("dishRequirements", form.dishRequirements.filter((_, dishIndex) => dishIndex !== index));
+  // 复合保存的检查点：第一段（指派本体 PATCH/POST）成功后记录服务端返回的 id/revision 与请求体指纹。
+  // 重试时只续跑未完成的菜品步骤，绝不带旧 revision 重发已成功的第一段；指纹不一致（期间又改了输入）
+  // 则以检查点携带的服务端 revision 精确重发第一段（真实冲突由服务端 409 明确报错，输入保留在表单）。
+  const assignmentCheckpointRef = useRef(null);
   const save = () => {
     const payload = { ...form, budgetLimit: Number(form.budgetLimit), startsAt: form.startsAt ? new Date(form.startsAt).toISOString() : "", dueAt: form.dueAt ? new Date(form.dueAt).toISOString() : "", dishRequirements: form.dishRequirements.map((dish) => ({ ...dish, quantity: Number(dish.quantity) })), campaignRevision: campaign.revision, ...(editing ? { revision: assignment.revision } : {}) };
     const parsed = AssignmentWriteSchema.safeParse(payload);
@@ -106,11 +110,27 @@ export function AssignmentEditor({ campaign, assignment, onCancel, onSaved, run 
     run({
       title: editing ? "保存这条指派？" : "创建这条指派？",
       description: parsed.data.taskType === "overt" ? "明察可保存为草稿，但第一阶段不能发布。" : "探店员、问卷、时间、菜品和预算将独立保存。",
+      retryableExecute: true, // execute 按检查点续跑：重试只补未完成的步骤，不会重放已完成写入
       execute: async () => {
-        const saved = await request(editing ? API.admin.assignment(assignment.id) : API.admin.campaignAssignments(campaign.id), { method: editing ? "PATCH" : "POST", body: assignmentBody });
-        const assignmentId = assignment?.id || saved?.id;
-        if (!assignmentId) throw new Error("服务返回的分配信息不完整，请刷新后重试");
-        await request(API.admin.dishRequirements(assignmentId), { method: "PUT", body: { revision: saved?.revision ?? assignment?.revision ?? 0, items: dishRequirements } });
+        let assignmentId;
+        let savedRevision;
+        const checkpoint = assignmentCheckpointRef.current;
+        if (checkpoint && checkpoint.fingerprint === JSON.stringify(assignmentBody)) {
+          // 第一段已成功且输入未变：只续跑菜品步骤
+          ({ id: assignmentId, revision: savedRevision } = checkpoint);
+        } else {
+          const targetId = checkpoint ? checkpoint.id : assignment?.id;
+          const body = { ...assignmentBody, revision: checkpoint ? checkpoint.revision : assignment?.revision };
+          const saved = await request(targetId ? API.admin.assignment(targetId) : API.admin.campaignAssignments(campaign.id), { method: targetId ? "PATCH" : "POST", body });
+          assignmentId = targetId || saved?.id;
+          if (!assignmentId) throw new Error("服务返回的分配信息不完整，请刷新后重试");
+          savedRevision = saved?.revision ?? checkpoint?.revision ?? assignment?.revision ?? 0;
+          assignmentCheckpointRef.current = { id: assignmentId, revision: savedRevision, fingerprint: JSON.stringify(assignmentBody) };
+          // 注意：此处绝不推进表单基准——第一段落库不代表两段保存完成；若第二段再次失败，
+          // 未保存的菜品/字段改动仍属「未保存修改」，导航守卫必须继续拦截（基准只在两段全部完成后推进）。
+        }
+        await request(API.admin.dishRequirements(assignmentId), { method: "PUT", body: { revision: savedRevision, items: dishRequirements } });
+        assignmentCheckpointRef.current = null; // 两段全部完成
         formBaselineRef.current = { ...formRef.current }; // 保存成功：基准推进（失败时保留拦截）
       },
       success: editing ? "指派已保存" : "指派已创建", onSuccess: onSaved,

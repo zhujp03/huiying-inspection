@@ -26,7 +26,7 @@ const auditActionLabel = (action) => ({
   questionnaire_submitted: "问卷已提交", export_requested: "已创建导出", archive_restore_requested: "已请求恢复附件",
   admin_login: "管理员登录后台", inspector_login: "探员登录小程序", admin_logout: "管理员退出后台", inspector_logout: "探员退出小程序", attempt_started: "开始填写问卷", attempt_recovered: "问卷已恢复重答", checkin_accepted: "探店打卡成功", checkin_rejected: "打卡未通过", login_failed: "登录失败",
   registration_submitted: "提交注册申请", registration_resubmitted: "重新提交注册申请", registration_approved: "批准注册申请", registration_rejected: "不批准注册申请", registration_reopened: "重新打开注册申请", user_created: "创建账号", user_updated: "更新账号", user_deleted: "删除账号", user_disabled: "停用账号", user_enabled: "启用账号", password_reset_completed: "完成密码重置",
-  campaign_created: "创建探店任务", campaign_updated: "更新探店任务", campaign_published: "发布探店任务", campaign_deleted: "删除探店任务", campaign_cancelled: "整体取消探店任务",
+  campaign_created: "创建探店任务", campaign_updated: "更新探店任务", campaign_published: "发布探店任务", campaign_deleted: "删除探店任务", campaign_cancelled: "整体取消探店任务", campaign_cleaned: "清理测试任务数据",
   assignment_created: "添加探店员指派", assignment_updated: "修改探店员指派", assignment_deleted: "删除探店员指派", assignment_cancelled: "取消探店员指派", assignment_extended: "延期探店员指派",
   exemption_created: "创建打卡豁免", exemption_revoked: "撤销打卡豁免",
   attempt_draft_saved: "保存答题草稿", issue_edit_confirmed: "确认问题修改", issue_edit_cancelled: "放弃问题修改", evidence_uploaded: "上传题目证据", evidence_removed: "删除题目证据",
@@ -37,12 +37,12 @@ const auditActionLabel = (action) => ({
   store_created: "创建门店", store_updated: "更新门店", store_deleted: "删除门店", brand_created: "创建品牌", brand_updated: "更新品牌", brand_deleted: "删除品牌", region_created: "创建区域",
 })[action] || "已完成管理操作";
 const auditSubjectLabel = (type) => ({ submission: "提交记录", export_job: "导出任务", user: "账号", assignment: "探店任务", registration: "注册申请", campaign: "探店任务", questionnaire_version: "问卷版本", question: "题目", category: "评估分类", store: "门店", brand: "品牌", region: "区域" })[type] || "系统记录";
-const auditResultLabel = { checkin_rejected: "未通过", login_failed: "失败", campaign_deleted: "已删除", assignment_deleted: "已删除", question_deleted: "已删除", category_deleted: "已删除", store_deleted: "已删除", brand_deleted: "已删除", questionnaire_version_deleted: "已删除", campaign_cancelled: "已取消", assignment_cancelled: "已取消", issue_edit_cancelled: "已放弃", receipt_removed: "已删除", evidence_removed: "已删除", exemption_revoked: "已撤销" };
-const auditLevel = (action) => (["checkin_rejected", "login_failed", "campaign_cancelled", "assignment_cancelled"].includes(action) ? "error" : "info");
+const auditResultLabel = { checkin_rejected: "未通过", login_failed: "失败", campaign_deleted: "已删除", campaign_cleaned: "已清理", assignment_deleted: "已删除", question_deleted: "已删除", category_deleted: "已删除", store_deleted: "已删除", brand_deleted: "已删除", questionnaire_version_deleted: "已删除", campaign_cancelled: "已取消", assignment_cancelled: "已取消", issue_edit_cancelled: "已放弃", receipt_removed: "已删除", evidence_removed: "已删除", exemption_revoked: "已撤销" };
+const auditLevel = (action) => (["checkin_rejected", "login_failed", "campaign_cancelled", "assignment_cancelled", "campaign_cleaned"].includes(action) ? "error" : "info");
 // 审计动作类别分组：审计页筛选时服务端展开为动作集合过滤
 const AUDIT_GROUPS = {
   account: ["admin_login", "inspector_login", "admin_logout", "inspector_logout", "login_failed", "registration_submitted", "registration_resubmitted", "registration_approved", "registration_rejected", "registration_reopened", "user_created", "user_updated", "user_deleted", "user_disabled", "user_enabled", "password_reset_completed"],
-  campaigns: ["campaign_created", "campaign_updated", "campaign_published", "campaign_deleted", "campaign_cancelled", "assignment_created", "assignment_updated", "assignment_deleted", "assignment_cancelled", "assignment_extended", "exemption_created", "exemption_revoked"],
+  campaigns: ["campaign_created", "campaign_updated", "campaign_published", "campaign_deleted", "campaign_cancelled", "campaign_cleaned", "assignment_created", "assignment_updated", "assignment_deleted", "assignment_cancelled", "assignment_extended", "exemption_created", "exemption_revoked"],
   execution: ["attempt_started", "attempt_draft_saved", "issue_edit_confirmed", "issue_edit_cancelled", "evidence_uploaded", "evidence_removed", "receipt_uploaded", "receipt_removed", "receipt_ocr_requested", "receipt_ocr_applied", "dishes_saved", "other_records_saved", "checkin_accepted", "checkin_rejected", "questionnaire_submitted"],
   questionnaire: ["questionnaire_version_created", "questionnaire_version_published", "questionnaire_version_copied", "questionnaire_version_deleted", "question_created", "question_updated", "question_deleted", "question_moved", "category_created", "category_updated", "category_deleted"],
   stores: ["store_created", "store_updated", "store_deleted", "brand_created", "brand_updated", "brand_deleted", "region_created"],

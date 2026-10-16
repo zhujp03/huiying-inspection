@@ -162,4 +162,94 @@ describe.sequential("PostgreSQL authentication", () => {
     expect(limited.json().error).toMatchObject({ code: "RATE_LIMITED", retryable: true });
     await app.close();
   });
+
+  test("admin sessions default to 120 idle minutes within a 12h absolute cap, renew the cookie on activity and keep CSRF stable across tabs", async () => {
+    const passwords = createPasswordService();
+    const adminId = uuidv7();
+    await pool.query(`INSERT INTO users (id,username_display,username_normalized,display_name,phone_ciphertext,phone_lookup_hmac,phone_verified_at,password_hash,status)
+      VALUES ($1,'SessionAdmin','sessionadmin','会话管理员','cipher-session',$2,now(),$3,'approved_active')`, [adminId, hmac(config.AUTH_TOKEN_HMAC_KEY, normalizePhone("13700000000")), await passwords.hash("A-secure-pass")]);
+    const role = await pool.query("SELECT id FROM roles WHERE code = 'super_admin'");
+    await pool.query("INSERT INTO user_roles (id,user_id,role_id) VALUES ($1,$2,$3)", [uuidv7(), adminId, role.rows[0].id]);
+    await pool.query("INSERT INTO user_data_scopes (id,user_id,scope_type) VALUES ($1,$2,'all')", [uuidv7(), adminId]);
+    const app = buildApp({ config, pool, logger: false, providers: { verifyCaptcha: async () => true, sendSms: async () => ({ messageId: "test-message" }) } });
+    const login = await app.inject({ method: "POST", url: "/api/admin/auth/login", payload: { username: "SessionAdmin", password: "A-secure-pass" } });
+    expect(login.statusCode).toBe(200);
+    const loginCookie = String(login.headers["set-cookie"]);
+    expect(loginCookie).toContain("junde_admin_session=");
+    expect(loginCookie).toMatch(/HttpOnly/i);
+    expect(loginCookie).toMatch(/SameSite=Strict/i);
+    expect(loginCookie).toMatch(/Max-Age=7200/); // 登录 cookie 与 120 分钟闲置窗口一致
+    const persisted = await pool.query("SELECT idle_expires_at, absolute_expires_at FROM auth_sessions WHERE user_id = $1 AND kind = 'admin'", [adminId]);
+    const idleMinutes = (new Date(persisted.rows[0].idle_expires_at) - Date.now()) / 60000;
+    expect(idleMinutes).toBeGreaterThan(118);
+    expect(idleMinutes).toBeLessThan(121);
+    const absoluteHours = (new Date(persisted.rows[0].absolute_expires_at) - Date.now()) / 3600000;
+    expect(absoluteHours).toBeGreaterThan(11.9);
+    expect(absoluteHours).toBeLessThan(12.1);
+    const firstToken = login.json().csrfToken;
+    // 多标签页：/api/me 返回稳定令牌，不再轮换互踢
+    const me1 = await app.inject({ method: "GET", url: "/api/me", headers: { cookie: login.headers["set-cookie"] } });
+    const me2 = await app.inject({ method: "GET", url: "/api/me", headers: { cookie: login.headers["set-cookie"] } });
+    expect(me1.statusCode).toBe(200);
+    expect(me1.json().csrfToken).toBe(firstToken);
+    expect(me2.statusCode).toBe(200);
+    expect(me2.json().csrfToken).toBe(firstToken);
+    // 每个有效请求续写浏览器 cookie（属性不变），maxAge 为闲置窗口与剩余绝对寿命的较小值
+    const renewedCookie = String(me2.headers["set-cookie"]);
+    expect(renewedCookie).toContain("junde_admin_session=");
+    expect(renewedCookie).toMatch(/HttpOnly/i);
+    expect(renewedCookie).toMatch(/SameSite=Strict/i);
+    const renewedMaxAge = Number(/Max-Age=(\d+)/.exec(renewedCookie)?.[1]);
+    expect(renewedMaxAge).toBeGreaterThan(0);
+    expect(renewedMaxAge).toBeLessThanOrEqual(7200);
+    // 闲置过期仍强制下线；绝对上限到期同样强制下线（cookie 续期绝不越过绝对上限）
+    await pool.query("UPDATE auth_sessions SET idle_expires_at = now() - interval '1 minute' WHERE user_id = $1 AND kind = 'admin'", [adminId]);
+    expect((await app.inject({ method: "GET", url: "/api/me", headers: { cookie: login.headers["set-cookie"] } })).statusCode).toBe(401);
+    await pool.query("UPDATE auth_sessions SET idle_expires_at = now() - interval '2 minutes', absolute_expires_at = now() - interval '1 minute' WHERE user_id = $1 AND kind = 'admin'", [adminId]);
+    expect((await app.inject({ method: "GET", url: "/api/me", headers: { cookie: login.headers["set-cookie"] } })).statusCode).toBe(401);
+    // 接近绝对上限时 cookie 续期被剩余寿命收口（idle <= absolute 的表约束内构造场景）
+    await pool.query("UPDATE auth_sessions SET idle_expires_at = now() + interval '60 seconds', absolute_expires_at = now() + interval '90 seconds' WHERE user_id = $1 AND kind = 'admin'", [adminId]);
+    const capped = await app.inject({ method: "GET", url: "/api/me", headers: { cookie: login.headers["set-cookie"] } });
+    expect(capped.statusCode).toBe(200);
+    const cappedMaxAge = Number(/Max-Age=(\d+)/.exec(String(capped.headers["set-cookie"]))?.[1]);
+    expect(cappedMaxAge).toBeGreaterThan(0);
+    expect(cappedMaxAge).toBeLessThanOrEqual(90);
+    // 登出：cookie 被清除，旧 cookie 不能复活会话
+    await pool.query("UPDATE auth_sessions SET idle_expires_at = now() + interval '10 minutes', absolute_expires_at = now() + interval '12 hours' WHERE user_id = $1 AND kind = 'admin'", [adminId]);
+    const logout = await app.inject({ method: "POST", url: "/api/admin/auth/logout", headers: { cookie: login.headers["set-cookie"] } });
+    expect(logout.statusCode).toBe(204);
+    const logoutCookie = String(logout.headers["set-cookie"]);
+    expect(logoutCookie).toMatch(/junde_admin_session=;/);
+    expect(logoutCookie).toMatch(/Max-Age=0/);
+    expect((await app.inject({ method: "GET", url: "/api/me", headers: { cookie: login.headers["set-cookie"] } })).statusCode).toBe(401);
+    await app.close();
+  });
+
+  test("inspector bearer sessions keep 12h idle semantics and never receive admin cookies", async () => {
+    const passwords = createPasswordService();
+    const inspectorId = uuidv7();
+    await pool.query(`INSERT INTO users (id,username_display,username_normalized,display_name,phone_ciphertext,phone_lookup_hmac,phone_verified_at,password_hash,status)
+      VALUES ($1,'SessionInspector','sessioninspector','会话探员','cipher-session-2',$2,now(),$3,'approved_active')`, [inspectorId, hmac(config.AUTH_TOKEN_HMAC_KEY, normalizePhone("13900000000")), await passwords.hash("A-secure-pass")]);
+    const role = await pool.query("SELECT id FROM roles WHERE code = 'inspector'");
+    await pool.query("INSERT INTO user_roles (id,user_id,role_id) VALUES ($1,$2,$3)", [uuidv7(), inspectorId, role.rows[0].id]);
+    const app = buildApp({ config, pool, logger: false, providers: { verifyCaptcha: async () => true, sendSms: async () => ({ messageId: "test-message" }) } });
+    const login = await app.inject({ method: "POST", url: "/api/auth/login", payload: { username: "SessionInspector", password: "A-secure-pass" } });
+    expect(login.statusCode).toBe(200);
+    // 探员是 bearer 会话：登录与后续请求都不下发管理端 cookie
+    expect(String(login.headers["set-cookie"] ?? "")).not.toContain("junde_admin_session");
+    const token = login.json().accessToken;
+    expect(token).toBeTruthy();
+    const me = await app.inject({ method: "GET", url: "/api/me", headers: { authorization: `Bearer ${token}` } });
+    expect(me.statusCode).toBe(200);
+    expect(me.json().csrfToken).toBeUndefined();
+    expect(String(me.headers["set-cookie"] ?? "")).not.toContain("junde_admin_session");
+    const persisted = await pool.query("SELECT idle_expires_at, absolute_expires_at FROM auth_sessions WHERE user_id = $1 AND kind = 'inspector'", [inspectorId]);
+    const idleHours = (new Date(persisted.rows[0].idle_expires_at) - Date.now()) / 3600000;
+    expect(idleHours).toBeGreaterThan(11.9);
+    expect(idleHours).toBeLessThan(12.1);
+    const absoluteDays = (new Date(persisted.rows[0].absolute_expires_at) - Date.now()) / 86400000;
+    expect(absoluteDays).toBeGreaterThan(29.9);
+    expect(absoluteDays).toBeLessThan(30.1);
+    await app.close();
+  });
 });

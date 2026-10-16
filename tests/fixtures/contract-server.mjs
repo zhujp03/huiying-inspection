@@ -149,8 +149,8 @@ const bulkStores = Array.from({ length: 127 }, (_, index) => ({
   revision: 2,
 }));
 const adminStores = [
-  { id: "store-one", name: "静安嘉里中心店", businessNo: "JD-SH-001", brandId: "brand-one", brandName: "建新园", cityRegionId: REGION_CITY, cityName: "上海市市辖区", regionId: REGION_JINGAN, regionName: "静安区", address: "静安区南京西路 1515 号", active: true, locationVerified: true, radiusMeters: 300, latitudeGcj02: 31.2265, longitudeGcj02: 121.4452, accuracyAllowanceMaxMeters: 150, revision: 2 },
-  { id: "store-three", name: "静安大融城店", businessNo: "JD-SH-001", brandId: "brand-one", brandName: "建新园", cityRegionId: REGION_CITY, cityName: "上海市市辖区", regionId: REGION_JINGAN, regionName: "静安区", address: "静安区南京西路 1515 号", active: true, locationVerified: true, radiusMeters: 300, latitudeGcj02: 31.2265, longitudeGcj02: 121.4452, accuracyAllowanceMaxMeters: 150, revision: 2 },
+  { id: "store-one", name: "静安嘉里中心店", businessNo: "JD-SH-001", brandId: "1a6fd7a0-1111-4111-8111-000000000001", brandName: "建新园", cityRegionId: REGION_CITY, cityName: "上海市市辖区", regionId: REGION_JINGAN, regionName: "静安区", address: "静安区南京西路 1515 号", active: true, locationVerified: true, radiusMeters: 300, latitudeGcj02: 31.2265, longitudeGcj02: 121.4452, accuracyAllowanceMaxMeters: 150, revision: 2 },
+  { id: "store-three", name: "静安大融城店", businessNo: "JD-SH-001", brandId: "1a6fd7a0-1111-4111-8111-000000000001", brandName: "建新园", cityRegionId: REGION_CITY, cityName: "上海市市辖区", regionId: REGION_JINGAN, regionName: "静安区", address: "静安区南京西路 1515 号", active: true, locationVerified: true, radiusMeters: 300, latitudeGcj02: 31.2265, longitudeGcj02: 121.4452, accuracyAllowanceMaxMeters: 150, revision: 2 },
   { id: "store-two", name: "浦东世纪公园店", businessNo: "JD-SH-002", brandId: null, brandName: null, cityRegionId: REGION_CITY, cityName: "上海市市辖区", regionId: REGION_JINGAN, regionName: "静安区", address: "静安区南京西路 1515 号", active: true, locationVerified: true, radiusMeters: 300, latitudeGcj02: 31.2265, longitudeGcj02: 121.4452, accuracyAllowanceMaxMeters: 150, revision: 2 },
   ...bulkStores,
 ];
@@ -179,7 +179,11 @@ const adminRegistrations = [
   { id: "registration-three", displayName: "孙可欣", username: "sunkeixin", maskedPhone: "137****8802", appliedAt: "2026-07-17T08:00:00Z", status: "rejected", revision: 3 },
   { id: "registration-four", userId: "user-four", displayName: "赵书瑞", username: "zhaoshurui", maskedPhone: "136****7719", appliedAt: "2026-07-16T08:00:00Z", status: "disabled", revision: 4 },
 ];
-const adminCampaigns = [{ id: "campaign-one", name: "夏季门店服务品质暗访", businessNo: "JD-20260719-018", storeName: "静安嘉里中心店", startsAt: "2026-07-19T10:00:00Z", dueAt: "2026-07-19T14:00:00Z", assignmentCount: 3, overdueCount: 0, status: "draft", revision: 3 }];
+// 已取消的测试任务（super_admin 清理流程用）：无任何提交/作业，可安全清理。
+const cleanupCampaign = { id: "campaign-clean", name: "已取消的测试任务", businessNo: "JD-CLEAN-001", storeName: "静安嘉里中心店", startsAt: "2026-07-01T10:00:00Z", dueAt: "2026-07-02T14:00:00Z", assignmentCount: 2, overdueCount: 0, status: "cancelled", revision: 4 };
+let cleanupUsed = false; // 清理完成后列表行移除（幂等预览仍可回放，供断言）
+
+const adminCampaigns = [{ id: "campaign-one", name: "夏季门店服务品质暗访", businessNo: "JD-20260719-018", storeName: "静安嘉里中心店", startsAt: "2026-07-19T10:00:00Z", dueAt: "2026-07-19T14:00:00Z", assignmentCount: 3, overdueCount: 0, status: "draft", revision: 3 }, cleanupCampaign];
 // campaign-one 指派表：assignment-extend 为延期用例专用行（既有用例不断言其截止时间），
 // extend 端点把新截止写进 extendState，GET 详情时合并回显（进程内共享，测试间依次生效）。
 const campaignAssignments = [
@@ -215,6 +219,81 @@ const mergeAssignment = (row) => {
 const adminSubmissions = [{ id: "submission-one", taskName: "夏季门店服务品质暗访", businessNo: "JD-20260719-018", storeName: "静安嘉里中心店", regionName: "静安区", inspectorName: "周雨晴", status: "submitted", submittedAt: "2026-07-19T13:20:00Z", scoreRate: "94%", issueCount: 3, highRiskCount: 1 }];
 const adminAudits = [{ id: "audit-one", createdAt: "2026-07-19T09:00:00Z", actorName: "测试管理员", actionLabel: "批准注册申请", subjectLabel: "探店员 周雨晴", resultLabel: "已完成" }];
 
+// —— 有状态门店/品牌（编辑器恢复流程用）：创建落入列表与详情、PATCH 乐观锁推进 revision ——
+const fixtureBrands = [
+  { id: "1a6fd7a0-1111-4111-8111-000000000001", name: "建新园", active: true, storeCount: 1, revision: 1 },
+  { id: "1a6fd7a0-1111-4111-8111-000000000002", name: "停用示例品牌", active: false, storeCount: 0, revision: 1 },
+];
+let brandSeq = 0;
+let storeSeq = 0;
+const createdStores = [];
+// 初始快照：/__test/reset 恢复被用例改写的门店/品牌（跨用例互不污染）
+const initialStoresSnapshot = JSON.parse(JSON.stringify(adminStores));
+const initialBrandsSnapshot = JSON.parse(JSON.stringify(fixtureBrands));
+const allStores = () => [...adminStores, ...createdStores];
+const storeRowFrom = (body, id, revision) => ({
+  id,
+  name: body.name,
+  businessNo: body.businessNo,
+  brandId: body.brandId || null,
+  brandName: fixtureBrands.find((brand) => brand.id === body.brandId)?.name || null,
+  cityRegionId: REGION_CITY,
+  cityName: "上海市市辖区",
+  regionId: body.regionId || REGION_JINGAN,
+  regionName: "静安区",
+  address: body.address,
+  active: body.active !== false,
+  locationVerified: Boolean(body.locationVerified),
+  radiusMeters: body.radiusMeters ?? 300,
+  latitudeGcj02: body.latitudeGcj02 ?? null,
+  longitudeGcj02: body.longitudeGcj02 ?? null,
+  accuracyAllowanceMaxMeters: body.accuracyAllowanceMaxMeters ?? 200,
+  providerPoiId: body.providerPoiId ?? null,
+  coordinateSource: body.coordinateSource ?? null,
+  revision,
+});
+
+// 完整复位：故障计数 + 清理用例状态（测试进程可能复用同一固件服务）
+const resetFixtureState = () => {
+  resetTestControl();
+  cleanupUsed = false;
+  const index = adminCampaigns.findIndex((row) => row.id === "campaign-clean");
+  if (index === -1) adminCampaigns.push(cleanupCampaign);
+  adminStores.splice(0, adminStores.length, ...JSON.parse(JSON.stringify(initialStoresSnapshot)));
+  createdStores.length = 0;
+  storeSeq = 0;
+  fixtureBrands.splice(0, fixtureBrands.length, ...JSON.parse(JSON.stringify(initialBrandsSnapshot)));
+  brandSeq = 0;
+};
+
+// —— 可注入故障/场景控制（仅测试固件）：POST /__test/control 设置计数器，/__test/reset 复位 ——
+// 计数器语义：每命中一次递减，归零后恢复正常行为，供「失败一次后重试成功」类断言使用。
+const testControl = {
+  meFailures: 0, // /api/me 返回 503（初始恢复失败 → 重试页）
+  expireOnMe: 0, // /api/me 返回 401（编辑中会话过期 → 登录遮罩）
+  csrfRejects: 0, // 管理端变更请求 403 CSRF_INVALID（客户端刷新令牌后单次重试）
+  storeSaveConflicts: 0, // 门店保存 409 REVISION_CONFLICT（冲突对照流程）
+  storeSaveUnauthorized: 0, // 门店保存 401（保存中过期 → 原位重登）
+  storeSaveServiceFailures: 0, // 门店保存 503 DATABASE_BUSY（服务失败保留输入 + 原位重试）
+  storeSaveUnauthorized: 0, // 门店保存 401（保存中过期 → 原位重登）
+  storeSaveUnauthorizedDelayMs: 0, // 门店保存 401 前的延迟（跨标签重认证竞态用例）
+  csrfRejectsDelayMs: 0, // CSRF 403 前的延迟（跨标签重认证竞态用例）
+  cleanupPreviewUnauthorized: 0, // 清理预览 401（预览过期 → 重登 → 手动重试）
+  regionsUnauthorized: 0, // 区域列表 401（门店编辑器区域加载过期）
+  regionsFailures: 0, // 区域列表 503（区域加载失败 → 重试）
+  storeCreateInvalidResponse: 0, // 新建门店已落库但响应不可用（结果对账：内容一致才自动切换）
+  dishRequirementsUnauthorized: 0, // 指派菜品步骤 401（第一段已保存：重试按检查点续跑）
+  logoutDelayMs: 0, // 登出响应延迟（被取代的迟到的登出用例）
+  storeCreateNetworkDrops: 0, // >0 期间新建门店请求一律断连（跨登录迟到的网络失败用例）
+  storeCreateNetworkDropDelayMs: 0, // 断连前的延迟毫秒
+  meDelayMs: 0, // /api/me 延迟毫秒（配合 meDelayRequests 使用）
+  meDelayRequests: 0, // /api/me 延迟响应的剩余请求数（迟到的成功恢复跨登录竞态用例）
+  showCleanupCampaign: 0, // 任务列表包含「已取消的测试任务」行（清理流程用例）
+};
+const resetTestControl = () => {
+  for (const key of Object.keys(testControl)) testControl[key] = 0;
+};
+
 createServer(async (request, response) => {
   if (request.method === "OPTIONS") return send(response, 204, null);
   const url = new URL(request.url, `http://127.0.0.1:${port}`);
@@ -222,7 +301,10 @@ createServer(async (request, response) => {
     const body = await readBody(request); const role = roles[body.username] || "operations_admin";
     return send(response, 200, { user: { id: `admin-${role}`, displayName: body.username === "store" ? "门店负责人" : "测试管理员", role, scopeLabel: role === "store_manager" ? "静安嘉里中心店" : "华东一区", permissions: permissionsFor(role) }, csrfToken: "fixture-csrf-token-000000000000000000000000000000" }, { "Set-Cookie": `adminRole=${role}; Path=/; SameSite=Lax` });
   }
-  if (url.pathname === "/api/admin/auth/logout") return send(response, 204, null, { "Set-Cookie": "adminRole=; Path=/; Max-Age=0" });
+  if (url.pathname === "/api/admin/auth/logout") {
+    if (testControl.logoutDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, testControl.logoutDelayMs));
+    return send(response, 204, null, { "Set-Cookie": "adminRole=; Path=/; Max-Age=0" });
+  }
   if (url.pathname === "/api/auth/login" && request.method === "POST") return send(response, 200, miniSession);
   const miniAuthorized = request.headers.authorization === `Bearer ${miniSession.accessToken}`;
   if (miniAuthorized && url.pathname === "/api/assignments/mine" && request.method === "GET") return send(response, 200, list([
@@ -312,24 +394,98 @@ createServer(async (request, response) => {
   if (miniAuthorized && url.pathname === "/api/questionnaires/secret/drafts/attempt-one/other-records" && request.method === "PUT") { const body = await readBody(request); if (body.revision !== receiptRevision) return send(response, 409, { error: { code: "REVISION_CONFLICT" } }); receiptRevision += 1; return send(response, 200, { revision: receiptRevision, assignmentRevision: 3 }); }
   if (miniAuthorized && url.pathname === "/api/questionnaires/secret/attempt-one/submit" && request.method === "POST") return send(response, 200, { status: "submitted", submittedAt: "2026-07-24T17:30:00+08:00" });
   const role = session(request);
+  // —— 测试控制端点（仅固件）：注入故障场景 / 复位 ——
+  if (url.pathname === "/__test/control" && request.method === "POST") {
+    const body = await readBody(request);
+    for (const [key, value] of Object.entries(body)) if (key in testControl) testControl[key] = Number(value) || 0;
+    return send(response, 200, { ok: true, testControl });
+  }
+  if (url.pathname === "/__test/reset" && request.method === "POST") {
+    resetFixtureState();
+    return send(response, 200, { ok: true });
+  }
   if (url.pathname === "/api/public/client-config") return send(response, 200, { captchaAppId: "2026", tencentMapKey: "fixture-map-key", features: { receiptOcr: true } });
-  if (url.pathname === "/api/me") return role ? send(response, 200, { user: { id: `admin-${role}`, displayName: role === "store_manager" ? "门店负责人" : "测试管理员", role, scopeLabel: role === "store_manager" ? "静安嘉里中心店" : "华东一区", permissions: permissionsFor(role) }, csrfToken: "fixture-csrf-token-000000000000000000000000000000" }) : send(response, 401, { error: { code: "SESSION_EXPIRED", requestId: "fixture-request" } });
+  if (url.pathname === "/api/me") {
+    console.log(`[fixture] me arrive delayReq=${testControl.meDelayRequests}`);
+    if (testControl.meDelayRequests > 0) { testControl.meDelayRequests -= 1; console.log("[fixture] me delayed"); await new Promise((resolve) => setTimeout(resolve, testControl.meDelayMs || 3000)); }
+    if (testControl.meFailures > 0) { testControl.meFailures -= 1; return send(response, 503, { error: { code: "SERVICE_DOWN", message: "服务暂时不可用", requestId: "fixture-request", retryable: true } }); }
+    if (testControl.expireOnMe > 0 && role) { testControl.expireOnMe -= 1; return send(response, 401, { error: { code: "SESSION_EXPIRED", requestId: "fixture-request" } }); }
+    return role ? send(response, 200, { user: { id: `admin-${role}`, displayName: role === "store_manager" ? "门店负责人" : "测试管理员", role, scopeLabel: role === "store_manager" ? "静安嘉里中心店" : "华东一区", permissions: permissionsFor(role) }, csrfToken: "fixture-csrf-token-000000000000000000000000000000" }) : send(response, 401, { error: { code: "SESSION_EXPIRED", requestId: "fixture-request" } });
+  }
   if (!role) return send(response, 401, { error: { code: "SESSION_EXPIRED" } });
+  // 管理端变更请求的可注入 CSRF 拒绝：发生在任何业务写入之前（与生产行为一致），客户端应刷新令牌后单次重试。
+  if (testControl.csrfRejects > 0 && ["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) {
+    testControl.csrfRejects -= 1;
+    if (testControl.csrfRejectsDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, testControl.csrfRejectsDelayMs));
+    return send(response, 403, { error: { code: "CSRF_INVALID", message: "操作未完成，请刷新后重试", requestId: "fixture-request" } });
+  }
   if (url.pathname === "/api/admin/inspector-registrations" && request.method === "GET") return send(response, 200, paged(url, adminRegistrations));
-  if (url.pathname === "/api/admin/brands" && request.method === "GET") return send(response, 200, list([{ id: "brand-one", name: "建新园", active: true, storeCount: 1, revision: 1 }]));if (url.pathname === "/api/admin/regions" && request.method === "GET") return send(response, 200, list([{ id: "11111111-1111-4111-8111-111111111111", name: "上海市", code: "310000", parentId: null, level: 1, active: true, revision: 1 }, { id: "22222222-2222-4222-8222-222222222222", name: "上海市市辖区", code: "310100", parentId: "11111111-1111-4111-8111-111111111111", level: 2, active: true, revision: 1 }, { id: "33333333-3333-4333-8333-333333333333", name: "静安区", code: "310106", parentId: "22222222-2222-4222-8222-222222222222", level: 3, active: true, revision: 1 }, { id: "44444444-4444-4444-8444-444444444444", name: "浦东新区", code: "310115", parentId: "22222222-2222-4222-8222-222222222222", level: 3, active: true, revision: 1 }]));
+  if (url.pathname === "/api/admin/brands" && request.method === "GET") return send(response, 200, list(fixtureBrands));
+  if (url.pathname === "/api/admin/brands" && request.method === "POST") {
+    const body = await readBody(request);
+    if (fixtureBrands.some((brand) => brand.name === body.name)) return send(response, 409, { error: { code: "BRAND_CONFLICT", message: "品牌名称已存在", requestId: "fixture-request" } });
+    brandSeq += 1;
+    const brand = { id: crypto.randomUUID(), name: body.name, active: body.active !== false, storeCount: 0, revision: 0 };
+    fixtureBrands.push(brand);
+    return send(response, 201, { brand });
+  }
+  if (url.pathname === "/api/admin/regions" && request.method === "GET") {
+    if (testControl.regionsUnauthorized > 0) { testControl.regionsUnauthorized -= 1; return send(response, 401, { error: { code: "SESSION_EXPIRED", requestId: "fixture-request" } }); }
+    if (testControl.regionsFailures > 0) { testControl.regionsFailures -= 1; return send(response, 503, { error: { code: "SERVICE_DOWN", message: "服务暂时不可用", requestId: "fixture-request", retryable: true } }); }
+    return send(response, 200, list([{ id: "11111111-1111-4111-8111-111111111111", name: "上海市", code: "310000", parentId: null, level: 1, active: true, revision: 1 }, { id: "22222222-2222-4222-8222-222222222222", name: "上海市市辖区", code: "310100", parentId: "11111111-1111-4111-8111-111111111111", level: 2, active: true, revision: 1 }, { id: "33333333-3333-4333-8333-333333333333", name: "静安区", code: "310106", parentId: "22222222-2222-4222-8222-222222222222", level: 3, active: true, revision: 1 }, { id: "44444444-4444-4444-8444-444444444444", name: "浦东新区", code: "310115", parentId: "22222222-2222-4222-8222-222222222222", level: 3, active: true, revision: 1 }]));
+  }
   if (url.pathname === "/api/admin/regions" && request.method === "POST") { const body = await readBody(request); return send(response, 201, { region: { id: "region-new", name: body.name, code: body.code, active: true, revision: 1 } }); }
   if (url.pathname === "/api/admin/stores" && request.method === "GET") {
     const brandId = url.searchParams.get("brandId");
     const cityRegionId = url.searchParams.get("cityRegionId");
-    const filtered = adminStores.filter((store) => (!brandId || store.brandId === brandId) && (!cityRegionId || store.cityRegionId === cityRegionId));
+    const businessNo = url.searchParams.get("businessNo");
+    const filtered = allStores().filter((store) => (!brandId || store.brandId === brandId) && (!cityRegionId || store.cityRegionId === cityRegionId) && (!businessNo || store.businessNo === businessNo));
     return send(response, 200, paged(url, filtered));
+  }
+  // 新建门店（编辑器恢复流程）：可注入 401/断连场景；成功后进入有状态列表，唯一编号可回查（对账复用）。
+  if (url.pathname === "/api/admin/stores" && request.method === "POST") {
+    const body = await readBody(request);
+    if (testControl.storeCreateNetworkDrops > 0) {
+      if (testControl.storeCreateNetworkDropDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, testControl.storeCreateNetworkDropDelayMs));
+      response.destroy(); // 断连（含浏览器自动重试的每一次尝试）：跨登录的迟到网络失败用例
+      return;
+    }
+    if (testControl.storeSaveUnauthorized > 0) { testControl.storeSaveUnauthorized -= 1; return send(response, 401, { error: { code: "SESSION_EXPIRED", requestId: "fixture-request" } }); }
+    if (testControl.storeSaveServiceFailures > 0) { testControl.storeSaveServiceFailures -= 1; return send(response, 503, { error: { code: "DATABASE_BUSY", message: "服务繁忙，请稍后重试", requestId: "fixture-request", retryable: true } }); }
+    if (allStores().some((store) => store.businessNo === body.businessNo)) return send(response, 409, { error: { code: "STORE_CONFLICT", message: "门店编号已存在", requestId: "fixture-request" } });
+    storeSeq += 1;
+    const store = storeRowFrom(body, `store-created-${storeSeq}`, 1);
+    createdStores.push(store);
+    // 已落库但响应不可用（如网关截断/坏包）：客户端按「结果不确定」走唯一编号对账
+    if (testControl.storeCreateInvalidResponse > 0) { testControl.storeCreateInvalidResponse -= 1; return send(response, 201, { unexpected: true }); }
+    return send(response, 201, { store });
   }
   // 门店/账号/问卷版本详情（Admin 深链接刷新用）：与生产端点同构（{ store }/{ user }/{ version }），
   // 未命中返回 404 + 业务化 message，供前端「不存在或已被删除」恢复态断言。
   const storeDetailMatch = url.pathname.match(/^\/api\/admin\/stores\/([^/]+)$/);
   if (storeDetailMatch && request.method === "GET") {
-    const store = adminStores.find((row) => row.id === storeDetailMatch[1]);
+    const store = allStores().find((row) => row.id === storeDetailMatch[1]);
     if (!store) return send(response, 404, { error: { code: "STORE_NOT_FOUND", message: "门店不存在或已被删除", requestId: "fixture-request" } });
+    return send(response, 200, { store });
+  }
+  // 门店保存（编辑器恢复流程）：可注入 401/断连/409 冲突；冲突后 GET 仍是服务端最新内容（对照来源），
+  // 成功保存推进 revision——同一编辑器再次保存不再 409。
+  const storeUpdateMatch = url.pathname.match(/^\/api\/admin\/stores\/([^/]+)$/);
+  if (storeUpdateMatch && request.method === "PATCH") {
+    const body = await readBody(request);
+    if (testControl.storeSaveUnauthorized > 0) {
+      testControl.storeSaveUnauthorized -= 1;
+      if (testControl.storeSaveUnauthorizedDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, testControl.storeSaveUnauthorizedDelayMs));
+      return send(response, 401, { error: { code: "SESSION_EXPIRED", requestId: "fixture-request" } });
+    }
+    if (testControl.storeSaveServiceFailures > 0) { testControl.storeSaveServiceFailures -= 1; return send(response, 503, { error: { code: "DATABASE_BUSY", message: "服务繁忙，请稍后重试", requestId: "fixture-request", retryable: true } }); }
+    const store = allStores().find((row) => row.id === storeUpdateMatch[1]);
+    if (!store) return send(response, 404, { error: { code: "STORE_NOT_FOUND", message: "门店不存在或已被删除", requestId: "fixture-request" } });
+    if (testControl.storeSaveConflicts > 0 || store.revision !== body.revision) {
+      if (testControl.storeSaveConflicts > 0) testControl.storeSaveConflicts -= 1;
+      return send(response, 409, { error: { code: "REVISION_CONFLICT", message: "内容已更新，请刷新后重试", requestId: "fixture-request" } });
+    }
+    Object.assign(store, storeRowFrom(body, store.id, store.revision + 1));
     return send(response, 200, { store });
   }
   if (url.pathname === "/api/admin/users" && request.method === "GET") {
@@ -344,7 +500,11 @@ createServer(async (request, response) => {
   }
   if (url.pathname === "/api/admin/users" && request.method === "POST") { const body = await readBody(request); return send(response, 201, { user: { id: "user-new", username: body.username, displayName: body.displayName, kind: body.kind } }); }
   if (url.pathname.startsWith("/api/admin/users/") && request.method === "PATCH") { await readBody(request); return send(response, 200, { user: { id: url.pathname.split("/").pop(), kind: "inspector" } }); }
-  if (url.pathname === "/api/admin/campaigns" && request.method === "GET") return send(response, 200, paged(url, adminCampaigns));
+  if (url.pathname === "/api/admin/campaigns" && request.method === "GET") {
+    // 清理用例显式开启后才展示「已取消的测试任务」行，避免影响既有任务列表用例的行集断言
+    const campaigns = testControl.showCleanupCampaign ? adminCampaigns : adminCampaigns.filter((row) => row.id !== "campaign-clean");
+    return send(response, 200, paged(url, campaigns));
+  }
   if (url.pathname === "/api/admin/campaigns" && request.method === "POST") { await readBody(request); return send(response, 201, { campaign: { id: "campaign-two", name: "新建探店任务", businessNo: "JD-NEW-001", storeName: "静安嘉里中心店", startsAt: "2026-07-19T10:00:00Z", dueAt: "2026-07-19T14:00:00Z", questionnaireDeadlineAt: "2026-07-19T20:00:00Z", status: "draft", revision: 1, assignmentCount: 0, overdueCount: 0 } }); }
   if (url.pathname === "/api/admin/campaigns/campaign-one" && request.method === "GET") return send(response, 200, { id: "campaign-one", name: "夏季门店服务品质暗访", storeId: "store-one", storeName: "静安嘉里中心店", startsAt: "2026-07-19T10:00:00Z", dueAt: "2026-07-19T14:00:00Z", questionnaireDeadlineAt: "2026-07-19T20:00:00Z", commonInstruction: "请保持自然就餐，重点观察高峰期服务。", status: "draft", revision: 3, locationVerified: true, overdueCount: 0, assignments: campaignAssignments.map(mergeAssignment) });
   // campaign-two（POST 创建的草稿）：详情可回读（向导创建后 URL replace 为 :id/edit，刷新走这里），
@@ -358,6 +518,38 @@ createServer(async (request, response) => {
     const assignment = { id: `assignment-two-${campaignTwoAssignments.length + 1}`, inspectorId: body.inspectorId, inspectorName: inspector?.displayName || body.inspectorId, questionnaireVersionId: body.questionnaireVersionId, questionnaireName: version ? `${version.name} ${version.versionLabel}` : body.questionnaireVersionId, taskType: body.taskType || "secret", startsAt: body.startsAt, dueAt: body.dueAt, budgetLimit: body.budgetLimit ?? 0, receiptRequired: Boolean(body.receiptRequired), specialInstruction: body.specialInstruction || "", dishRequirements: [], status: "draft", revision: 1 };
     campaignTwoAssignments.push(assignment);
     return send(response, 201, { id: assignment.id, revision: assignment.revision });
+  }
+  // 测试任务清理（super_admin 固件）：预览返回计数（campaign-clean 可清理、campaign-blocked 有正式提交阻断），
+  // 清理校验逐字名称 + revision，成功后把列表行移除（模拟删除）。
+  const cleanupPreviewMatch = url.pathname.match(/^\/api\/admin\/campaigns\/([^/]+)\/cleanup-preview$/);
+  if (cleanupPreviewMatch && request.method === "GET") {
+    if (testControl.cleanupPreviewUnauthorized > 0) { testControl.cleanupPreviewUnauthorized -= 1; return send(response, 401, { error: { code: "SESSION_EXPIRED", requestId: "fixture-request" } }); }
+    if (cleanupPreviewMatch[1] === "campaign-blocked") {
+      return send(response, 200, {
+        campaign: { id: "campaign-blocked", name: "含提交的取消任务", businessNo: "JD-BLOCK-001", status: "cancelled", storeName: "静安嘉里中心店", revision: 1 },
+        counts: { assignments: 2, dishRequirements: 2, checkins: 0, exemptions: 0, attempts: 2, answers: 4, editSessions: 0, editSessionRemovals: 0, evidenceAttachments: 1, receiptAttachments: 1, ocrJobs: 1, dishes: 3, otherRecords: 1, idempotencyKeys: 1 },
+        blockers: [{ code: "SUBMISSIONS_EXIST", message: "任务下已有 1 条正式提交记录（含完整快照），属于业务数据，不能清理" }],
+        cleanupAllowed: false,
+      });
+    }
+    if (cleanupPreviewMatch[1] !== "campaign-clean") return send(response, 404, { error: { code: "CAMPAIGN_NOT_FOUND", message: "探店任务不存在", requestId: "fixture-request" } });
+    return send(response, 200, {
+      campaign: { id: "campaign-clean", name: cleanupUsed ? "已取消的测试任务" : cleanupCampaign.name, businessNo: "JD-CLEAN-001", status: "cancelled", storeName: "静安嘉里中心店", revision: 4 },
+      counts: { assignments: 2, dishRequirements: 2, checkins: 1, exemptions: 1, attempts: 2, answers: 3, editSessions: 1, editSessionRemovals: 0, evidenceAttachments: 2, receiptAttachments: 1, ocrJobs: 1, dishes: 4, otherRecords: 1, idempotencyKeys: 1 },
+      blockers: [],
+      cleanupAllowed: true,
+    });
+  }
+  const cleanupMatch = url.pathname.match(/^\/api\/admin\/campaigns\/([^/]+)\/cleanup$/);
+  if (cleanupMatch && request.method === "POST") {
+    const body = await readBody(request);
+    if (cleanupMatch[1] !== "campaign-clean") return send(response, 409, { error: { code: "SUBMISSIONS_EXIST", message: "任务下已有正式提交记录，不能清理", requestId: "fixture-request" } });
+    if (body.revision !== 4) return send(response, 409, { error: { code: "REVISION_CONFLICT", message: "任务状态已变化，请刷新预览后重新确认", requestId: "fixture-request" } });
+    if (body.confirmName !== "已取消的测试任务") return send(response, 422, { error: { code: "CLEANUP_CONFIRM_MISMATCH", message: "输入的确认名称与任务名称不一致", requestId: "fixture-request" } });
+    cleanupUsed = true;
+    const index = adminCampaigns.findIndex((row) => row.id === "campaign-clean");
+    if (index >= 0) adminCampaigns.splice(index, 1);
+    return send(response, 200, { deleted: true, counts: { assignments: 2, attempts: 2, receiptAttachments: 1, ocrJobs: 1 } });
   }
   if (/^\/api\/admin\/campaigns\/[^/]+$/.test(url.pathname) && request.method === "PATCH") { await readBody(request); return send(response, 200, { campaign: { id: url.pathname.split("/").pop(), name: "夏季门店服务品质暗访", businessNo: "JD-20260719-018", storeName: "静安嘉里中心店", startsAt: "2026-07-19T10:00:00Z", dueAt: "2026-07-19T14:00:00Z", questionnaireDeadlineAt: "2026-07-19T20:00:00Z", status: "draft", revision: 4, assignmentCount: 3, overdueCount: 0 } }); }
   if (/^\/api\/admin\/campaigns\/[^/]+\/assignments$/.test(url.pathname) && request.method === "POST") { await readBody(request); return send(response, 201, { id: "assignment-two", revision: 1 }); }
@@ -377,7 +569,16 @@ createServer(async (request, response) => {
     extendState.set(target.id, { dueAt: body.dueAt ?? previous?.dueAt, questionnaireDeadlineAt: body.questionnaireDeadlineAt ?? previous?.questionnaireDeadlineAt, revision });
     return send(response, 200, { assignment: mergeAssignment(target), campaign: { id: "campaign-one", name: "夏季门店服务品质暗访", businessNo: "JD-20260719-018", storeName: "静安嘉里中心店", startsAt: "2026-07-19T10:00:00Z", dueAt: "2026-07-19T14:00:00Z", questionnaireDeadlineAt: "2026-07-19T20:00:00Z", status: "draft", revision: 3, assignmentCount: campaignAssignments.length, overdueCount: 0 } });
   }
-  if (/^\/api\/admin\/assignments\/[^/]+\/dish-requirements$/.test(url.pathname) && request.method === "PUT") { await readBody(request); return send(response, 200, { id: url.pathname.split("/")[4], revision: 2, status: "draft" }); }
+  // 指派本体保存（编辑器检查点用例）：乐观锁推进并回显新 revision
+  if (/^\/api\/admin\/assignments\/[^/]+$/.test(url.pathname) && request.method === "PATCH") {
+    const body = await readBody(request);
+    return send(response, 200, { id: url.pathname.split("/").pop(), revision: (Number(body.revision) || 0) + 1, status: "draft" });
+  }
+  if (/^\/api\/admin\/assignments\/[^/]+\/dish-requirements$/.test(url.pathname) && request.method === "PUT") {
+    const body = await readBody(request);
+    if (testControl.dishRequirementsUnauthorized > 0) { testControl.dishRequirementsUnauthorized -= 1; return send(response, 401, { error: { code: "SESSION_EXPIRED", requestId: "fixture-request" } }); }
+    return send(response, 200, { id: url.pathname.split("/")[4], revision: Number(body.revision) || 0, status: "draft" });
+  }
   if (url.pathname === "/api/admin/assignments/assignment-one/check-in-exemptions" && request.method === "GET") return send(response, 200, list([{ id: "exemption-one", status: "active", reason: "商场室内定位漂移", grantedAt: "2026-07-19T09:50:00Z", validUntil: "2026-07-19T10:20:00Z", revision: 1 }]));
   if (url.pathname === "/api/admin/question-categories" && request.method === "GET") return send(response, 200, list([{ id: "cat-environment", code: "environment", name: "环境卫生", sortOrder: 1, active: true, revision: 1 }, { id: "cat-service", code: "service", name: "为客服务", sortOrder: 2, active: true, revision: 1 }, { id: "cat-product", code: "product", name: "产品品质", sortOrder: 3, active: true, revision: 1 }]));
   if (url.pathname === "/api/admin/stats/dashboard" && request.method === "GET") return send(response, 200, {
@@ -466,7 +667,7 @@ createServer(async (request, response) => {
     const filtered = adminSubmissions.filter((row) =>
       contains(row.storeName, "storeName") && contains(row.regionName, "regionName") && contains(row.taskName, "campaignName") &&
       contains(row.inspectorName, "inspectorName") && contains(row.businessNo, "businessNo") &&
-      (!query.get("brandId") || query.get("brandId") === "brand-one") &&
+      (!query.get("brandId") || query.get("brandId") === "1a6fd7a0-1111-4111-8111-000000000001") &&
       (!query.get("status") || row.status === query.get("status")));
     // 仅 submissions 额外带 total（全量计数，供「共 X 条」展示）
     return send(response, 200, { ...paged(url, filtered), total: filtered.length });
