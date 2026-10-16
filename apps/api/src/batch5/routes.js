@@ -281,13 +281,19 @@ export function registerBatch5Routes(app, { pool, cos }) {
     return {
       taskName: submission.task_name, storeName: submission.store_name, inspectorName: submission.inspector_name, submittedAt: submission.submitted_at.toISOString(),
       questionnaireName: submission.questionnaire_name, versionLabel: `V${submission.version_number}`, totalScore: Number(submission.total_score), scoreRate: percent(submission.total_score, submission.max_score), issueCount: Number(submission.issue_count),
-      highlight: submission.other_snapshot_json.highlight, suggestion: submission.other_snapshot_json.suggestion || null,
+      // 高亮在极早期快照里可能缺失/null：详情契约要求非空字符串，按空串如实呈现（不伪造内容）
+      highlight: submission.other_snapshot_json?.highlight ?? "", suggestion: submission.other_snapshot_json?.suggestion || null,
       receiptComparison: { receipts, ocrCandidates: candidates, finalDishes, receiptTotals: { recognizedCents, finalCents, differenceCents: recognizedCents === null || finalCents === null ? null : finalCents - recognizedCents }, differences },
-      dishes: submission.dish_snapshot_json.map((dish) => ({ id: dish.id, requirementId: dish.requirement_id, plannedName: dish.planned_name, actualName: dish.actual_name, quantity: dish.quantity || dish.planned_quantity, unitPriceCents: dish.unit_price_cents, lineTotalCents: dish.line_total_cents, fulfillmentStatus: dish.fulfillment_status, source: dish.source, manuallyModified: dish.manually_modified, priceDerived: dish.price_derived, reviewFields: dish.review_fields || [] })),
+      // 菜品 DTO 与 batch4 dishView 同构：evaluation/fullySatisfied 是契约必填（evaluation 可空），
+      // 快照来自 dish_records 全行 JSON，缺失/null 属历史形态——null 如实保留，布尔缺失按 false（保守方向），绝不把未评价菜品标成满意
+      dishes: submission.dish_snapshot_json.map((dish) => ({ id: dish.id, requirementId: dish.requirement_id ?? null, plannedName: dish.planned_name ?? null, actualName: dish.actual_name ?? null, quantity: Number(dish.quantity || dish.planned_quantity || 1), unitPriceCents: dish.unit_price_cents ?? null, lineTotalCents: dish.line_total_cents ?? null, fulfillmentStatus: dish.fulfillment_status, substitutionReason: dish.substitution_reason ?? null, unavailableReason: dish.unavailable_reason ?? null, evaluation: dish.evaluation ?? null, fullySatisfied: Boolean(dish.fully_satisfied), source: dish.source, manuallyModified: Boolean(dish.manually_modified), priceDerived: Boolean(dish.price_derived), reviewFields: dish.review_fields || [], required: Boolean(dish.required_snapshot), allowSubstitution: Boolean(dish.allow_substitution_snapshot) })),
       questions: answers.map((answer) => {
         const question = questionById.get(answer.question_id);
         const attachments = evidenceByQuestion.get(answer.question_id) || [];
-        return { id: answer.question_id, number: question?.question_number || 0, text: question?.text || "题目快照不可用", answer: answer.answer, issueRemark: answer.issue_remark, previewUrls: attachments.filter((item) => item.type === "image").map((item) => item.previewUrl), attachments };
+        return { id: answer.question_id, number: question?.question_number || 0, text: question?.text || "题目快照不可用", answer: answer.answer,
+          // issueRemark 契约只收 string/缺省：历史快照里的 null（及空串）一律省略键，不得分备注仍原样带出
+          ...(answer.issue_remark ? { issueRemark: String(answer.issue_remark) } : {}),
+          previewUrls: attachments.filter((item) => item.type === "image").map((item) => item.previewUrl), attachments };
       }),
       auditLogs: audits.rows.map((audit) => ({ id: audit.id, createdAt: audit.created_at.toISOString(), actorName: audit.display_name || "系统", actionLabel: auditActionLabel(audit.action) })),
     };

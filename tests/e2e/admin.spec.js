@@ -203,6 +203,8 @@ test("提交筛选、分类得分、菜品和审计详情", async ({ page }, tes
   await page.getByRole("button", { name: "查看详情" }).click();
   await expect(page.getByText("环境卫生")).toBeVisible();
   await expect(page.getByText("招牌烤鸭").first()).toBeVisible();
+  // 详情契约回归：真实响应形态（售罄菜品 evaluation=null、fullySatisfied=false、得分题无备注键）
+  // 曾因 dishes DTO 缺字段/备注 null 导致整页契约失败——这里必须渲染出菜品记录与导出入口，而非报错
   await expect(page.getByText("消费小票与最终菜品比对")).toBeVisible();
   await expect(page.getByText("小票识别原始结果")).toBeVisible();
   await expect(page.getByText("探店员最终菜品")).toBeVisible();
@@ -212,6 +214,11 @@ test("提交筛选、分类得分、菜品和审计详情", async ({ page }, tes
   await expect(page.getByText("价格已人工核对")).toBeVisible();
   await expect(page.getByText("提交审计记录")).toBeVisible();
   await expect(page.locator(".submission-question-list article")).toHaveCount(50);
+  // 售罄菜品按真实快照渲染：状态「已售罄」、未评价菜品不冒充满意
+  await expect(page.locator(".dish-result-list article", { hasText: "桂花糖藕" })).toContainText("已售罄");
+  await expect(page.locator(".dish-result-list article", { hasText: "桂花糖藕" })).toContainText("未填写评价");
+  // 导出控件在详情契约通过后可见（此前被契约失败整体遮蔽）
+  await expect(page.getByRole("button", { name: /导出这份问卷 Excel/ })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("admin-submission-detail-full.png"), fullPage: true });
   await page.locator(".receipt-comparison").screenshot({ path: testInfo.outputPath("admin-receipt-comparison.png") });
 });

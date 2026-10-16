@@ -10,10 +10,14 @@
 //   - 分类汇总/总评必须与提交落库的权威 total_score/max_score 对账，停用题残留作答等
 //     分类外得分单列调整行说明，不静默吞差异。
 import ExcelJS from "exceljs";
+import { readFileSync } from "node:fs";
 import { applyScoreWipe } from "../../../packages/domain/index.js";
 import { XLSX_CONTENT_TYPE } from "./dashboard-export.js";
 
 export { XLSX_CONTENT_TYPE };
+
+// 模板品牌 Logo（公开的企业标识，仅样式资产、不含业务数据）；缺失时静默降级为无 Logo
+const LOGO_PATH = new URL("./assets/jiangdao-logo.png", import.meta.url);
 
 const exportError = (code, message) => Object.assign(new Error(message), { code });
 export const EXPORT_SUBMISSION_REQUIRED = "EXPORT_SUBMISSION_REQUIRED";
@@ -160,49 +164,104 @@ export function buildSubmissionExportModel({ submission, scoreRows, scoreSource,
   };
 }
 
-// —— 样式常量（对标参考 PDF：绿色表头、黄色小计、红色扣分/清零、细边框）——
-const GREEN_FILL = { type: "pattern", pattern: "solid", fgColor: { argb: "FFC6E0B4" } };
-const YELLOW_FILL = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFF2CC" } };
-const LABEL_FILL = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEFF1F3" } };
-const RED_FONT = { color: { argb: "FFC00000" } };
+// —— 样式常量（对标用户 XLSX 参考模板：幼圆字体、浅绿表头、浅黄小计、浅桃总评、
+//      红色扣分/清零提示、蓝色探员原始备注、黑色细边框 + 区块中粗描边）——
+const TEMPLATE_FONT = "幼圆";
+const HEADER_GREEN = { type: "pattern", pattern: "solid", fgColor: { argb: "FFCCFFCC" } };
+const SUBTOTAL_YELLOW = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFFFCC" } };
+const OVERALL_PEACH = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFCE4D6" } };
+const RED_FONT = { color: { argb: "FFFF0000" } };
+const BLUE_FONT = { color: { argb: "FF0070C0" } };
 const BOLD = { bold: true };
-const THIN = { style: "thin", color: { argb: "FF8EA08E" } };
-const BOX = { top: THIN, bottom: THIN, left: THIN, right: THIN };
+const THIN = { style: "thin", color: { argb: "FF000000" } };
+const MEDIUM = { style: "medium", color: { argb: "FF000000" } };
+// 模板品牌（公开的企业署名/页脚文案，非业务数据；与参考模板 odd/even 页脚一一对应）
+const BRAND = Object.freeze({
+  companyName: "北京将道管理咨询服务有限公司",
+  footerOdd: "将道价值观：诚信、敬业、利他、传承、创新、不器",
+  footerEven: "将道行为准则：温、良、恭、俭、让",
+});
+
+// 物理网格 A:K（列宽对标参考模板）；逻辑六列：A=评估维度 B=序号 C:H=评估说明 I=分值 J=扣分 K=得分
+const GRID_WIDTHS = [11.7, 6.7, 7.3, 8.8, 11.7, 16.2, 16.5, 8.8, 8.8, 8.8, 8.8];
+const GRID_COLUMNS = GRID_WIDTHS.length;
+const COL_CATEGORY = 1;
+const COL_LABEL = 2;
+const COL_TEXT = 3;
+const COL_TEXT_END = 8;
+const COL_MAX = 9;
+const COL_DEDUCTION = 10;
+const COL_AWARDED = 11;
+
+const cellBorder = (overrides = {}) => {
+  const border = { top: THIN, bottom: THIN, left: THIN, right: THIN };
+  for (const [side, style] of Object.entries(overrides)) {
+    if (style === null) delete border[side]; // null = 该侧无边框（如信息值单元格只留下划线）
+    else border[side] = style;
+  }
+  return border;
+};
 const wrapStyle = { vertical: "middle", wrapText: true };
 const centerStyle = { vertical: "middle", horizontal: "center", wrapText: true };
+const rightStyle = { vertical: "middle", horizontal: "right", wrapText: true };
 
-const decorate = (sheet, rowNumber, columns, { fill, font, alignment } = {}) => {
-  for (let column = 1; column <= columns; column += 1) {
-    const cell = sheet.getRow(rowNumber).getCell(column);
-    cell.border = BOX;
-    if (fill) cell.fill = fill;
-    if (font) cell.font = font;
-    if (alignment) cell.alignment = alignment;
+// 统一写格：默认细边框 + 幼圆 10 号；显式边框键覆盖为 medium 等样式；
+// border === false 表示完全无边框（参考模板的标题/信息标签无任何边框）
+const setCell = (sheet, rowNumber, column, value, { fill, font, alignment, border } = {}) => {
+  const cell = sheet.getRow(rowNumber).getCell(column);
+  cell.value = value;
+  if (border !== false) cell.border = cellBorder(border);
+  cell.font = { name: TEMPLATE_FONT, size: 10, ...(font ?? {}) };
+  if (fill) cell.fill = fill;
+  if (alignment) cell.alignment = alignment;
+  return cell;
+};
+// 区间风格化（合并区域的从属格也要有边框/填充，LibreOffice 才画得完整）
+const styleRange = (sheet, rowNumber, columnStart, columnEnd, options = {}) => {
+  for (let column = columnStart; column <= columnEnd; column += 1) setCell(sheet, rowNumber, column, null, options);
+};
+// 区块描边：给 [rowStart,rowEnd]×[columnStart,columnEnd] 的外沿加 medium 边（内沿仍是 thin）
+const outlineBlock = (sheet, rowStart, rowEnd, columnStart, columnEnd) => {
+  for (let row = rowStart; row <= rowEnd; row += 1) {
+    sheet.getRow(row).getCell(columnStart).border = cellBorder({ ...(sheet.getRow(row).getCell(columnStart).border ?? {}), left: MEDIUM });
+    sheet.getRow(row).getCell(columnEnd).border = cellBorder({ ...(sheet.getRow(row).getCell(columnEnd).border ?? {}), right: MEDIUM });
+  }
+  for (let column = columnStart; column <= columnEnd; column += 1) {
+    sheet.getRow(rowStart).getCell(column).border = cellBorder({ ...(sheet.getRow(rowStart).getCell(column).border ?? {}), top: MEDIUM });
+    sheet.getRow(rowEnd).getCell(column).border = cellBorder({ ...(sheet.getRow(rowEnd).getCell(column).border ?? {}), bottom: MEDIUM });
   }
 };
 
 // —— 长文本换行拆分：Excel 单行高上限 409.5 磅，长说明必须拆成多行展示，绝不截断 ——
-// 每行可容纳的中文字符数按「列宽 ÷ 2」保守估算；wrapSegments 把文本切成若干段（每格一段），
-// 段内保留显式换行，超长段落按行硬切，保证任何文本都不超过单行高上限且内容零丢失。
+// wrapSegments 把文本切成若干段（每格一段），段内保留显式换行，超长段落按行硬切，内容零丢失。
 const LINE_HEIGHT = 15;
 const MAX_ROW_HEIGHT = 400;
-// 行高估算的字数折减系数（相对换行拆分用的每行字数）
-const HEIGHT_WIDTH_FACTOR = 0.55;
-const QUESTION_CHARS_PER_LINE = 26; // C 列宽 58
-// 扣分说明/页脚走 C:G 合并单元格：LibreOffice 对合并单元格的换行文本会按固定行数截断（与行高无关），
-// 因此这两处按单行长度（≈44 个中文字符）切段、每段独占一行，任何引擎下都完整可见、零截断
-const NOTE_CHARS_PER_LINE = 44;
-const wrapSegments = (text, charsPerLine, maxLinesPerRow) => {
+// 宽度度量：全角/中日韩字符按 2 个宽度单位、半角按 1 个单位（对齐 Excel 列宽单位），
+// 按码点遍历（emoji 等代理对算一个字形）；行高估算与换行切段都以宽度单位计——
+// 「A-环境卫生」这类半半全全混合标签才不会被高估
+const textWidthUnits = (text) => {
+  let sum = 0;
+  for (const ch of String(text ?? "")) sum += (ch.codePointAt(0) ?? 0) > 255 ? 2 : 1;
+  return sum;
+};
+// C:H 合计列宽 69.3 单位：切段保守取 30 个中文字符（60 单位），即使 LibreOffice 回退字体
+// 度量偏宽 ~15%（60×1.15≈69）仍单行呈现——参考模板风格的常规短题恒为 20 磅单行
+const QUESTION_CHARS_PER_LINE = 30;
+// 扣分说明/页脚走 C:K 合并单元格（合计列宽 86.9 单位；15% 度量放大约 75 单位 → 37 个中文字符）
+const NOTE_CHARS_PER_LINE = 37;
+export const wrapSegments = (text, charsPerLine, maxLinesPerRow) => {
   const perRow = charsPerLine * maxLinesPerRow;
   const segments = [];
   let current = "";
   let currentLines = 0;
   const pushCurrent = () => { if (current) { segments.push(current); current = ""; currentLines = 0; } };
   for (const paragraph of String(text ?? "").split("\n")) {
-    const lines = Math.max(1, Math.ceil(paragraph.length / charsPerLine));
+    if (paragraph === "") { pushCurrent(); segments.push(""); continue; } // 空行独占一段，保住前导/连续/尾随换行（零丢失）
+    const lines = Math.max(1, Math.ceil(textWidthUnits(paragraph) / (charsPerLine * 2)));
     if (lines > maxLinesPerRow) {
       pushCurrent();
-      for (let offset = 0; offset < paragraph.length; offset += perRow) segments.push(paragraph.slice(offset, offset + perRow));
+      const codePoints = Array.from(paragraph); // 按码点切段：绝不劈开 emoji 等代理对（UTF-16 下标切分会产生 U+FFFD）
+      for (let offset = 0; offset < codePoints.length; offset += perRow) segments.push(codePoints.slice(offset, offset + perRow).join(""));
       continue;
     }
     if (currentLines + lines > maxLinesPerRow) pushCurrent();
@@ -212,247 +271,411 @@ const wrapSegments = (text, charsPerLine, maxLinesPerRow) => {
   pushCurrent();
   return segments.length ? segments : [""];
 };
-const rowHeightFor = (text, charsPerLine) => {
-  // 行高按「可用字数 × 0.55」保守估算：不同渲染引擎（Excel/WPS/LibreOffice）的中文字体度量差异很大
-  // （LibreOffice 回退字体行高约为 Excel 的 1.4 倍），行高必须按最不利引擎预留，任何引擎下都不视觉截断
-  const lines = String(text ?? "").split("\n").reduce((sum, segment) => sum + Math.max(1, Math.ceil(segment.length / (charsPerLine * HEIGHT_WIDTH_FACTOR))), 0) || 1;
+// 行高估算：capacityUnits 为该单元格每行的可容纳宽度单位（≈Excel 列宽）。切段单元格的每段
+// 保证 ≤ 切段容量（本身含保守余量），短文本恒为参考模板的 20 磅单行；纯换行单元格传入
+// 略小于真实列宽的容量（如 A 列 11.7 传 10）留字体度量余量
+const rowHeightFor = (text, capacityUnits) => {
+  const lines = String(text ?? "").split("\n").reduce((sum, segment) => sum + Math.max(1, Math.ceil(textWidthUnits(segment) / Math.max(1, capacityUnits))), 0) || 1;
   return Math.min(MAX_ROW_HEIGHT, Math.max(20, lines * LINE_HEIGHT + 5));
 };
 
-// 扣分说明行：清零分类先给触发与结果，再逐题列出扣分与探员原始备注（不合并、不截断）
-const deductionExplanationLines = (category) => {
-  const lines = [];
+// 分类字母编号：已知分类固定映射（产品→Q、服务→S、环境→C，与参考模板一致）。先为清单内出现的
+// 已知分类占住固定字母，再为自定义分类按 A..Z 顺序取首个未用字母——已知分类无论排在第几位都拿到
+// 固定字母（如 environment 永远是 C），自定义分类确定性且绝不与已分配字母冲突；
+// 极端超过 26 个分类时回退 X1/X2…，仍保证确定且不冲突。
+const KNOWN_CATEGORY_LETTERS = Object.freeze({ product: "Q", service: "S", environment: "C" });
+const LETTER_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+export function assignCategoryLetters(categories) {
+  const reserved = new Set(categories.map((category) => KNOWN_CATEGORY_LETTERS[category.code]).filter(Boolean));
+  const used = new Set(reserved);
+  return categories.map((category, index) => {
+    const known = KNOWN_CATEGORY_LETTERS[category.code];
+    if (known && reserved.has(known)) return known;
+    const letter = LETTER_ALPHABET.split("").find((candidate) => !used.has(candidate)) ?? `X${index + 1}`;
+    used.add(letter);
+    return letter;
+  });
+}
+
+// 清零提示行：仅当真实问卷配置了清零题（is_score_wipe）时展示，绝不从样例文案推断清零规则。
+// 未触发 → 静态规则说明；触发 → 给出触发题、清零结果与清零前合计（= scored 题满分之和，全被清零扣除）。
+// 触发题一律用导出表内可见的分类编号（如 Q3/C20），便于在成品里对照查找
+const wipeNoteFor = (category, labelByQuestionId) => {
+  const labelOf = (row) => labelByQuestionId.get(row.questionId) ?? `第 ${row.number} 题`;
   if (category.wiped && category.wipeQuestion) {
-    // 清零前合计 = 该分类原始作答的应得分数（scored 题满分、unscored 题 0 分），全被清零扣除
     const preWipe = category.rows.reduce((sum, row) => sum + (row.answer === "scored" ? row.maxScore : 0), 0);
-    lines.push(`清零：第 ${category.wipeQuestion.number} 题「${category.wipeQuestion.text}」被判不得分，本分类全部题目按 0 分计（清零前合计 ${preWipe} 分不计）。`);
+    return { triggered: true, text: `清零：${labelOf(category.wipeQuestion)}「${category.wipeQuestion.text}」被判不得分，此大项分数直接清零（清零前合计 ${preWipe} 分不计）。` };
   }
-  for (const row of category.rows.filter((item) => item.deduction > 0)) {
-    lines.push(`第 ${row.number} 题「${row.text}」扣 ${row.deduction} 分${row.remark ? `——探员备注：${row.remark}` : ""}。`);
-  }
-  return lines.length ? lines : ["无扣分"];
+  const configured = category.rows.find((row) => row.wipeTrigger);
+  if (configured) return { triggered: false, text: `${labelOf(configured)} 被判不得分时，此大项分数直接清零。` };
+  return null;
 };
+
+// 扣分说明块行：每条扣分一行（B=题号、C:K=说明）；有探员原始备注时蓝色原样展示，
+// 无备注则简短标注扣分值——绝不编造说明文字；块不足 3 行时保留空白行（与参考模板一致，便于手写补记）
+const deductionBlockLines = (category, labelByQuestionId) => category.rows
+  .filter((row) => row.deduction > 0)
+  .map((row) => {
+    const remark = row.remark;
+    return {
+      label: labelByQuestionId.get(row.questionId) ?? "",
+      segments: wrapSegments(remark || `扣 ${row.deduction} 分`, NOTE_CHARS_PER_LINE, 1),
+      color: remark ? BLUE_FONT : null,
+    };
+  });
 
 export async function buildSubmissionWorkbook(model) {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "汇盈探店管理台";
   workbook.created = new Date();
   const meta = model.meta;
-  const sheet = workbook.addWorksheet("暗访评估表", { pageSetup: { paperSize: 9, orientation: "portrait", fitToPage: true, fitToWidth: 1, fitToHeight: 0, horizontalCentered: true, margins: { left: 0.4, right: 0.4, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 } } });
-  sheet.columns = [{ width: 14 }, { width: 7 }, { width: 58 }, { width: 12 }, { width: 9 }, { width: 9 }, { width: 9 }];
-
-  // —— 表头：报表标题/问卷/版本 + 品牌/门店/区域/任务/探店员/到店与提交时间 ——
-  const title = `${meta.questionnaireName || "神秘顾客暗访"}·暗访评估表（${meta.versionLabel}）`;
-  sheet.mergeCells("A1:G1");
-  sheet.getCell("A1").value = title;
-  sheet.getCell("A1").font = { bold: true, size: 15 };
-  sheet.getCell("A1").alignment = { horizontal: "center", vertical: "middle", wrapText: true };
-  // 15pt 字号的行高按 20pt/行预留，长问卷标题换行不截断
-  sheet.getRow(1).height = Math.max(26, Math.ceil(title.length / 44) * 20 + 6);
-  // 信息行：A=标签1 / B:C=值1 / D=标签2 / E:G=值2，两列布局；长值换行不截断
-  const infoRows = [
-    ["品牌", dash(meta.brandName), "门店", dash(meta.storeName)],
-    ["区域", dash(meta.regionName), "探店员", dash(meta.inspectorName)],
-    ["任务编号", dash(meta.businessNo), "任务名称", dash(meta.taskName)],
-    ["到店时间", formatShanghaiDateTime(meta.visitAt) || "未记录", "提交时间", formatShanghaiDateTime(meta.submittedAt) || "未记录"],
-    ["问卷版本", meta.versionLabel, "不得分题数", `${meta.issueCount} 题`],
-  ];
-  let row = 1;
-  for (const [label1, value1, label2, value2] of infoRows) {
-    row += 1;
-    sheet.getCell(`A${row}`).value = label1;
-    sheet.mergeCells(`B${row}:C${row}`);
-    sheet.getCell(`B${row}`).value = value1;
-    sheet.getCell(`D${row}`).value = label2;
-    sheet.mergeCells(`E${row}:G${row}`);
-    sheet.getCell(`E${row}`).value = value2;
-    decorate(sheet, row, 7);
-    sheet.getCell(`A${row}`).alignment = centerStyle;
-    sheet.getCell(`D${row}`).alignment = centerStyle;
-    sheet.getCell(`B${row}`).alignment = wrapStyle; // 长品牌/区域/任务编号换行
-    sheet.getCell(`E${row}`).alignment = wrapStyle; // 长门店/探店员/任务名称换行
-    sheet.getRow(row).height = Math.max(rowHeightFor(value1, 29), rowHeightFor(value2, 12));
+  // 页眉右侧公司署名 + 奇偶页脚品牌文案（ExcelJS 不支持页眉图片 &G，Logo 用工作表左上角真实浮动图片呈现）
+  const headerFooter = {
+    differentOddEven: true,
+    oddHeader: `&R&"${TEMPLATE_FONT}"&10&B&K7F7F7F${BRAND.companyName}`,
+    evenHeader: `&R&"${TEMPLATE_FONT}"&10&B&K7F7F7F${BRAND.companyName}`,
+    oddFooter: `&L&"${TEMPLATE_FONT}"&10&B&K7F7F7F${BRAND.footerOdd}`,
+    evenFooter: `&L&"${TEMPLATE_FONT}"&10&B&K7F7F7F${BRAND.footerEven}`,
+  };
+  const sheet = workbook.addWorksheet("暗访评估表", {
+    pageSetup: { paperSize: 9, orientation: "portrait", fitToPage: true, fitToWidth: 1, fitToHeight: 0, horizontalCentered: true, margins: { left: 0.25, right: 0.25, top: 0.75, bottom: 0.75, header: 0.3, footer: 0.3 } },
+    headerFooter,
+    properties: { defaultRowHeight: 20 }, // 参考模板默认行高 20
+  });
+  sheet.columns = GRID_WIDTHS.map((width) => ({ width }));
+  // 模板 Logo（约 51.5×40.2pt ≈ 69×54px）：锚定 A1 左上角，随工作表对普通用户可见、可打印
+  try {
+    const imageId = workbook.addImage({ buffer: readFileSync(LOGO_PATH), extension: "png" });
+    sheet.addImage(imageId, { tl: { col: 0, row: 0 }, ext: { width: 69, height: 54 } });
+  } catch {
+    // Logo 资产缺失时静默降级（导出流程不因此失败）
   }
 
-  // —— 分类成绩块（动态分类；原始分与得分率分列；清零分类在说明列显式标注）——
-  row += 2;
-  sheet.getCell(`A${row}`).value = "分类成绩";
-  sheet.getCell(`B${row}`).value = "满分";
-  sheet.getCell(`C${row}`).value = "得分（原始）";
-  sheet.getCell(`D${row}`).value = "得分率(%)";
-  sheet.mergeCells(`E${row}:G${row}`);
-  sheet.getCell(`E${row}`).value = "计分说明";
-  decorate(sheet, row, 7, { fill: LABEL_FILL, font: BOLD, alignment: centerStyle });
-  for (const category of model.categories) {
-    row += 1;
-    const note = category.wiped && category.wipeQuestion ? `清零：第 ${category.wipeQuestion.number} 题判定不得分，本分类按 0 分计` : "";
-    sheet.getCell(`A${row}`).value = category.name;
-    sheet.getCell(`A${row}`).alignment = wrapStyle; // 长分类名在窄 A 列内换行
-    sheet.getCell(`B${row}`).value = category.sumMax;
-    sheet.getCell(`C${row}`).value = category.sumAwarded;
-    sheet.getCell(`D${row}`).value = category.rate ?? "—";
-    sheet.mergeCells(`E${row}:G${row}`);
-    sheet.getCell(`E${row}`).value = note;
-    decorate(sheet, row, 7);
-    sheet.getCell(`E${row}`).alignment = wrapStyle;
-    if (category.wiped) sheet.getCell(`E${row}`).font = RED_FONT;
-    // 行高同时覆盖计分说明与分类名（A 列宽 14 ≈ 6 个中文字符/行）
-    sheet.getRow(row).height = Math.max(rowHeightFor(note, 12), rowHeightFor(category.name, 6));
+  const letters = assignCategoryLetters(model.categories);
+  const labelByQuestionId = new Map();
+  for (const [index, category] of model.categories.entries()) {
+    for (const [questionIndex, question] of category.rows.entries()) labelByQuestionId.set(question.questionId, `${letters[index]}${questionIndex + 1}`);
   }
+
+  // —— 表头（对标参考模板）：标题行 + 品牌/门店两列信息（值带下划线）+ 右上紧凑分项成绩/总评矩阵 ——
+  // 写入纪律：ExcelJS 在 mergeCells 之后再写从属格会把主格值/样式冲掉——因此所有合并区域都是
+  // 「先写满值与样式、最后才 merge」，绝不写已合并的格子。
+  // 参考模板中标题与信息标签完全无边框，信息值只有下边框。
+  const title = `神秘顾客暗访评估表（${meta.questionnaireName || "问卷"}·${meta.versionLabel}）`;
+  const mergeRowAfterWrite = (rowNumber, columnStart, columnEnd) => sheet.mergeCells(rowNumber, columnStart, rowNumber, columnEnd);
+  setCell(sheet, 1, 1, title, { border: false, font: { size: 16, ...BOLD }, alignment: { horizontal: "center", vertical: "middle", wrapText: true } });
+  mergeRowAfterWrite(1, 1, GRID_COLUMNS);
+  // 16pt 字号的行高按 22pt/行预留；行高同时容纳左上角浮动 Logo（约 40.5pt）
+  sheet.getRow(1).height = Math.max(42, Math.ceil(title.length / 44) * 22 + 6);
+  sheet.getRow(2).height = 6;
+
+  const visitDateLabel = formatShanghaiDate(meta.visitAt)
+    || (formatShanghaiDate(meta.submittedAt) ? `${formatShanghaiDate(meta.submittedAt)}（提交日期）` : "未记录");
+  // 暗访时段：只用已落库的真实打卡时刻（Asia/Shanghai），没有打卡绝不臆测「午餐/晚餐」
+  const visitPeriod = meta.visitAt ? formatShanghaiDateTime(meta.visitAt)?.slice(11, 16) || "未记录" : "未记录";
+  // 值单元格只留下边框 = 参考模板的信息下划线；标签 11 号无边框、值 11 号居中
+  const infoUnderline = { top: null, left: null, right: null, bottom: THIN };
+  const infoRow = (rowNumber, label1, value1, chars1, label2, value2, chars2) => {
+    setCell(sheet, rowNumber, 1, label1, { border: false, font: { size: 11, ...BOLD }, alignment: { vertical: "middle" } });
+    setCell(sheet, rowNumber, 2, value1, { font: { size: 11 }, alignment: centerStyle, border: infoUnderline });
+    setCell(sheet, rowNumber, 3, null, { border: infoUnderline });
+    mergeRowAfterWrite(rowNumber, 2, 3);
+    setCell(sheet, rowNumber, 5, label2, { border: false, font: { size: 11, ...BOLD }, alignment: { vertical: "middle" } });
+    setCell(sheet, rowNumber, 6, value2, { font: { size: 11 }, alignment: centerStyle, border: infoUnderline });
+    sheet.getRow(rowNumber).height = Math.max(rowHeightFor(String(value1), chars1), rowHeightFor(String(value2), chars2), 20);
+  };
+
+  // —— 右上分项成绩/总评矩阵：分类每 4 个一排横向展示（3 分类时与参考模板完全一致，H:J+K），
+  //      数值为百分制得分率；总评为系统权威 total/max 得分率（红字浅桃底）——
+  const MATRIX_PAIR_CAPACITY = 4;
+  const pairCount = Math.max(1, Math.ceil(model.categories.length / MATRIX_PAIR_CAPACITY));
+  const matrixHeaderRow = 3;
+  // 矩阵实际起点列随分类数左扩（4/5 分类从 G 起），表头合并与外沿描边必须覆盖真实宽度
+  const matrixStartColumn = 11 - Math.min(model.categories.length, MATRIX_PAIR_CAPACITY);
+  const matrixHeaderOptions = { alignment: centerStyle, font: { size: 11, ...BOLD } };
+  setCell(sheet, matrixHeaderRow, matrixStartColumn, "分项成绩", matrixHeaderOptions);
+  for (let column = matrixStartColumn + 1; column <= 10; column += 1) setCell(sheet, matrixHeaderRow, column, null, matrixHeaderOptions);
+  mergeRowAfterWrite(matrixHeaderRow, matrixStartColumn, 10);
+  setCell(sheet, matrixHeaderRow, 11, "总评", matrixHeaderOptions);
+  const overallOptions = { fill: OVERALL_PEACH, alignment: centerStyle, font: { size: 11, ...BOLD, ...RED_FONT } };
+  // 纵向合并的总评格：先合并，再写主格值/样式，从属格只补样式（绝不写从属格的值——ExcelJS 会冲掉主格值）
+  sheet.mergeCells(4, 11, 3 + 2 * pairCount, 11);
+  setCell(sheet, 4, 11, model.totals.overallRate ?? "—", overallOptions);
+  const styleOnlyCell = (rowNumber, column, options) => {
+    const cell = sheet.getRow(rowNumber).getCell(column);
+    if (options.fill) cell.fill = options.fill;
+    if (options.font) cell.font = { name: TEMPLATE_FONT, size: 10, ...options.font };
+    if (options.alignment) cell.alignment = options.alignment;
+  };
+  for (let extra = 5; extra <= 3 + 2 * pairCount; extra += 1) styleOnlyCell(extra, 11, overallOptions);
+  for (let pair = 0; pair < pairCount; pair += 1) {
+    const lettersRow = 4 + 2 * pair;
+    const valuesRow = lettersRow + 1;
+    const start = pair * MATRIX_PAIR_CAPACITY;
+    const slice = model.categories.slice(start, start + MATRIX_PAIR_CAPACITY);
+    const firstColumn = 11 - slice.length; // 右对齐：3 分类 → H:J，与参考模板一致
+    for (let column = firstColumn; column <= 10; column += 1) {
+      const offset = column - firstColumn;
+      setCell(sheet, lettersRow, column, slice[offset] ? letters[start + offset] : null, { alignment: centerStyle });
+      setCell(sheet, valuesRow, column, slice[offset] ? slice[offset].rate ?? "—" : null, { fill: SUBTOTAL_YELLOW, alignment: centerStyle });
+    }
+    sheet.getRow(lettersRow).height = 20;
+    sheet.getRow(valuesRow).height = 20;
+  }
+  // 左侧信息两行（品牌/门店 + 暗访日期/暗访时段）
+  infoRow(3, "品牌名称：", dash(meta.brandName), 12, "门店名称：", dash(meta.storeName), 14);
+  infoRow(5, "暗访日期：", visitDateLabel, 12, "暗访时段：", visitPeriod, 14);
+  // 矩阵外沿中粗描边（覆盖矩阵真实宽度）；左信息行与矩阵之间的行保持无框留白
+  outlineBlock(sheet, matrixHeaderRow, 3 + 2 * pairCount, matrixStartColumn, 11);
+  let row = 3 + 2 * pairCount + 1;
+  sheet.getRow(row).height = 6;
+
+  // —— 表体：逻辑六列（A 维度 / B 序号 / C:H 评估说明 / I 分值 / J 扣分 / K 得分）——
   row += 1;
-  // 总评说明：分类外历史调整、快照重建来源均如实标注，不静默
-  const notes = [];
-  if (model.totals.deltaAwarded > 0) notes.push(`含分类外历史得分调整 +${model.totals.deltaAwarded}（停用题残留作答等，未计入分类小计）`);
-  if (meta.scoreSource === "reconstructed") notes.push("逐题得分由提交快照与固定版本重建");
-  if (!notes.length) notes.push(`共 ${model.categories.length} 个分类，不得分 ${meta.issueCount} 题`);
-  const adjustmentNote = notes.join("；");
-  sheet.getCell(`A${row}`).value = "总评";
-  sheet.getCell(`B${row}`).value = meta.maxScore;
-  sheet.getCell(`C${row}`).value = meta.totalScore;
-  sheet.getCell(`D${row}`).value = model.totals.overallRate ?? "—";
-  sheet.mergeCells(`E${row}:G${row}`);
-  sheet.getCell(`E${row}`).value = adjustmentNote;
-  decorate(sheet, row, 7, { fill: YELLOW_FILL, font: BOLD });
-  sheet.getCell(`E${row}`).alignment = wrapStyle;
-  sheet.getRow(row).height = rowHeightFor(adjustmentNote, 12);
-
-  // —— 评估明细表体：动态分类/题目顺序；分类标签纵向合并；小计黄底；扣分红色；清零触发红字说明 ——
-  row += 2;
   const tableHeaderRow = row;
-  for (const [index, title] of ["评估维度", "序号", "评估说明", "探员答案", "分值", "扣分", "得分"].entries()) {
-    sheet.getRow(row).getCell(index + 1).value = title;
-  }
-  decorate(sheet, row, 7, { fill: GREEN_FILL, font: BOLD, alignment: centerStyle });
+  const headerCellOptions = { fill: HEADER_GREEN, alignment: centerStyle };
+  setCell(sheet, row, COL_CATEGORY, "评估维度", headerCellOptions);
+  setCell(sheet, row, COL_LABEL, "序号", headerCellOptions);
+  setCell(sheet, row, COL_TEXT, "评估说明", headerCellOptions);
+  for (let column = COL_TEXT + 1; column <= COL_TEXT_END; column += 1) setCell(sheet, row, column, null, headerCellOptions);
+  mergeRowAfterWrite(row, COL_TEXT, COL_TEXT_END);
+  setCell(sheet, row, COL_MAX, "分值", headerCellOptions);
+  setCell(sheet, row, COL_DEDUCTION, "扣分", headerCellOptions);
+  setCell(sheet, row, COL_AWARDED, "得分", headerCellOptions);
   sheet.getRow(row).height = 22;
-  // 长文本写入 C 列的工具：首段写入当前行，超出单行高上限的后续段落到续行（仅 C 列，内容零丢失）
-  const writeWrappedColumnC = (text) => {
+  // 长题干写入 C:H 合并列的工具：首段写入当前行，超出单行高上限的后续段落到续行（仅文本列，内容零丢失）。
+  // 返回本次占用的起始行，便于调用方对整段（如清零提示）统一上色
+  const writeQuestionText = (text) => {
+    const startRow = row;
     const segments = wrapSegments(text, QUESTION_CHARS_PER_LINE, 22);
-    sheet.getRow(row).getCell(3).value = segments[0];
-    sheet.getRow(row).getCell(3).alignment = wrapStyle;
-    sheet.getRow(row).height = rowHeightFor(segments[0], QUESTION_CHARS_PER_LINE);
+    const writeSegmentRow = (segment) => {
+      setCell(sheet, row, COL_TEXT, segment, { alignment: wrapStyle });
+      for (let column = COL_TEXT + 1; column <= COL_TEXT_END; column += 1) setCell(sheet, row, column, null, { alignment: wrapStyle });
+      mergeRowAfterWrite(row, COL_TEXT, COL_TEXT_END);
+      sheet.getRow(row).height = rowHeightFor(segment, 69);
+    };
+    writeSegmentRow(segments[0]);
     for (const segment of segments.slice(1)) {
       row += 1;
-      decorate(sheet, row, 7);
-      sheet.getRow(row).getCell(3).value = segment;
-      sheet.getRow(row).getCell(3).alignment = wrapStyle;
-      sheet.getRow(row).height = rowHeightFor(segment, QUESTION_CHARS_PER_LINE);
+      styleRange(sheet, row, 1, GRID_COLUMNS, {});
+      writeSegmentRow(segment);
     }
+    return startRow;
   };
-  for (const category of model.categories) {
-    const firstRow = row + 1;
+
+  const tableStartRow = tableHeaderRow;
+  for (const [categoryIndex, category] of model.categories.entries()) {
+    const letter = letters[categoryIndex];
+    const categoryLabel = `${letter}-${category.name}`;
+    const categoryFirstRow = row + 1;
+    // 分类块上沿中粗线（第一个分类的上沿即表体顶部，由表头行统一承担）
+    if (categoryIndex > 0) for (let column = 1; column <= GRID_COLUMNS; column += 1) sheet.getRow(categoryFirstRow).getCell(column).border = cellBorder({ top: MEDIUM });
+    // 题目行：B=分类内重置编号（Q1/S1/C1…），C:H=题干（长题干续行），I=分值，J=扣分（红），K=得分
     for (const question of category.rows) {
       row += 1;
-      const questionRow = row; // 数值/答案在首行；长题干的续行只放文本，样式必须锚定首行而非 mutable row
-      sheet.getRow(questionRow).getCell(1).value = category.rows[0] === question ? category.name : null;
-      sheet.getRow(questionRow).getCell(2).value = question.number;
-      sheet.getRow(questionRow).getCell(4).value = question.answerLabel;
-      sheet.getRow(questionRow).getCell(5).value = question.maxScore;
-      sheet.getRow(questionRow).getCell(6).value = question.deduction;
-      sheet.getRow(questionRow).getCell(7).value = question.awardedScore;
-      decorate(sheet, questionRow, 7);
-      sheet.getRow(questionRow).getCell(1).alignment = centerStyle;
-      writeWrappedColumnC(question.text);
-      [2, 4, 5, 6, 7].forEach((column) => { sheet.getRow(questionRow).getCell(column).alignment = centerStyle; });
-      if (question.deduction > 0) sheet.getRow(questionRow).getCell(6).font = RED_FONT;
-      if (question.answer === "unscored") sheet.getRow(questionRow).getCell(4).font = RED_FONT;
+      const questionRow = row; // 数值锚定首行；长题干续行只放文本
+      setCell(sheet, questionRow, COL_CATEGORY, category.rows[0] === question ? categoryLabel : null, { alignment: centerStyle });
+      setCell(sheet, questionRow, COL_LABEL, labelByQuestionId.get(question.questionId), { alignment: centerStyle });
+      writeQuestionText(question.text);
+      setCell(sheet, questionRow, COL_MAX, question.maxScore, { alignment: centerStyle });
+      setCell(sheet, questionRow, COL_DEDUCTION, question.deduction > 0 ? question.deduction : null, { alignment: centerStyle, font: question.deduction > 0 ? RED_FONT : undefined });
+      setCell(sheet, questionRow, COL_AWARDED, question.awardedScore, { alignment: centerStyle });
     }
-    if (category.wiped && category.wipeQuestion) {
+    // 清零提示行（仅真实配置了清零题的分类才有）：B=“*”，C:H 说明（触发的清零结果红字）
+    const wipeNote = wipeNoteFor(category, labelByQuestionId);
+    if (wipeNote) {
       row += 1;
-      sheet.getRow(row).getCell(2).value = "*";
-      decorate(sheet, row, 7);
-      sheet.getRow(row).getCell(2).alignment = centerStyle;
-      const wipeNoteStartRow = row;
-      writeWrappedColumnC(`发现「${category.wipeQuestion.text}」被判不得分，此大项分数直接清零。`);
-      for (let noteRow = wipeNoteStartRow; noteRow <= row; noteRow += 1) sheet.getRow(noteRow).getCell(3).font = RED_FONT;
+      setCell(sheet, row, COL_LABEL, "*", { alignment: centerStyle, font: wipeNote.triggered ? RED_FONT : undefined });
+      const wipeStartRow = writeQuestionText(wipeNote.text);
+      for (let noteRow = wipeStartRow; noteRow <= row; noteRow += 1) {
+        if (wipeNote.triggered) sheet.getCell(noteRow, COL_TEXT).font = { name: TEMPLATE_FONT, size: 10, ...RED_FONT };
+      }
     }
-    // 分类标签纵向合并只覆盖题目区（含清零说明行）；小计/扣分说明行与参考 PDF 一致用 A:B 放行标签。
-    // 单题分类的合并高度即首行行高，长分类名需要把首行行高一起抬高（A 列宽 14 ≈ 6 个中文字符/行）
-    sheet.getRow(firstRow).height = Math.max(sheet.getRow(firstRow).height ?? 20, rowHeightFor(category.name, 6));
-    sheet.mergeCells(`A${firstRow}:A${row}`);
+    // 分类标签纵向合并贯穿题目区与小计行（与参考模板 A8:A21 一致）；长分类名抬高首行行高
+    // （A 列宽 11.7 ≈ 5.8 个中文字符/行，容量取 5 留字体度量余量）
+    sheet.getRow(categoryFirstRow).height = Math.max(sheet.getRow(categoryFirstRow).height ?? 20, rowHeightFor(categoryLabel, 10));
+    // 小计行：B=分类字母小计，整行浅黄；J=扣分合计（红粗），K=得分合计（权威逐题合计）
     row += 1;
-    sheet.mergeCells(`A${row}:B${row}`);
-    sheet.getRow(row).getCell(1).value = `${category.name}小计`;
-    sheet.getRow(row).getCell(5).value = category.sumMax;
-    sheet.getRow(row).getCell(6).value = category.sumDeduction;
-    sheet.getRow(row).getCell(7).value = category.sumAwarded;
-    decorate(sheet, row, 7, { fill: YELLOW_FILL, font: BOLD });
-    sheet.getRow(row).getCell(1).alignment = { vertical: "middle", horizontal: "right" };
-    [5, 6, 7].forEach((column) => { sheet.getRow(row).getCell(column).alignment = centerStyle; });
-    if (category.sumDeduction > 0) sheet.getRow(row).getCell(6).font = { bold: true, ...RED_FONT };
-    // 扣分说明块：每条说明独立成段，按单行长度续行成块，绝不截断、不缩字号
+    const subtotalRow = row;
+    sheet.getRow(subtotalRow).height = 20; // 参考模板小计行高
+    const subtotalOptions = { fill: SUBTOTAL_YELLOW };
+    setCell(sheet, subtotalRow, COL_LABEL, `${letter}小计`, { ...subtotalOptions, alignment: rightStyle });
+    for (let column = COL_TEXT; column <= COL_TEXT_END; column += 1) setCell(sheet, subtotalRow, column, null, subtotalOptions);
+    mergeRowAfterWrite(subtotalRow, COL_TEXT, COL_TEXT_END);
+    setCell(sheet, subtotalRow, COL_MAX, category.sumMax, { ...subtotalOptions, alignment: centerStyle });
+    setCell(sheet, subtotalRow, COL_DEDUCTION, category.sumDeduction, { ...subtotalOptions, alignment: centerStyle, font: category.sumDeduction > 0 ? { ...BOLD, ...RED_FONT } : undefined });
+    setCell(sheet, subtotalRow, COL_AWARDED, category.sumAwarded, { ...subtotalOptions, alignment: centerStyle });
+    sheet.mergeCells(categoryFirstRow, COL_CATEGORY, subtotalRow, COL_CATEGORY);
+    // 扣分说明块：A=分类字母扣分说明，B=题号，C:K=探员原始备注（蓝色）/扣分值；块不足 3 行保留空行。
+    // 先把「每条扣分的每段说明」平铺成块行（标签只在首段行），再统一落格
     row += 1;
-    const explanationSegments = deductionExplanationLines(category).flatMap((line) => wrapSegments(line, NOTE_CHARS_PER_LINE, 1));
-    sheet.mergeCells(`A${row}:B${row}`);
-    sheet.getRow(row).getCell(1).value = `${category.name}扣分说明`;
-    sheet.mergeCells(`C${row}:G${row}`);
-    sheet.getRow(row).getCell(3).value = explanationSegments[0];
-    decorate(sheet, row, 7);
-    sheet.getRow(row).getCell(1).alignment = { vertical: "middle", horizontal: "right", wrapText: true };
-    sheet.getRow(row).getCell(3).alignment = wrapStyle;
-    sheet.getRow(row).height = rowHeightFor(explanationSegments[0], NOTE_CHARS_PER_LINE);
-    for (const segment of explanationSegments.slice(1)) {
-      row += 1;
-      sheet.mergeCells(`A${row}:B${row}`);
-      sheet.mergeCells(`C${row}:G${row}`);
-      sheet.getRow(row).getCell(3).value = segment;
-      decorate(sheet, row, 7);
-      sheet.getRow(row).getCell(3).alignment = wrapStyle;
-      sheet.getRow(row).height = rowHeightFor(segment, NOTE_CHARS_PER_LINE);
+    const deductionStartRow = row;
+    const deductionBlockRows = deductionBlockLines(category, labelByQuestionId)
+      .flatMap((line) => line.segments.map((segment, segmentIndex) => ({ label: segmentIndex === 0 ? line.label : null, text: segment, color: line.color })));
+    const deductionRowCount = Math.max(3, deductionBlockRows.length);
+    for (let blockRow = 0; blockRow < deductionRowCount; blockRow += 1) {
+      const currentRow = deductionStartRow + blockRow;
+      const layout = deductionBlockRows[blockRow] ?? null;
+      styleRange(sheet, currentRow, 1, GRID_COLUMNS, {});
+      setCell(sheet, currentRow, COL_LABEL, layout?.label ?? null, { alignment: centerStyle, font: layout?.color ? { ...BLUE_FONT } : undefined });
+      setCell(sheet, currentRow, COL_TEXT, layout?.text ?? null, { alignment: wrapStyle, font: layout?.color ? { ...BLUE_FONT } : undefined });
+      for (let column = COL_TEXT + 1; column <= GRID_COLUMNS; column += 1) setCell(sheet, currentRow, column, null, { alignment: wrapStyle });
+      mergeRowAfterWrite(currentRow, COL_TEXT, GRID_COLUMNS);
+      sheet.getRow(currentRow).height = rowHeightFor(String(layout?.text ?? ""), 87);
     }
+    row = deductionStartRow + deductionRowCount - 1;
+    setCell(sheet, deductionStartRow, COL_CATEGORY, `${letter}-扣分说明`, { alignment: centerStyle });
+    sheet.mergeCells(deductionStartRow, COL_CATEGORY, row, COL_CATEGORY);
+    sheet.getRow(deductionStartRow).height = Math.max(sheet.getRow(deductionStartRow).height ?? 20, rowHeightFor(`${letter}-扣分说明`, 10));
+    // 分类块下沿中粗线
+    for (let column = 1; column <= GRID_COLUMNS; column += 1) sheet.getRow(row).getCell(column).border = cellBorder({ bottom: MEDIUM });
+  }
+  // 表体整体外沿中粗描边 + 「评估说明 | 分值」之间的中粗竖线（与参考模板一致）
+  outlineBlock(sheet, tableStartRow, row, 1, GRID_COLUMNS);
+  for (let borderRow = tableStartRow; borderRow <= row; borderRow += 1) {
+    sheet.getRow(borderRow).getCell(COL_MAX).border = cellBorder({ ...(sheet.getRow(borderRow).getCell(COL_MAX).border ?? {}), left: MEDIUM });
   }
 
-  // —— 页脚：闪光点 / 未改善连续失分项（无真实历史失分统计能力，如实标注未统计）/ 改善建议 ——
-  const footerBlocks = [
-    ["闪光点", model.highlight || "未填写"],
-    ["未改善连续失分项", "未统计（系统暂无历史失分统计能力）"],
-    ["改善建议", model.suggestion || "未填写"],
+  // —— 评估信息（小补充记录）：任务/探店员身份 + 权威原始总分/满分与分类外历史调整，保持报表
+  //      风格贴近参考模板（不写实现性说明文字）；重建来源等技术口径放到「作答明细」补充页说明行 ——
+  row += 2;
+  const recordNotes = [
+    `任务 ${dash(meta.taskName)}（编号 ${dash(meta.businessNo)}）；探店员 ${dash(meta.inspectorName)}；区域 ${dash(meta.regionName)}。`,
+    `原始总分 ${meta.totalScore}/${meta.maxScore} 分（总得分率 ${model.totals.overallRate ?? "—"}%）；右上分项成绩/总评为百分制得分率，表体与小计均为原始分。`,
   ];
-  for (const [label, value] of footerBlocks) {
-    const segments = wrapSegments(value, NOTE_CHARS_PER_LINE, 1);
-    for (const [index, segment] of segments.entries()) {
-      row += 1;
-      sheet.mergeCells(`A${row}:B${row}`);
-      sheet.getRow(row).getCell(1).value = index === 0 ? label : "";
-      sheet.mergeCells(`C${row}:G${row}`);
-      sheet.getRow(row).getCell(3).value = segment;
-      decorate(sheet, row, 7);
-      sheet.getRow(row).getCell(1).fill = LABEL_FILL;
-      sheet.getRow(row).getCell(1).alignment = centerStyle;
-      sheet.getRow(row).getCell(3).alignment = wrapStyle;
-      sheet.getRow(row).height = rowHeightFor(segment, NOTE_CHARS_PER_LINE);
+  if (model.totals.deltaAwarded > 0) recordNotes.push(`含分类外历史得分调整 +${model.totals.deltaAwarded}（停用题残留作答等，未计入分类小计）。`);
+  recordNotes.push(`不得分 ${meta.issueCount} 题。`);
+  // 每条说明独立成段（段内超长再续行），避免句子在任意位置被截断跨格
+  const recordSegments = recordNotes.flatMap((note) => wrapSegments(note, NOTE_CHARS_PER_LINE, 1));
+  for (const [index, segment] of recordSegments.entries()) {
+    row += 1;
+    styleRange(sheet, row, 1, GRID_COLUMNS, {});
+    setCell(sheet, row, COL_CATEGORY, index === 0 ? "评估信息" : null, { alignment: centerStyle });
+    setCell(sheet, row, COL_LABEL, segment, { alignment: wrapStyle });
+    for (let column = COL_LABEL + 1; column <= GRID_COLUMNS; column += 1) setCell(sheet, row, column, null, { alignment: wrapStyle });
+    mergeRowAfterWrite(row, COL_LABEL, GRID_COLUMNS);
+    sheet.getRow(row).height = rowHeightFor(segment, 87);
+  }
+  outlineBlock(sheet, row - recordSegments.length + 1, row, 1, GRID_COLUMNS);
+
+  // —— 页脚（对标参考模板）：闪光点 / 未改善连续失分项（系统暂无历史失分统计能力，如实标注）/ 改善建议 ——
+  const footerBlock = (label, text, minimumRows) => {
+    row += 1;
+    sheet.getRow(row).height = 6;
+    row += 1;
+    const segments = wrapSegments(text, NOTE_CHARS_PER_LINE, 1);
+    const blockRowCount = Math.max(minimumRows, segments.length);
+    const blockStart = row;
+    for (let blockRow = 0; blockRow < blockRowCount; blockRow += 1) {
+      const currentRow = blockStart + blockRow;
+      styleRange(sheet, currentRow, 1, GRID_COLUMNS, { alignment: wrapStyle });
+      setCell(sheet, currentRow, COL_TEXT, segments[blockRow] ?? null, { alignment: wrapStyle });
+      for (let column = COL_TEXT + 1; column <= GRID_COLUMNS; column += 1) setCell(sheet, currentRow, column, null, { alignment: wrapStyle });
+      mergeRowAfterWrite(currentRow, COL_TEXT, GRID_COLUMNS);
+      sheet.getRow(currentRow).height = rowHeightFor(String(segments[blockRow] ?? ""), 87);
+    }
+    setCell(sheet, blockStart, COL_CATEGORY, label, { alignment: centerStyle });
+    sheet.mergeCells(blockStart, COL_CATEGORY, blockStart + blockRowCount - 1, COL_CATEGORY);
+    outlineBlock(sheet, blockStart, blockStart + blockRowCount - 1, 1, GRID_COLUMNS);
+    row = blockStart + blockRowCount - 1;
+  };
+  footerBlock("闪光点", model.highlight || "未填写", 3);
+  // 未改善连续失分项：全宽标签行 + 保留内容行（当前系统没有历史失分统计，绝不编造历史数据）
+  row += 1;
+  sheet.getRow(row).height = 6;
+  row += 1;
+  const noImprovementStart = row;
+  styleRange(sheet, row, 1, GRID_COLUMNS, { alignment: wrapStyle, border: { top: MEDIUM, left: MEDIUM, right: MEDIUM } });
+  setCell(sheet, row, 1, "未改善连续失分项：", { alignment: wrapStyle, border: { top: MEDIUM, left: MEDIUM, right: MEDIUM } });
+  mergeRowAfterWrite(row, 1, GRID_COLUMNS);
+  row += 1;
+  const noImprovementText = "未统计（系统暂无历史失分统计能力）";
+  const noImprovementSegments = wrapSegments(noImprovementText, NOTE_CHARS_PER_LINE, 1);
+  for (let blockRow = 0; blockRow < Math.max(3, noImprovementSegments.length); blockRow += 1) {
+    styleRange(sheet, row, 1, GRID_COLUMNS, { alignment: wrapStyle });
+    setCell(sheet, row, COL_LABEL, noImprovementSegments[blockRow] ?? null, { alignment: wrapStyle });
+    for (let column = COL_LABEL + 1; column <= GRID_COLUMNS; column += 1) setCell(sheet, row, column, null, { alignment: wrapStyle });
+    mergeRowAfterWrite(row, COL_LABEL, GRID_COLUMNS);
+    sheet.getRow(row).height = rowHeightFor(String(noImprovementSegments[blockRow] ?? ""), 87);
+    row += 1;
+  }
+  outlineBlock(sheet, noImprovementStart, row - 1, 1, GRID_COLUMNS);
+  footerBlock("改善建议：", model.suggestion || "未填写", 3);
+
+  // 打印体验：横向一页、纵向自然分页，表体表头跨页重复；避免孤行标题与空白尾页
+  sheet.pageSetup.printTitlesRow = `${tableHeaderRow}:${tableHeaderRow}`;
+
+  // —— 作答明细页：主表不再带「探员答案」列，探员原始作答标签与备注在此完整保留（绝不丢弃）。
+  //      长题干/长备注与主表同口径切段续行（单格撑到行高上限会截断），每段一行、行高 20 ——
+  const ANSWER_TEXT_CHARS_PER_LINE = 26; // 题干列宽 60 单位，留字体度量余量约 26 个中文字符/行
+  const ANSWER_REMARK_CHARS_PER_LINE = 17; // 备注列宽 40 单位，留字体度量余量约 17 个中文字符/行
+  const answerSheet = workbook.addWorksheet("作答明细", { pageSetup: { paperSize: 9, orientation: "portrait", fitToPage: true, fitToWidth: 1, fitToHeight: 0 } });
+  answerSheet.properties.defaultRowHeight = 20; // 参考模板默认行高 20
+  answerSheet.columns = [{ width: 14 }, { width: 8 }, { width: 60 }, { width: 10 }, { width: 8 }, { width: 40 }];
+  for (const [index, title] of ["评估维度", "题号", "评估说明", "探员答案", "扣分", "探员备注"].entries()) {
+    answerSheet.getRow(1).getCell(index + 1).value = title;
+  }
+  for (let column = 1; column <= 6; column += 1) setCell(answerSheet, 1, column, answerSheet.getRow(1).getCell(column).value, { fill: HEADER_GREEN, alignment: centerStyle });
+  answerSheet.getRow(1).height = 20;
+  let answerRowNumber = 1;
+  for (const [categoryIndex, category] of model.categories.entries()) {
+    for (const question of category.rows) {
+      const textSegments = wrapSegments(question.text, ANSWER_TEXT_CHARS_PER_LINE, 22);
+      const remarkSegments = wrapSegments(question.remark || "", ANSWER_REMARK_CHARS_PER_LINE, 22);
+      const segmentCount = Math.max(textSegments.length, remarkSegments.length, 1);
+      const firstAnswerRow = answerRowNumber + 1;
+      for (let segmentIndex = 0; segmentIndex < segmentCount; segmentIndex += 1) {
+        answerRowNumber += 1;
+        setCell(answerSheet, answerRowNumber, 1, segmentIndex === 0 ? `${letters[categoryIndex]}-${category.name}` : null, { alignment: centerStyle });
+        setCell(answerSheet, answerRowNumber, 2, segmentIndex === 0 ? labelByQuestionId.get(question.questionId) : null, { alignment: centerStyle });
+        setCell(answerSheet, answerRowNumber, 3, textSegments[segmentIndex] ?? null, { alignment: wrapStyle });
+        setCell(answerSheet, answerRowNumber, 4, segmentIndex === 0 ? question.answerLabel : null, { alignment: centerStyle });
+        setCell(answerSheet, answerRowNumber, 5, segmentIndex === 0 && question.deduction > 0 ? question.deduction : null, { alignment: centerStyle });
+        setCell(answerSheet, answerRowNumber, 6, remarkSegments[segmentIndex] ?? null, { alignment: wrapStyle });
+        // 行高必须同时容纳本行每一个换行单元格：题干列（宽 60，度量余量取 52）与备注列（宽 40，取 34）
+        answerSheet.getRow(answerRowNumber).height = Math.max(
+          rowHeightFor(textSegments[segmentIndex] ?? "", 52),
+          rowHeightFor(remarkSegments[segmentIndex] ?? "", 34),
+        );
+      }
+      // 长分类名抬高首行行高（维度列宽 14 ≈ 6-7 个中文字符/行，容量取 5 留余量）
+      answerSheet.getRow(firstAnswerRow).height = Math.max(answerSheet.getRow(firstAnswerRow).height ?? 20, rowHeightFor(`${letters[categoryIndex]}-${category.name}`, 10));
     }
   }
-  // 打印体验：横向一页、纵向自动分页，表体表头跨页重复
-  sheet.pageSetup.printTitlesRow = `${tableHeaderRow}:${tableHeaderRow}`;
+  if (meta.scoreSource === "reconstructed") {
+    // 技术口径说明放补充页，主报表保持参考模板风格的简洁业务文案；行高按说明列容量计算防止换行截断
+    const reconstructionNote = "逐题得分由提交快照与固定版本题目重建（历史提交无逐题物化明细）。";
+    answerRowNumber += 1;
+    setCell(answerSheet, answerRowNumber, 1, "说明", { alignment: centerStyle });
+    setCell(answerSheet, answerRowNumber, 3, reconstructionNote, { alignment: wrapStyle });
+    setCell(answerSheet, answerRowNumber, 6, null, { alignment: wrapStyle });
+    answerSheet.getRow(answerRowNumber).height = rowHeightFor(reconstructionNote, 52);
+  }
 
   // —— 菜品记录页：保留提交时的菜品明细与评价（仅快照中实际存储的字段）——
   if (model.dishes.length) {
     const dishSheet = workbook.addWorksheet("菜品记录", { pageSetup: { paperSize: 9, orientation: "portrait", fitToPage: true, fitToWidth: 1, fitToHeight: 0 } });
+    dishSheet.properties.defaultRowHeight = 20; // 参考模板默认行高 20
     dishSheet.columns = [{ width: 6 }, { width: 20 }, { width: 20 }, { width: 7 }, { width: 10 }, { width: 11 }, { width: 11 }, { width: 44 }];
     for (const [index, title] of ["序号", "计划菜品", "实际菜品", "数量", "状态", "单价（元）", "小计（元）", "评价 / 说明"].entries()) {
       dishSheet.getRow(1).getCell(index + 1).value = title;
     }
-    decorate(dishSheet, 1, 8, { fill: GREEN_FILL, font: BOLD, alignment: centerStyle });
-    const statusNotes = {
-      substituted: (dish) => `替代原因：${dish.substitution_reason || "未填写"}`,
-      unavailable: (dish) => `售罄原因：${dish.unavailable_reason || "未填写"}`,
-    };
+    for (let column = 1; column <= 8; column += 1) setCell(dishSheet, 1, column, dishSheet.getRow(1).getCell(column).value, { fill: HEADER_GREEN, alignment: centerStyle });
+    dishSheet.getRow(1).height = 20;
     model.dishes.forEach((dish, index) => {
       const rowNumber = index + 2;
-      const noteParts = [statusNotes[dish.fulfillment_status]?.(dish), dish.evaluation, dish.fully_satisfied ? "全部满意" : null, dish.instruction_snapshot ? `要求：${dish.instruction_snapshot}` : null].filter(Boolean).join("；");
-      dishSheet.getRow(rowNumber).getCell(1).value = index + 1;
-      dishSheet.getRow(rowNumber).getCell(2).value = dish.planned_name || "—";
-      dishSheet.getRow(rowNumber).getCell(3).value = dish.actual_name || "—";
-      dishSheet.getRow(rowNumber).getCell(4).value = dish.quantity ?? dish.planned_quantity ?? "—";
-      dishSheet.getRow(rowNumber).getCell(5).value = DISH_STATUS_LABELS[dish.fulfillment_status] || dish.fulfillment_status;
-      dishSheet.getRow(rowNumber).getCell(6).value = dash(centsToYuan(dish.unit_price_cents));
+      const noteParts = [dish.substitution_reason ? `替代原因：${dish.substitution_reason}` : null, dish.unavailable_reason ? `售罄原因：${dish.unavailable_reason}` : null, dish.evaluation, dish.fully_satisfied ? "全部满意" : null, dish.instruction_snapshot ? `要求：${dish.instruction_snapshot}` : null].filter(Boolean).join("；");
+      setCell(dishSheet, rowNumber, 1, index + 1, { alignment: centerStyle });
+      setCell(dishSheet, rowNumber, 2, dish.planned_name || "—", {});
+      setCell(dishSheet, rowNumber, 3, dish.actual_name || "—", {});
+      setCell(dishSheet, rowNumber, 4, dish.quantity ?? dish.planned_quantity ?? "—", { alignment: centerStyle });
+      setCell(dishSheet, rowNumber, 5, DISH_STATUS_LABELS[dish.fulfillment_status] || dish.fulfillment_status, { alignment: centerStyle });
+      setCell(dishSheet, rowNumber, 6, dash(centsToYuan(dish.unit_price_cents)), { alignment: centerStyle });
       dishSheet.getRow(rowNumber).getCell(6).numFmt = "#,##0.00";
-      dishSheet.getRow(rowNumber).getCell(7).value = dash(centsToYuan(dish.line_total_cents));
+      setCell(dishSheet, rowNumber, 7, dash(centsToYuan(dish.line_total_cents)), { alignment: centerStyle });
       dishSheet.getRow(rowNumber).getCell(7).numFmt = "#,##0.00";
-      dishSheet.getRow(rowNumber).getCell(8).value = noteParts || "—";
-      decorate(dishSheet, rowNumber, 8);
-      dishSheet.getRow(rowNumber).getCell(8).alignment = wrapStyle;
-      dishSheet.getRow(rowNumber).height = rowHeightFor(noteParts, 20);
+      setCell(dishSheet, rowNumber, 8, noteParts || "—", { alignment: wrapStyle });
+      dishSheet.getRow(rowNumber).height = rowHeightFor(noteParts, 40);
     });
   }
 
@@ -466,26 +689,25 @@ export async function buildSubmissionWorkbook(model) {
   }
   if (evidenceByType.size || model.attachments.receipts.length) {
     const attachmentSheet = workbook.addWorksheet("附件清单", { pageSetup: { paperSize: 9, orientation: "portrait", fitToPage: true, fitToWidth: 1, fitToHeight: 0 } });
+    attachmentSheet.properties.defaultRowHeight = 20; // 参考模板默认行高 20
     attachmentSheet.columns = [{ width: 18 }, { width: 30 }, { width: 8 }, { width: 60 }];
     for (const [index, title] of ["类型", "关联位置", "数量", "附件编号"].entries()) {
       attachmentSheet.getRow(1).getCell(index + 1).value = title;
     }
-    decorate(attachmentSheet, 1, 4, { fill: GREEN_FILL, font: BOLD, alignment: centerStyle });
-    const questionNumberById = new Map(model.categories.flatMap((category) => category.rows).map((item) => [item.questionId, item.number]));
+    for (let column = 1; column <= 4; column += 1) setCell(attachmentSheet, 1, column, attachmentSheet.getRow(1).getCell(column).value, { fill: HEADER_GREEN, alignment: centerStyle });
+    attachmentSheet.getRow(1).height = 20;
     let attachmentRow = 1;
     const attachmentLine = (type, position, items) => {
       attachmentRow += 1;
       const references = items.map((item) => String(item.id).slice(-8)).join(", ");
-      attachmentSheet.getRow(attachmentRow).getCell(1).value = type;
-      attachmentSheet.getRow(attachmentRow).getCell(2).value = position;
-      attachmentSheet.getRow(attachmentRow).getCell(3).value = items.length;
-      attachmentSheet.getRow(attachmentRow).getCell(4).value = references;
-      decorate(attachmentSheet, attachmentRow, 4);
-      attachmentSheet.getRow(attachmentRow).getCell(4).alignment = wrapStyle;
-      attachmentSheet.getRow(attachmentRow).height = rowHeightFor(references, 27);
+      setCell(attachmentSheet, attachmentRow, 1, type, { alignment: centerStyle });
+      setCell(attachmentSheet, attachmentRow, 2, position, {});
+      setCell(attachmentSheet, attachmentRow, 3, items.length, { alignment: centerStyle });
+      setCell(attachmentSheet, attachmentRow, 4, references, { alignment: wrapStyle });
+      attachmentSheet.getRow(attachmentRow).height = rowHeightFor(references, 55);
     };
     for (const [type, items] of evidenceByType) {
-      const positions = [...new Set(items.map((item) => `第 ${questionNumberById.get(item.question_id) ?? "?"} 题`))].join("、");
+      const positions = [...new Set(items.map((item) => labelByQuestionId.get(item.question_id) ?? "未知题目"))].join("、");
       attachmentLine(type === "image" ? "题目证据（照片）" : "题目证据（录音）", positions, items);
     }
     if (model.attachments.receipts.length) attachmentLine("消费小票", "小票照片", model.attachments.receipts);

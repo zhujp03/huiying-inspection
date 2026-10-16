@@ -153,7 +153,7 @@ const fakeCos = () => {
 };
 
 const range = (from, to) => Array.from({ length: to - from + 1 }, (_, index) => from + index);
-const sheetText = (sheet, columns = 7) => {
+const sheetText = (sheet, columns = 11) => {
   const values = [];
   for (let row = 1; row <= sheet.rowCount; row += 1) for (let column = 1; column <= columns; column += 1) {
     const value = sheet.getRow(row).getCell(column).value;
@@ -227,17 +227,20 @@ describe.sequential("PostgreSQL single-submission export", () => {
     expect(String(sheet.getCell("A1").value)).toContain("导出评估问卷");
     expect(String(sheet.getCell("A1").value)).toContain("V1");
     const text = sheetText(sheet);
-    // 清零触发与结果显式标注；探员备注进入扣分说明；对账后总评 5/10
-    expect(text).toContain("清零：第 1 题「环境清零题」被判不得分");
+    // 清零触发与结果显式标注；探员备注进入扣分说明（蓝色原样）；对账后总评 5/10 → 50%
+    expect(text).toContain("清零：C1「环境清零题」被判不得分"); // environment → C，触发题用可见编号
     expect(text).toContain("此大项分数直接清零");
-    expect(text).toContain("探员备注：发现过期食材");
+    expect(text).toContain("发现过期食材");
     expect(text).toContain("闪光点\n环境整洁，服务主动");
-    expect(text).toContain("改善建议\n高峰期加派人手");
-    const totalRow = [...range(1, sheet.rowCount)].find((row) => sheet.getRow(row).getCell(1).value === "总评");
-    expect([2, 3, 4].map((column) => sheet.getRow(totalRow).getCell(column).value)).toEqual([10, 5, 50]);
-    // 打卡时间进入表头（accepted checkin captured_at），且不会出现 1900 占位
-    const visitRow = [...range(1, sheet.rowCount)].find((row) => sheet.getRow(row).getCell(1).value === "到店时间");
-    expect(String(sheet.getRow(visitRow).getCell(2).value)).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+    expect(text).toContain("改善建议：\n高峰期加派人手");
+    // 右上矩阵总评 = 权威得分率 50%（5/10）；成绩记录保留原始分与满分
+    expect(sheet.getCell("K4").value).toBe(50);
+    expect(text).toContain("原始总分 5/10 分");
+    const recordRow = [...range(1, sheet.rowCount)].find((row) => sheet.getRow(row).getCell(1).value === "评估信息");
+    expect(recordRow).toBeGreaterThan(0);
+    // 打卡时间进入表头（accepted checkin captured_at 的日期与时刻），且不会出现 1900 占位
+    expect(sheet.getCell("B5").value).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(sheet.getCell("F5").value).toMatch(/^\d{2}:\d{2}$/);
     expect(text).not.toMatch(/1900/);
     const succeeded = await app.inject({ method: "GET", url: `/api/admin/exports/${jobId}`, headers });
     expect(succeeded.json()).toMatchObject({ status: "succeeded", downloadUrl: "https://private.example.test/export" });
@@ -504,13 +507,17 @@ describe.sequential("PostgreSQL single-submission export", () => {
     // 真实分类展示名（question_categories）进入重建结果；清零语义与快照备注原样保留
     expect(text).toContain("环境卫生");
     expect(text).toContain("为客服务");
-    expect(text).toContain("清零：第 1 题「历史清零题」被判不得分");
+    expect(text).toContain("清零：C1「历史清零题」被判不得分");
     // 清零前合计 = 环境分类内 scored 题满分（第 2 题 3 分），非全分类满分
     expect(text.replace(/\n/g, "")).toContain("清零前合计 3 分不计");
-    expect(text).toContain("探员备注：过期食材");
-    expect(text).toContain("逐题得分由提交快照与固定版本重建");
-    const totalRow = [...range(1, workbook.getWorksheet("暗访评估表").rowCount)].find((row) => workbook.getWorksheet("暗访评估表").getRow(row).getCell(1).value === "总评");
-    expect([2, 3, 4].map((column) => workbook.getWorksheet("暗访评估表").getRow(totalRow).getCell(column).value)).toEqual([10, 5, 50]);
+    expect(text).toContain("过期食材");
+    // 重建来源等技术口径在「作答明细」补充页说明行，主报表保持参考模板风格的业务文案
+    const answerText = sheetText(workbook.getWorksheet("作答明细"), 6);
+    expect(answerText).toContain("逐题得分由提交快照与固定版本题目重建");
+    expect(text).not.toContain("逐题得分由提交快照");
+    const totalSheet = workbook.getWorksheet("暗访评估表");
+    expect(totalSheet.getCell("K4").value).toBe(50);
+    expect(text).toContain("原始总分 5/10 分");
     await app.close();
   });
 
@@ -551,7 +558,7 @@ describe.sequential("PostgreSQL single-submission export", () => {
     await app.close();
   });
 
-  test("到店时间只取本探员不晚于提交时间的打卡；提交后的新打卡不改变旧报告", async () => {
+  test("暗访日期/时段只取本探员不晚于提交时间的打卡；提交后的新打卡不改变旧报告", async () => {
     const cos = fakeCos();
     const { app, headers, inspectorHeaders, adminId, inspectorId, storeA } = await createWorld(cos);
     const versionId = await createDraft(app, headers, [{ number: 1, category: "service", text: "打卡时间题", maxScore: 5 }], "打卡时间问卷");
@@ -562,7 +569,7 @@ describe.sequential("PostgreSQL single-submission export", () => {
     const submittedAt = (await pool.query("SELECT submitted_at FROM submission_versions WHERE id=$1", [submissionId])).rows[0].submitted_at;
     const firstCheckin = (await pool.query("SELECT max(captured_at) AS t FROM audit_checkins WHERE assignment_id=$1 AND inspector_id=$2 AND result='accepted'", [assignmentId, inspectorId])).rows[0].t;
     expect(firstCheckin).toBeTruthy();
-    // 任务被复用/恢复后出现更晚的合格打卡：不得影响这份提交的到店时间
+    // 任务被复用/恢复后出现更晚的合格打卡：不得影响这份提交的暗访日期/时段
     await pool.query(`INSERT INTO audit_checkins (id,assignment_id,inspector_id,latitude_gcj02,longitude_gcj02,accuracy_meters,captured_at,received_at,
         store_latitude_snapshot,store_longitude_snapshot,base_radius_snapshot,accuracy_allowance_meters,allowance_max_snapshot,effective_radius_meters,result,valid_until)
       VALUES ($1,$2,$3,31.2304,121.4737,10,$4,now(),31.2304,121.4737,300,0,200,300,'accepted',$5)`,
@@ -572,9 +579,10 @@ describe.sequential("PostgreSQL single-submission export", () => {
     expect(await runExportJobs({ pool, cos })).toMatchObject({ claimed: 1, completed: 1 });
     const workbook = await workbookOf(cos.uploaded[0]);
     const exportSheet = workbook.getWorksheet("暗访评估表");
-    const visitRow = [...range(1, exportSheet.rowCount)].find((row) => exportSheet.getRow(row).getCell(1).value === "到店时间");
-    expect(exportSheet.getRow(visitRow).getCell(2).value).toBe(formatShanghaiDateTime(firstCheckin));
-    expect(exportSheet.getRow(visitRow).getCell(2).value).not.toBe(formatShanghaiDateTime(new Date(submittedAt.getTime() + 3_600_000)));
+    // 暗访日期 = 打卡日；暗访时段 = 打卡精确时刻（HH:MM），绝不臆测时段名称
+    expect(exportSheet.getCell("B5").value).toBe(formatShanghaiDateTime(firstCheckin).slice(0, 10));
+    expect(exportSheet.getCell("F5").value).toBe(formatShanghaiDateTime(firstCheckin).slice(11, 16));
+    expect(exportSheet.getCell("F5").value).not.toBe(formatShanghaiDateTime(new Date(submittedAt.getTime() + 3_600_000)).slice(11, 16));
     await app.close();
   });
 });
