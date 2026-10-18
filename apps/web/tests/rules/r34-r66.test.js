@@ -126,7 +126,7 @@ describe("pure 层：store / utils / features 规则", () => {
     // revision 不匹配 → 空骨架（answers={}、dishes=[]、highlight=""、suggestion=""、receiptRecovery 空壳、revision 同步）
     assert.deepEqual(
       surveyStore.getDraft({ ...meta, revision: 3 }),
-      { answers: {}, dishes: [], highlight: "", suggestion: "", receiptRecovery: { pendingReceipts: [], jobId: null, applyKey: null, appliedJobId: null }, revision: 3 },
+      { answers: {}, dishes: [], highlight: "", suggestion: "", highlights: [], receiptRecovery: { pendingReceipts: [], jobId: null, applyKey: null, appliedJobId: null }, revision: 3 },
       "revision 不匹配返回空骨架",
     );
     // peekDraft 读原始值不做 revision 过滤

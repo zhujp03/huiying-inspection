@@ -1,12 +1,12 @@
 <view class="other-page">
   <view wx:if="{{submitState !== 'submitted'}}" class="app-nav" style="padding-top: {{statusBarHeight}}px;">
     <view class="app-nav__bar" style="height: {{navBarHeight}}px;">
-      <button class="app-nav__back" aria-label="保存并返回菜品记录" disabled="{{saving || submitState === 'submitting' || submitState === 'processing'}}" bindtap="back">‹</button>
+      <button class="app-nav__back" aria-label="保存并返回其他照片" disabled="{{saving || submitState === 'submitting' || submitState === 'processing'}}" bindtap="back">‹</button>
       <text class="app-nav__title">其他记录</text>
     </view>
   </view>
 
-  <view wx:if="{{submitState !== 'submitted'}}" class="flow-steps" aria-label="填写流程共三步，当前第三步：其他记录"><view class="flow-step flow-step--done"><text class="flow-step__num">✓</text><text class="flow-step__label">答题</text></view><view class="flow-step__bar flow-step__bar--done"></view><view class="flow-step flow-step--done"><text class="flow-step__num">✓</text><text class="flow-step__label">菜品与小票</text></view><view class="flow-step__bar flow-step__bar--done"></view><view class="flow-step flow-step--active"><text class="flow-step__num">3</text><text class="flow-step__label">其他记录</text></view></view>
+  <view wx:if="{{submitState !== 'submitted'}}" class="flow-steps" aria-label="填写流程共三步，当前第三步：其他记录"><view class="flow-step flow-step--done"><text class="flow-step__num">✓</text><text class="flow-step__label">答题</text></view><view class="flow-step__bar flow-step__bar--done"></view><view class="flow-step flow-step--done"><text class="flow-step__num">✓</text><text class="flow-step__label">其他照片</text></view><view class="flow-step__bar flow-step__bar--done"></view><view class="flow-step flow-step--active"><text class="flow-step__num">3</text><text class="flow-step__label">其他记录</text></view></view>
 
   <view wx:if="{{loading}}" class="state-panel muted">正在加载其他记录…</view>
 
@@ -19,24 +19,6 @@
   </view>
 
   <view wx:else class="other-content {{keyboardOpen ? 'other-content--keyboard' : ''}}">
-    <label id="highlight-field" class="record-field">
-      <text class="record-label"><text class="required">*</text>闪光点</text>
-      <textarea
-        class="record-textarea {{highlightError ? 'record-textarea--error' : ''}}"
-        data-field="highlight"
-        value="{{highlight}}"
-        focus="{{focusField === 'highlight'}}"
-        adjust-position="{{true}}"
-        cursor-spacing="130"
-        maxlength="-1"
-        bindinput="input"
-        bindkeyboardheightchange="keyboard"
-        placeholder="输入闪光点"
-        aria-label="闪光点，必填"
-      />
-      <text wx:if="{{highlightError}}" class="field-error" aria-role="alert">{{highlightError}}</text>
-    </label>
-
     <label class="record-field record-field--suggestion">
       <text class="record-label">其他建议</text>
       <textarea
@@ -70,7 +52,22 @@
         class="secondary-action"
         disabled="{{saving || submitState === 'submitting' || submitState === 'processing'}}"
         bindtap="back"
-      >上一步：菜品</button>
+      >上一步：其他照片</button>
+    </view>
+  </view>
+
+  <!-- 提交确认弹窗（自定义 WXML，非 wx.showModal）：显式不可逆警示 + 当前得分百分比；
+       确认只提交一次；取消/点遮罩关闭并保留全部编辑。 -->
+  <view wx:if="{{confirmOpen}}" class="confirm-mask" aria-role="dialog" aria-label="确认提交问卷" bindtap="confirmModalCancel">
+    <view class="confirm-panel" catchtap="noop">
+      <text class="confirm-title">确认提交问卷？</text>
+      <text class="confirm-score" aria-label="当前得分预览">{{confirmScore ? '当前得分 ' + confirmScore.percent + '%（' + confirmScore.totalScore + '/' + confirmScore.maxScore + ' 分）' : '得分率暂时无法计算'}}</text>
+      <button wx:if="{{!confirmScore}}" class="confirm-retry" disabled="{{saving || submitState === 'submitting' || submitState === 'processing'}}" bindtap="confirmModalRetryScore">重新获取得分</button>
+      <text class="confirm-copy">问卷提交后无法再次修改，请确认所有内容已经完成。</text>
+      <view class="confirm-actions">
+        <button class="confirm-cancel" disabled="{{saving || submitState === 'submitting' || submitState === 'processing'}}" bindtap="confirmModalCancel">继续编辑</button>
+        <button class="confirm-primary" loading="{{saving || submitState === 'submitting' || submitState === 'processing'}}" disabled="{{saving || submitState === 'submitting' || submitState === 'processing' || !confirmScore}}" bindtap="confirmModalSubmit">确认提交</button>
+      </view>
     </view>
   </view>
 </view>

@@ -161,7 +161,7 @@ describe("问题页保存计数口径（unscored 证据判定）", () => {
     expect(requests.some((r) => r.url.includes("/confirm"))).toBe(false);
   });
 
-  it("全部附件 failed 时阻止保存并提示补传", async () => {
+  it("照片选填：全部照片 failed（或无照片）+ 说明非空可保存（历史 imageRequired 不再强制）", async () => {
     let pageConfig;
     globalThis.Page = (config) => { pageConfig = config; };
     await import("../../apps/miniapp/miniprogram/pages/issue/index.js?issue-adapt-c3");
@@ -176,8 +176,9 @@ describe("问题页保存计数口径（unscored 证据判定）", () => {
     }), {});
     await pageConfig.save.call(context);
     await flush();
-    expect(globalThis.wx.showToast).toHaveBeenCalledWith(expect.objectContaining({ title: "请先上传成功的问题照片" }));
-    expect(requests.some((r) => r.method === "PATCH")).toBe(false);
+    // 2026-10：问题照片全面选填——无成功照片不再阻断保存，PATCH/confirm 正常发出。
+    expect(requests.some((r) => r.method === "PATCH")).toBe(true);
+    expect(requests.some((r) => r.url.includes("/confirm"))).toBe(true);
   });
 });
 

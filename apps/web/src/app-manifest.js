@@ -32,6 +32,7 @@ export const services = {
       "getDraft", "saveAnswer", "createEditSession", "updateEditSession", "initEvidenceUpload",
       "completeEvidenceUpload", "removeEvidence", "confirmIssue", "cancelIssue", "saveDishes",
       "saveOtherRecords", "submitQuestionnaire",
+      "initHighlightPhotoUpload", "completeHighlightPhotoUpload", "deleteHighlightPhoto",
     ],
   },
   receipts: {

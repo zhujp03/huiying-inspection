@@ -224,10 +224,11 @@ describe("pure 层：store / router / utils 规则", () => {
         dishes: [],
         highlight: "",
         suggestion: "",
+        highlights: [],
         receiptRecovery: { pendingReceipts: [], jobId: null, applyKey: null, appliedJobId: null },
         revision: 0,
       },
-      "无草稿时返回完整空骨架（answers/dishes/highlight/suggestion/receiptRecovery/revision）",
+      "无草稿时返回完整空骨架（answers/dishes/highlight/suggestion/highlights/receiptRecovery/revision）",
     );
     // 分类回落固定三分类（环境卫生/为客服务/产品品质）与非法路由分类回落到第一分类：页面编排，stage-3 E2E 补
   });

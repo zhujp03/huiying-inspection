@@ -418,3 +418,94 @@ input, select, textarea { font: inherit; color: inherit; }
 
 /* 分隔空隙 */
 .spacing { height: var(--hy-gap-card); }
+
+/* ================= 应用内确认弹窗（提交不可逆确认等；替代 window.confirm） ================= */
+
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(20, 21, 24, 0.55);
+}
+.modal-panel {
+  width: 100%;
+  max-width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 16px;
+  border-radius: var(--hy-radius-card);
+  background: var(--hy-bg-card);
+}
+.modal-title { font-size: 16px; font-weight: 700; color: var(--hy-ink); text-align: center; }
+.modal-body { display: flex; flex-direction: column; gap: 6px; font-size: var(--hy-font-md); color: var(--hy-ink-secondary); text-align: center; }
+.modal-score {
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--hy-primary);
+  text-align: center;
+}
+.modal-actions { display: grid; grid-template-columns: 1fr 1.4fr; gap: 8px; margin-top: 4px; }
+
+/* ================= 闪光点编辑器（第二步 其他照片） ================= */
+
+.highlight-list { display: flex; flex-direction: column; }
+.highlight-item { padding: 12px 0; border-bottom: 1px solid var(--hy-border-hairline); }
+.highlight-item:last-child { border-bottom: none; }
+.highlight-item__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: var(--hy-font-sm);
+  color: var(--hy-ink-secondary);
+}
+.highlight-photos {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-top: 8px;
+}
+.highlight-tile-wrap { position: relative; width: 100%; min-width: 0; }
+.highlight-tile {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  border: none;
+  padding: 0;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--hy-bg-secondary);
+  cursor: pointer;
+}
+.highlight-tile img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.highlight-tile__remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(20, 21, 24, 0.6);
+  color: #fff;
+  font-size: 13px;
+  line-height: 20px;
+  padding: 0;
+  cursor: pointer;
+}
+.highlight-add-photo {
+  width: 100%;
+  aspect-ratio: 1;
+  border: 1px dashed var(--hy-border-light);
+  border-radius: 6px;
+  background: var(--hy-bg-secondary);
+  color: var(--hy-chevron);
+  font-size: 18px;
+  cursor: pointer;
+}

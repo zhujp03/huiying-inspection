@@ -1068,6 +1068,45 @@
         }
       }
     },
+    "/api/questionnaires/secret/drafts/{id}/highlights/{highlightId}/photo-uploads": {
+      "post": {
+        "operationId": "drafts_highlightPhotoUploads",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/questionnaires/secret/drafts/{id}/highlights/{highlightId}/photo-uploads/{attachmentId}": {
+      "delete": {
+        "operationId": "drafts_highlightPhoto",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
+    "/api/questionnaires/secret/drafts/{id}/highlights/{highlightId}/photo-uploads/{attachmentId}/complete": {
+      "post": {
+        "operationId": "drafts_highlightPhotoComplete",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Business error"
+          }
+        }
+      }
+    },
     "/api/questionnaires/secret/drafts/{id}/other-records": {
       "put": {
         "operationId": "drafts_otherRecords",

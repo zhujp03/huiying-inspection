@@ -90,8 +90,9 @@ export const EvidenceRequirementWriteSchema = z.object({
   evidenceRequired: z.boolean(),
   imageRequired: z.boolean(),
   audioRequired: z.boolean(),
-  // 每题照片上限（1-9，默认 3）与录音时长上限（1-60 秒，默认 10）
-  imageMaxCount: z.number().int().min(1).max(9).default(3),
+  // 每题照片上限（1-9，默认 4——不得分照片已全面改为选填，默认上限从 3 放宽到 4）
+  // 与录音时长上限（1-60 秒，默认 10）
+  imageMaxCount: z.number().int().min(1).max(9).default(4),
   audioMaxDurationSeconds: z.number().int().min(1).max(60).default(10),
 }).superRefine((value, context) => {
   if (!value.evidenceRequired && (value.imageRequired || value.audioRequired)) context.addIssue({ code: z.ZodIssueCode.custom, message: "未要求证据时不能单独要求图片或音频" });
@@ -498,6 +499,14 @@ export const ReceiptOcrJobSchema = z.object({
   userMessage: z.string(),
 });
 
+// 闪光点结构化条目（探员端保存请求）：id 为客户端生成的安全 UUID（服务端按 id upsert，
+// 归属校验失败显式 404，与 dish_records 的客户端 id 约定一致）；text 可为空串——
+// 「只有照片没有文字」的条目允许保存（照片不能被静默丢弃），但提交时会被文字校验拦下。
+export const HighlightEntryWriteSchema = z.object({ id: SecureUuidSchema, text: z.string().trim().max(2000) });
+// 每次保存最多 5 条闪光点；photos 字段仅为响应 DTO（保存请求不携带照片，照片走独立三步直传）。
+export const HIGHLIGHT_ENTRY_LIMIT = 5;
+export const HIGHLIGHT_PHOTO_LIMIT = 4;
+
 export const DishRecordSchema = z.object({
   id: IdSchema,
   requirementId: IdSchema.nullable(),
@@ -520,7 +529,29 @@ export const DishRecordSchema = z.object({
 }).passthrough();
 export const ReceiptOcrApplySchema = z.object({ job: ReceiptOcrJobSchema, dishes: z.array(DishRecordSchema), revision: RevisionSchema });
 export const DishSaveRequestSchema = z.object({ dishes: z.array(DishRecordSchema), revision: RevisionSchema });
-export const OtherRecordSaveRequestSchema = z.object({ highlight: z.string().trim().min(1).max(2000), suggestion: z.string().trim().max(2000), revision: RevisionSchema });
+// 其他记录保存：suggestion/highlights 键缺省 = 不改动对应维度（探员端第二步只存闪光点、
+// 第三步只存建议，互不覆盖）；highlight 为历史单条文字列（只写兼容值，不再作为提交必填）。
+// highlights 出现时按数组整体替换（按 id upsert、缺失 id 删除），文字为空且无照片的条目被忽略。
+export const OtherRecordSaveRequestSchema = z.object({
+  highlight: z.string().trim().max(2000).optional(),
+  suggestion: z.string().trim().max(2000).optional(),
+  highlights: z.array(HighlightEntryWriteSchema).max(HIGHLIGHT_ENTRY_LIMIT).optional(),
+  revision: RevisionSchema,
+});
+// 闪光点照片三步直传（与消费小票同构）：文件元数据同小票契约，但 sha256 可选——
+// 小程序运行时读全文件计算校验和代价高；提供时与服务端 verifyObject 计算值对账，
+// 缺失时以服务端对存储对象的实际校验为唯一事实源（init 不带、complete 可带）。
+export const HighlightPhotoFileMetaSchema = z.object({
+  clientFileId: SecureUuidSchema, fileName: z.string().min(1), mimeType: z.enum(["image/jpeg", "image/png"]),
+  sizeBytes: z.number().int().positive().max(10 * 1024 * 1024),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/i, "文件校验和格式不正确").optional(),
+});
+export const HighlightPhotoInitRequestSchema = z.object({ fileMeta: HighlightPhotoFileMetaSchema, revision: RevisionSchema });
+export const HighlightPhotoCompleteRequestSchema = z.object({ fileMeta: HighlightPhotoFileMetaSchema, revision: RevisionSchema });
+export const HighlightPhotoDeleteRequestSchema = z.object({ revision: RevisionSchema });
+// 说明：其他记录/闪光点照片各端点的响应均为轻量 { revision }（照片视图内联于草稿 DTO 的
+// otherRecords.highlights，无独立响应 schema）；complete 的 202 中间态返回 { id, status:"verifying", revision }，
+// 由客户端校验器按联合形态断言，不在此重复定义死模型。
 
 const ComparisonDishSchema = z.object({
   id: IdSchema.optional(), name: z.string(), quantity: z.number().positive().nullable().optional(),
@@ -544,6 +575,11 @@ export const SubmissionDetailSchema = z.object({
   questionnaireName: z.string(), versionLabel: z.string().optional(), totalScore: z.number(), scoreRate: z.string(), issueCount: z.number(),
   categoryScores: z.array(z.object({ category: z.string(), categoryName: z.string().optional(), scoreRate: z.string(), score: z.number().optional() })).optional(),
   highlight: z.string(), suggestion: z.string().nullable().optional(),
+  // 结构化闪光点（新提交快照携带）；历史提交缺省时调用方按 highlight 单条兜底。
+  highlights: z.array(z.object({
+    id: IdSchema, text: z.string(),
+    photos: z.array(z.object({ id: IdSchema, previewUrl: z.string().url().nullable() })).optional(),
+  })).optional(),
   dishes: z.array(DishRecordSchema).optional(),
   receiptComparison: AdminReceiptComparisonSchema.optional(),
   questions: z.array(z.object({ id: IdSchema, number: z.number().int(), text: z.string(), answer: z.enum(["scored", "unscored"]), issueRemark: z.string().optional(), previewUrls: z.array(z.string().url()).optional(), attachments: z.array(z.object({ id: IdSchema, type: z.enum(["image", "audio"]), previewUrl: z.string().url(), durationSeconds: z.number().optional() })).optional() })),

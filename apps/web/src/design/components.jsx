@@ -231,11 +231,11 @@ export function PageNav({ title, onBack, right }) {
   );
 }
 
-/* ---------- 三步流程条（答题 → 菜品与小票 → 其他记录） ---------- */
+/* ---------- 三步流程条（答题 → 其他照片 → 其他记录） ---------- */
 
 const FLOW_STEPS = [
   { key: "survey", label: "答题" },
-  { key: "dishes", label: "菜品与小票" },
+  { key: "dishes", label: "其他照片" },
   { key: "other", label: "其他记录" },
 ];
 
@@ -293,4 +293,29 @@ export function ListRow({ label, onClick, children }) {
 
 export function NoticeBar({ children }) {
   return <div className="notice-bar">{children}</div>;
+}
+
+/* ---------- 应用内确认弹窗（提交等不可逆操作的二次确认；不用 window.confirm） ----------
+   open=false 时不渲染；遮罩点击 = 取消（busy 时忽略）；confirmDisabled 支持前置条件
+   未满足（如得分预览缺失）时单独禁用确认键。确认/取消由页面透传。 */
+export function ConfirmModal({ open, title, children, confirmLabel = "确认提交", cancelLabel = "继续编辑", busy = false, confirmDisabled = false, onConfirm, onCancel }) {
+  if (!open) return null;
+  return (
+    <div
+      className="modal-mask"
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+      onClick={busy ? undefined : onCancel}
+    >
+      <div className="modal-panel" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-title">{title}</div>
+        <div className="modal-body">{children}</div>
+        <div className="modal-actions">
+          <Button variant="outline" disabled={busy} onClick={onCancel}>{cancelLabel}</Button>
+          <Button disabled={busy || confirmDisabled} onClick={onConfirm}>{confirmLabel}</Button>
+        </div>
+      </div>
+    </div>
+  );
 }

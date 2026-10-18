@@ -1,20 +1,23 @@
 // OtherPage — other 其他记录与提交·第三步（inventory §1.10；rules R31/R32/R76-R85）。
-// 语义真源：apps/miniapp/miniprogram/pages/other/index.js（240 行）逐函数移植。
+// 语义真源：apps/miniapp/miniprogram/pages/other/index.js 逐函数移植。
+// 2026-10 变更：闪光点编辑移至第二步（dishes 其他照片页），本页只保留「其他建议」与提交；
+// 提交前的不可逆确认改为应用内自定义弹窗（不再 window.confirm），展示当前问卷得分百分比
+// 与「问卷提交后无法再次修改」警示；取消关闭弹窗并保留全部编辑。
 // 区块 ↔ inventory §1.10 a 对照：自定义导航（保存并回菜品，submitted 时隐藏）/ 三步流程条（第三步 active）/
-// 加载中 / 成功页（✓+提交时间+锁定文案+确定）/ 表单区（闪光点必填+建议选填+消息区[重新加载/重试提交]）/
-// 提交/上一步按钮。
+// 加载中 / 成功页（✓+提交时间+锁定文案+确定）/ 表单区（建议选填+消息区[重新加载/重试提交]）/
+// 提交确认弹窗 / 提交/上一步按钮。
 // PM 钉定 Web 适配点（本页）：
-// 4) wx.showModal 确认 → window.confirm（R80 提交前不可逆确认）；wx.switchTab → context.navigate（日程 Tab）；
+// 4) wx.showModal 确认 → ConfirmModal（应用内弹窗，含得分预览）；wx.switchTab → context.navigate（日程 Tab）；
 //    wx.navigateBack/redirectTo → context.back(fallback)/replace（§4.3 返回栈兜底）；
 //    bindkeyboardheightchange → Web 无键盘高度事件，keyboardOpen 底部留白不适配（省略，不影响语义）。
 // 5) 401：捕获 kind=session → toast + redirectToLogin()。
 import React, { useEffect, useRef, useState } from "react";
-import { Button, Card, Field, FlowSteps, Muted, PageNav, TextArea } from "../design/components.jsx";
+import { Button, Card, ConfirmModal, Field, FlowSteps, Muted, PageNav, TextArea } from "../design/components.jsx";
 import { useApp } from "./app-context.jsx";
 import { getAssignment } from "../services/assignments.js";
 import { getDraft, saveOtherRecords, submitQuestionnaire } from "../services/drafts.js";
 import { clearDraft, getDraft as getLocalDraft, markDraftSynced, saveDraft } from "../store/survey.js";
-import { secureUuid } from "../utils/business.js";
+import { computeSurveyScore, secureUuid } from "../utils/business.js";
 import { formatSubmittedAt } from "../utils/presentation.js";
 import { navEntryIsPage, sanitizeTaskSource } from "../router/nav-history.js";
 
@@ -27,14 +30,19 @@ function routeQuery() {
 export function OtherPage() {
   const { navigate, back, replace, toast, redirectToLogin } = useApp();
   const [meta, setMeta] = useState(null);
-  const [highlight, setHighlight] = useState("");
   const [suggestion, setSuggestion] = useState("");
   const [submitState, setSubmitState] = useState("draft");
   const [message, setMessage] = useState("");
   const [submittedAt, setSubmittedAt] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [highlightError, setHighlightError] = useState("");
+  // 提交确认弹窗：open=可见；score=保存+拉取后计算的当前得分预览（null=无法计算，绝不虚构 100%）。
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmScore, setConfirmScore] = useState(null);
+  // 同步 guard：防 React 状态批量提交完成前的重复「确认提交」点击（提交幂等 token 不变，
+  // 但 UI 层也不应重复发起）。openConfirmModal/取消时复位。
+  const confirmGuardRef = useRef(false);
+  const confirmScoreRef = useRef(null);
   // 异步闭包内读取最新值（等价 miniapp this.data）；卸载后异步回调不再写状态。
   const latestRef = useRef({});
   const routeMetaRef = useRef(null);
@@ -46,12 +54,13 @@ export function OtherPage() {
   const dirtyRef = useRef(false);
   const unloadedRef = useRef(false);
 
-  latestRef.current = { meta, highlight, suggestion, submitState, saving };
+  latestRef.current = { meta, suggestion, submitState, saving };
 
   const persistLocal = () => {
     if (!routeMetaRef.current) return;
     try {
-      saveDraft(routeMetaRef.current, { highlight: latestRef.current.highlight, suggestion: latestRef.current.suggestion });
+      // 只持久化建议：闪光点由第二步编辑与持久化，此处不写避免覆盖其本地草稿。
+      saveDraft(routeMetaRef.current, { suggestion: latestRef.current.suggestion });
     } catch { /* 存储异常静默：会话丢失由下一次鉴权请求处理 */ }
   };
 
@@ -62,7 +71,7 @@ export function OtherPage() {
     return true;
   };
 
-  // ---------- 加载（等价 miniapp load，js:37-78） ----------
+  // ---------- 加载（等价 miniapp load） ----------
 
   const load = async () => {
     setLoading(true);
@@ -90,11 +99,11 @@ export function OtherPage() {
       }
       const nextMeta = { ...routeMetaRef.current, revision: result.attempt.revision };
       const local = getLocalDraft(nextMeta);
-      // R77：本地未同步优先，否则采用服务端 otherRecords 并 markDraftSynced。
+      // R77：本地未同步优先，否则采用服务端 suggestion 并 markDraftSynced。
       const useLocal = local.synced === false;
       const records = useLocal ? local : (result.otherRecords || {});
       if (!useLocal) {
-        saveDraft(nextMeta, { highlight: records.highlight || "", suggestion: records.suggestion || "" });
+        saveDraft(nextMeta, { suggestion: records.suggestion || "" });
         markDraftSynced(nextMeta, nextMeta.revision);
       }
       routeMetaRef.current = nextMeta;
@@ -104,7 +113,6 @@ export function OtherPage() {
       dirtyRef.current = useLocal;
       if (unloadedRef.current) return;
       setMeta(nextMeta);
-      setHighlight(records.highlight || "");
       setSuggestion(records.suggestion || "");
       // R83：提交状态固定初始化 draft（重开草稿即重置）；failed 给恢复提示但仍可编辑。
       setSubmitState("draft");
@@ -123,32 +131,25 @@ export function OtherPage() {
 
   // ---------- 输入（R78：失败态再编辑弃 token 回 draft） ----------
 
-  const input = (field, value) => {
+  const input = (value) => {
     if (["retryable_failed", "terminal_failed"].includes(latestRef.current.submitState)) submitTokenRef.current = null;
     dirtyRef.current = true;
-    if (field === "highlight") {
-      setHighlight(value);
-      setSubmitState("draft");
-      setHighlightError("");
-      setMessage("");
-    } else {
-      setSuggestion(value);
-      setSubmitState("draft");
-    }
+    setSuggestion(value);
+    setSubmitState("draft");
+    setMessage("");
     persistLocal();
   };
 
-  // ---------- 保存其他记录（等价 miniapp saveRecords，js:125-147） ----------
+  // ---------- 保存其他记录（等价 miniapp saveRecords；只写建议，闪光点由第二步保存） ----------
 
   const saveRecords = async () => {
     if (latestRef.current.saving) return null;
-    const nextHighlight = latestRef.current.highlight.trim();
     const nextSuggestion = latestRef.current.suggestion.trim();
     setSaving(true);
     setMessage("");
-    saveDraft(routeMetaRef.current, { highlight: nextHighlight, suggestion: nextSuggestion });
+    saveDraft(routeMetaRef.current, { suggestion: nextSuggestion });
     try {
-      const saved = await saveOtherRecords(routeMetaRef.current.attemptId, { highlight: nextHighlight, suggestion: nextSuggestion, revision: routeMetaRef.current.revision });
+      const saved = await saveOtherRecords(routeMetaRef.current.attemptId, { suggestion: nextSuggestion, revision: routeMetaRef.current.revision });
       if (unloadedRef.current) return null;
       const nextMeta = { ...routeMetaRef.current, revision: saved.revision };
       markDraftSynced(nextMeta, saved.revision);
@@ -156,7 +157,6 @@ export function OtherPage() {
       assignmentRevisionRef.current = saved.assignmentRevision ?? assignmentRevisionRef.current;
       dirtyRef.current = false;
       setMeta(nextMeta);
-      setHighlight(nextHighlight);
       setSuggestion(nextSuggestion);
       return saved;
     } catch (saveError) {
@@ -298,7 +298,7 @@ export function OtherPage() {
     if (latestRef.current.submitState === "retryable_failed" || latestRef.current.submitState === "processing") submitWithExistingToken();
   };
 
-  // ---------- 返回与提交确认（R80） ----------
+  // ---------- 返回与提交确认（R80，应用内弹窗 + 得分预览） ----------
 
   const locked = () => ["submitting", "processing", "submitted"].includes(latestRef.current.submitState);
 
@@ -314,23 +314,62 @@ export function OtherPage() {
     }));
   };
 
-  const confirm = async () => {
+  // 弹窗得分预览：保存同步后重新拉取当前问卷（启用题+作答，含停用题残留），用与服务端
+  // 提交落库一致的计分口径（domain.applyScoreWipe：持久化 awardedScore + 清零 + orphan）
+  // 计算百分比；拉取失败/0 满分/作答缺失 → null，弹窗如实呈现「暂时无法计算」并禁用确认
+  // （绝不虚构 100%），提供可恢复的重新获取。取消后编辑全部保留，可继续修改再次提交。
+  const fetchConfirmScore = async () => {
+    try {
+      const result = await getDraft(routeMetaRef.current.attemptId);
+      if (unloadedRef.current) return;
+      if (result.attempt.id !== routeMetaRef.current.attemptId) return;
+      const score = computeSurveyScore(result.questions, result.answers || {});
+      if (!unloadedRef.current) {
+        confirmScoreRef.current = score;
+        setConfirmScore(score);
+      }
+    } catch {
+      if (!unloadedRef.current) {
+        confirmScoreRef.current = null;
+        setConfirmScore(null); // 拉取失败保持「无法计算」占位（确认保持禁用）
+      }
+    }
+  };
+
+  const openConfirmModal = async () => {
     if (locked()) return;
-    // 重试路径：有 token 的可重试失败直接重放，跳过必填校验与确认框。
+    const saved = await saveRecords();
+    if (!saved || unloadedRef.current) return;
+    confirmGuardRef.current = false;
+    confirmScoreRef.current = null;
+    setConfirmScore(null);
+    setConfirmOpen(true);
+    fetchConfirmScore();
+  };
+
+  const cancelConfirm = () => {
+    if (locked()) return;
+    confirmGuardRef.current = false;
+    setConfirmOpen(false);
+    setConfirmScore(null);
+  };
+
+  const confirmSubmit = () => {
+    // 同步 guard + 得分必达：无得分/重复点击/已锁定一律不再发起（提交 token 幂等设计不变）。
+    if (locked() || confirmGuardRef.current || !confirmScoreRef.current) return;
+    confirmGuardRef.current = true;
+    setConfirmOpen(false);
+    submit();
+  };
+
+  const startConfirm = async () => {
+    if (locked()) return;
+    // 重试路径：有 token 的可重试失败直接重放，跳过确认弹窗。
     if (latestRef.current.submitState === "retryable_failed" && submitTokenRef.current) {
       await submitWithExistingToken();
       return;
     }
-    if (!latestRef.current.highlight.trim()) {
-      setHighlightError("请填写闪光点");
-      setMessage("");
-      setTimeout(() => document.getElementById("highlight-field")?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
-      return;
-    }
-    const saved = await saveRecords();
-    if (!saved) return;
-    // R80：保存成功后才弹不可逆确认（PM 适配点 4：wx.showModal → window.confirm）。
-    if (window.confirm("提交后将无法回看或修改本次问卷，请确认所有内容已经完成。")) submit();
+    await openConfirmModal();
   };
 
   // R85：成功页确定 → 日程 Tab。
@@ -392,21 +431,12 @@ export function OtherPage() {
       ) : (
         <>
           <Card>
-            <Field label="闪光点" required error={highlightError || undefined}>
-              <TextArea
-                id="highlight-field"
-                value={highlight}
-                placeholder="输入闪光点"
-                aria-label="闪光点，必填"
-                onChange={(event) => input("highlight", event.target.value)}
-              />
-            </Field>
             <Field label="其他建议">
               <TextArea
                 value={suggestion}
                 placeholder="请填写问卷中未列出但您认为可以改进的地方"
                 aria-label="其他建议，选填"
-                onChange={(event) => input("suggestion", event.target.value)}
+                onChange={(event) => input(event.target.value)}
               />
             </Field>
           </Card>
@@ -426,9 +456,30 @@ export function OtherPage() {
           ) : null}
 
           <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
-            <Button disabled={busy || locked()} onClick={confirm}>提交问卷</Button>
-            <Button variant="outline" disabled={busy || locked()} onClick={goBackToDishes}>上一步：菜品</Button>
+            <Button disabled={busy || locked()} onClick={startConfirm}>提交问卷</Button>
+            <Button variant="outline" disabled={busy || locked()} onClick={goBackToDishes}>上一步：其他照片</Button>
           </div>
+
+          {/* R80 提交确认：应用内弹窗（非 window.confirm）。显式不可逆警示 + 当前得分百分比；
+              确认只提交一次；取消/点遮罩关闭并保留全部编辑，可返回继续修改。 */}
+          <ConfirmModal
+            open={confirmOpen}
+            title="确认提交问卷？"
+            confirmLabel="确认提交"
+            cancelLabel="继续编辑"
+            busy={busy}
+            confirmDisabled={!confirmScore}
+            onConfirm={confirmSubmit}
+            onCancel={cancelConfirm}
+          >
+            <span className="modal-score" data-confirm-score={confirmScore ? String(confirmScore.percent) : "unavailable"}>
+              {confirmScore ? `当前得分 ${confirmScore.percent}%（${confirmScore.totalScore}/${confirmScore.maxScore} 分）` : "得分率暂时无法计算"}
+            </span>
+            {!confirmScore ? (
+              <Button variant="link" small disabled={busy} onClick={fetchConfirmScore}>重新获取得分</Button>
+            ) : null}
+            <span>问卷提交后无法再次修改，请确认所有内容已经完成。</span>
+          </ConfirmModal>
         </>
       )}
     </div>

@@ -34,3 +34,16 @@ page { min-height: 100%; background: #ffffff; }
 .success-time { margin-top: 22rpx; color: #777777; font-size: 24rpx; }
 .success-copy { max-width: 560rpx; margin-top: 22rpx; color: #777777; font-size: 25rpx; line-height: 1.65; }
 .success-action { width: 360rpx; margin-top: 52rpx; }
+
+/* 提交确认弹窗（自定义 WXML，非 wx.showModal） */
+.confirm-mask { position: fixed; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center; padding: 48rpx; background: rgba(20, 21, 24, .55); }
+.confirm-panel { display: flex; flex-direction: column; gap: 18rpx; width: 100%; max-width: 560rpx; padding: 40rpx 32rpx 32rpx; border-radius: 20rpx; background: #ffffff; box-sizing: border-box; }
+.confirm-title { color: #26272a; font-size: 34rpx; font-weight: 700; text-align: center; }
+.confirm-score { color: #f25f42; font-size: 32rpx; font-weight: 700; text-align: center; }
+.confirm-copy { color: #5a5d63; font-size: 26rpx; line-height: 1.6; text-align: center; }
+.confirm-actions { display: grid; grid-template-columns: 1fr 1.4fr; gap: 20rpx; margin-top: 10rpx; }
+.confirm-cancel { height: 84rpx; border-radius: 10rpx; color: #e75b40; background: #eeeeee; font-size: 29rpx; line-height: 84rpx; }
+.confirm-primary { height: 84rpx; border-radius: 10rpx; color: #ffffff; background: #ff6848; font-size: 29rpx; font-weight: 500; line-height: 84rpx; }
+.confirm-cancel[disabled],
+.confirm-primary[disabled] { opacity: .62; }
+.confirm-retry { width: auto; height: 62rpx; margin: 0; padding: 0 24rpx; color: #e75b40; background: #ffffff; font-size: 24rpx; line-height: 62rpx; }

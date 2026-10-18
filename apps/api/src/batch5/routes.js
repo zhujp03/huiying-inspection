@@ -274,6 +274,22 @@ export function registerBatch5Routes(app, { pool, cos }) {
       evidenceByQuestion.set(item.questionId, list);
     }
     const candidates = submission.ocr_snapshot_json.map((item) => ({ id: item.id, name: receiptName(item), quantity: item.quantity ?? null, unitPriceCents: item.unit_price_cents ?? null, lineTotalCents: item.line_total_cents ?? null, source: "ocr", manuallyModified: false, priceDerived: false, reviewFields: [] }));
+    // 结构化闪光点（新提交快照携带照片行，ready 照片签发预签名 URL，单张失败按无预览呈现）；
+    // 历史提交无结构化条目时按旧单条 highlight 字符串兜底为一条（照片为空）。
+    const snapshotHighlights = Array.isArray(submission.other_snapshot_json?.highlights) ? submission.other_snapshot_json.highlights : [];
+    const highlights = snapshotHighlights.length
+      ? await Promise.all(snapshotHighlights.map(async (item) => ({
+        id: String(item.id),
+        text: String(item.text ?? ""),
+        photos: await Promise.all((Array.isArray(item.photos) ? item.photos : []).filter((photo) => photo.storage_key).map(async (photo) => {
+          try {
+            return { id: String(photo.id), previewUrl: (await cos.createPreviewUrl(photo.storage_key)).url };
+          } catch {
+            return { id: String(photo.id), previewUrl: null };
+          }
+        })),
+      })))
+      : (submission.other_snapshot_json?.highlight ? [{ id: submission.id, text: String(submission.other_snapshot_json.highlight), photos: [] }] : []);
     const finalDishes = submission.dish_snapshot_json.map((item) => ({ id: item.id, name: receiptName(item), quantity: item.quantity ?? item.planned_quantity ?? null, unitPriceCents: item.unit_price_cents ?? null, lineTotalCents: item.line_total_cents ?? null, source: item.source, manuallyModified: Boolean(item.manually_modified), priceDerived: Boolean(item.price_derived), reviewFields: item.review_fields || [] }));
     const recognizedCents = sumCents(candidates);
     const finalCents = sumCents(finalDishes);
@@ -283,6 +299,7 @@ export function registerBatch5Routes(app, { pool, cos }) {
       questionnaireName: submission.questionnaire_name, versionLabel: `V${submission.version_number}`, totalScore: Number(submission.total_score), scoreRate: percent(submission.total_score, submission.max_score), issueCount: Number(submission.issue_count),
       // 高亮在极早期快照里可能缺失/null：详情契约要求非空字符串，按空串如实呈现（不伪造内容）
       highlight: submission.other_snapshot_json?.highlight ?? "", suggestion: submission.other_snapshot_json?.suggestion || null,
+      highlights,
       receiptComparison: { receipts, ocrCandidates: candidates, finalDishes, receiptTotals: { recognizedCents, finalCents, differenceCents: recognizedCents === null || finalCents === null ? null : finalCents - recognizedCents }, differences },
       // 菜品 DTO 与 batch4 dishView 同构：evaluation/fullySatisfied 是契约必填（evaluation 可空），
       // 快照来自 dish_records 全行 JSON，缺失/null 属历史形态——null 如实保留，布尔缺失按 false（保守方向），绝不把未评价菜品标成满意

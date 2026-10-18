@@ -11,6 +11,9 @@
 //   cancelIssue           → POST  drafts.cancelEdit(:attemptId,:questionId,:editSessionId)
 //   saveDishes            → PUT   drafts.dishes(:attemptId)
 //   saveOtherRecords      → PUT   drafts.otherRecords(:attemptId)
+//   initHighlightPhotoUpload     → POST  drafts.highlightPhotoUploads(:attemptId,:highlightId)
+//   completeHighlightPhotoUpload → POST  drafts.highlightPhotoComplete(:attemptId,:highlightId,:attachmentId)
+//   deleteHighlightPhoto         → DELETE drafts.highlightPhoto(:attemptId,:highlightId,:attachmentId)
 //   submitQuestionnaire   → POST  drafts.submit(:attemptId)
 // dedupeKey（R11/R79）：answer:{a}:{q}、dishes:{a}、other:{a}、submit:{a}:{payload.submitToken}
 // （同 token 幂等重放依赖此键）；token 更换 dedupeKey 随之变化（R78）。
@@ -109,6 +112,46 @@ export function saveDishes(attemptId, payload) {
 
 export function saveOtherRecords(attemptId, data) {
   return request({ url: endpointRegistry.drafts.otherRecords.path(attemptId), method: "PUT", data, validate: assertRevision, dedupeKey: `other:${attemptId}` });
+}
+
+// 闪光点照片三步直传（init → 直传 → complete），响应与消费小票同构：
+// init/complete 返回 { photo, uploadTarget?/revision }，删除返回 { revision }。
+function assertHighlightUploadInit(value) {
+  assertObject(value);
+  assertObject(value.photo);
+  assertId(value.photo.id, "photo.id");
+  // ready 幂等重放返回 uploadTarget:null（对象已校验落位，无凭据可发）；其余形态必须带可用的直传目标。
+  if (value.photo.status === "ready") {
+    if (value.uploadTarget !== null) throw new Error("ready replay must carry uploadTarget:null");
+  } else {
+    assertObject(value.uploadTarget);
+  }
+  return assertRevision(value);
+}
+
+function assertHighlightPhotoView(value) {
+  assertObject(value);
+  // 终态：{ photo, revision }；中间态（服务端校验租约被占用，202）：{ id, status:"verifying", revision }。
+  if (value.status === "verifying") {
+    assertId(value.id, "verifying.id");
+    return assertRevision(value);
+  }
+  assertObject(value.photo);
+  assertId(value.photo.id, "photo.id");
+  return assertRevision(value);
+}
+
+export function initHighlightPhotoUpload(attemptId, highlightId, payload) {
+  // 与 evidence init 同理：dedupeKey 含 clientFileId，并发多张照片的 init 互不合并。
+  return request({ url: endpointRegistry.drafts.highlightPhotoUploads.path(attemptId, highlightId), method: "POST", data: payload, dedupeKey: `highlight-photo-init:${attemptId}:${highlightId}:${payload.fileMeta.clientFileId}`, validate: assertHighlightUploadInit });
+}
+
+export function completeHighlightPhotoUpload(attemptId, highlightId, attachmentId, payload) {
+  return request({ url: endpointRegistry.drafts.highlightPhotoComplete.path(attemptId, highlightId, attachmentId), method: "POST", data: payload, validate: assertHighlightPhotoView });
+}
+
+export function deleteHighlightPhoto(attemptId, highlightId, attachmentId, payload) {
+  return request({ url: endpointRegistry.drafts.highlightPhoto.path(attemptId, highlightId, attachmentId), method: "DELETE", data: payload, validate: assertRevision });
 }
 
 export function submitQuestionnaire(attemptId, payload) {

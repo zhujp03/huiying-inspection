@@ -2,11 +2,11 @@
   <view class="app-nav" style="padding-top: {{statusBarHeight}}px;">
     <view class="app-nav__bar" style="height: {{navBarHeight}}px;">
       <button class="app-nav__back" aria-label="保存并返回产品品质题目" disabled="{{saving}}" bindtap="back">‹</button>
-      <text class="app-nav__title">菜品记录</text>
+      <text class="app-nav__title">其他照片</text>
     </view>
   </view>
 
-  <view class="flow-steps" aria-label="填写流程共三步，当前第二步：菜品与小票"><view class="flow-step flow-step--done"><text class="flow-step__num">✓</text><text class="flow-step__label">答题</text></view><view class="flow-step__bar flow-step__bar--done"></view><view class="flow-step flow-step--active"><text class="flow-step__num">2</text><text class="flow-step__label">菜品与小票</text></view><view class="flow-step__bar"></view><view class="flow-step"><text class="flow-step__num">3</text><text class="flow-step__label">其他记录</text></view></view>
+  <view class="flow-steps" aria-label="填写流程共三步，当前第二步：其他照片"><view class="flow-step flow-step--done"><text class="flow-step__num">✓</text><text class="flow-step__label">答题</text></view><view class="flow-step__bar flow-step__bar--done"></view><view class="flow-step flow-step--active"><text class="flow-step__num">2</text><text class="flow-step__label">其他照片</text></view><view class="flow-step__bar"></view><view class="flow-step"><text class="flow-step__num">3</text><text class="flow-step__label">其他记录</text></view></view>
 
   <view wx:if="{{loading}}" class="state-panel muted">正在加载菜品要求…</view>
   <view wx:elif="{{error}}" class="state-panel"><text>{{error}}</text><button class="state-retry" bindtap="retry">重新加载</button></view>
@@ -51,7 +51,40 @@
       <view wx:if="{{ocrError}}" class="ocr-error" aria-role="alert"><text>{{ocrError}}</text><button bindtap="continueManual">继续手工填写</button></view>
     </view>
 
-    <view class="dish-list">
+    <!-- 闪光点编辑器（第二步新增；0..5 条，每条文字 + 选填照片 ≤4 张） -->
+    <view class="highlight-section">
+      <view class="section-heading">
+        <view><text class="section-title">闪光点</text><text class="section-caption">最多 {{highlightEntryLimit}} 条，每条可附最多 {{highlightPhotoLimit}} 张照片（单张不超过 10MB）</text></view>
+      </view>
+      <view wx:for="{{highlights}}" wx:key="id" wx:for-index="entryIndex" id="highlight-{{item.id}}" class="highlight-item" data-highlight-id="{{item.id}}">
+        <view class="highlight-item__head">
+          <text>闪光点 {{entryIndex + 1}}</text>
+          <button class="highlight-remove" data-id="{{item.id}}" disabled="{{highlightBusy || saving}}" bindtap="removeHighlight">删除本条</button>
+        </view>
+        <textarea class="highlight-textarea" data-id="{{item.id}}" value="{{item.text}}" adjust-position="{{true}}" cursor-spacing="40" maxlength="-1" bindinput="inputHighlight" placeholder="描述这条闪光点（文字和照片都可留空）" aria-label="闪光点 {{entryIndex + 1}} 描述" />
+        <view class="highlight-photos">
+          <view wx:for="{{item.photos}}" wx:for-item="photo" wx:key="id" class="highlight-tile-wrap">
+            <button class="highlight-tile" data-url="{{photo.previewUrl}}" bindtap="previewReceipt" aria-label="查看闪光点 {{entryIndex + 1}} 的照片">
+              <image wx:if="{{photo.previewUrl}}" src="{{photo.previewUrl}}" mode="aspectFill" />
+              <view wx:else class="highlight-placeholder">处理中</view>
+            </button>
+            <button class="highlight-tile__remove" data-id="{{item.id}}" data-photo-id="{{photo.id}}" disabled="{{highlightBusy}}" bindtap="deleteHighlightPhotoItem" aria-label="删除闪光点 {{entryIndex + 1}} 的这张照片">×</button>
+          </view>
+          <view wx:for="{{item.pending}}" wx:for-item="pending" wx:key="clientFileId" class="highlight-tile-wrap">
+            <button class="highlight-tile" data-url="{{pending.localPath}}" bindtap="previewReceipt" aria-label="查看待上传闪光点照片">
+              <image src="{{pending.localPath}}" mode="aspectFill" />
+            </button>
+            <view wx:if="{{pending.status === 'uploading' || pending.status === 'confirming'}}" class="highlight-progress"><view style="width: {{pending.progressPercent}}%;"></view></view>
+            <view wx:if="{{pending.status === 'failed'}}" class="highlight-failure"><text>{{pending.message}}</text><button data-id="{{item.id}}" data-file-id="{{pending.clientFileId}}" bindtap="retryHighlightUpload">重试</button></view>
+            <button class="highlight-tile__remove" data-id="{{item.id}}" data-file-id="{{pending.clientFileId}}" disabled="{{pending.status === 'uploading' || pending.status === 'confirming'}}" bindtap="removeHighlightPending" aria-label="移除待上传闪光点照片">×</button>
+          </view>
+          <button wx:if="{{item.photos.length + item.pending.length < highlightPhotoLimit}}" class="highlight-add-photo" data-id="{{item.id}}" disabled="{{highlightBusy}}" bindtap="chooseHighlightPhoto" aria-label="为闪光点 {{entryIndex + 1}} 添加照片"><text>＋</text></button>
+        </view>
+      </view>
+      <button wx:if="{{highlights.length < highlightEntryLimit}}" class="highlight-add" disabled="{{highlightBusy || saving}}" bindtap="addHighlight" aria-label="添加一条闪光点"><text class="highlight-add__icon">+</text><text>添加一条闪光点</text></button>
+    </view>
+
+    <view wx:if="{{dishEnabled}}" class="dish-list">
       <view wx:for="{{dishes}}" wx:key="id" id="dish-{{item.id}}" class="dish-block {{item.error ? 'dish-block--error' : ''}}">
         <view class="dish-primary-row">
           <view class="dish-order">第{{index + 1}}道菜</view>
@@ -96,7 +129,7 @@
       </view>
     </view>
 
-    <button class="add-dish" disabled="{{saving}}" bindtap="add" aria-label="添加其他菜品"><text class="add-dish__icon">+</text><text>点击添加其他菜品</text></button>
+    <button wx:if="{{dishEnabled}}" class="add-dish" disabled="{{saving}}" bindtap="add" aria-label="添加其他菜品"><text class="add-dish__icon">+</text><text>点击添加其他菜品</text></button>
     <view wx:if="{{validationMessage}}" class="page-error" aria-role="alert">{{validationMessage}}</view>
     <view class="page-actions"><button class="secondary-action" disabled="{{saving}}" bindtap="back">{{saving ? '保存中…' : '上一步：答题'}}</button><button class="primary-action" loading="{{saving}}" disabled="{{saving}}" bindtap="next">下一步：其他记录</button></view>
   </view>

@@ -57,11 +57,11 @@ const manifestFunctionUnion = async () => {
 };
 
 describe("反遗漏断言：api.js ↔ app-manifest ↔ srcPathList", () => {
-  it("小程序 api.js 恰好导出 33 个函数，且每个都归入 manifest.services 某域", async () => {
+  it("小程序 api.js 恰好导出 36 个函数，且每个都归入 manifest.services 某域", async () => {
     const { functions, classes } = extractApiExports();
     assert.equal(classes.length, 1, "api.js 应恰好导出一个类（BusinessError）");
-    assert.equal(functions.length, 33, `api.js 导出函数应为 33 个，实际 ${functions.length}`);
-    assert.equal(new Set(functions).size, 33, "api.js 导出函数名不得重复");
+    assert.equal(functions.length, 36, `api.js 导出函数应为 36 个，实际 ${functions.length}`);
+    assert.equal(new Set(functions).size, 36, "api.js 导出函数名不得重复");
     const union = await manifestFunctionUnion();
     const unionSet = new Set(union);
     const missing = functions.filter((name) => !unionSet.has(name));
@@ -72,7 +72,7 @@ describe("反遗漏断言：api.js ↔ app-manifest ↔ srcPathList", () => {
     const { functions } = extractApiExports();
     const union = await manifestFunctionUnion();
     const expected = [...new Set([...functions, ...PORTED_EXTRA])].sort();
-    assert.deepEqual([...new Set(union)].sort(), expected, "manifest.services 函数并集应恰为 api.js 33 函数 + 2 个移植函数");
+    assert.deepEqual([...new Set(union)].sort(), expected, "manifest.services 函数并集应恰为 api.js 36 函数 + 2 个移植函数");
   });
 
   it("api.js 导出的 BusinessError 类由 utils/errors.js 等价导出（含 presentError）", async () => {

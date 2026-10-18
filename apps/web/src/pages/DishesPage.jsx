@@ -1,9 +1,10 @@
-// DishesPage — dishes 菜品与小票·第二步（inventory §1.9；rules R15/R16/R31/R40/R51-R75/R89）。
-// 语义真源：apps/miniapp/miniprogram/pages/dishes/index.js（433 行）逐函数移植。
-// 区块 ↔ inventory §1.9 a 对照：自定义导航（保存并回问卷）/ 三步流程条（第二步 active）/
-// 加载与错误态 / 消费小票区（标题+必传星+计数、加载/错误提示、小票网格[服务端瓦片/待传瓦片/添加]、
-// OCR 面板（门控 receiptOcr）、OCR 错误条）/ 菜品列表（主行+业务标签+任务行+条件字段+折叠区+
-// 折叠摘要+错误条+删除）/ 添加菜品 / 页面级校验错误 / 底部上一步/下一步。
+// DishesPage — dishes 其他照片·第二步（原「菜品与小票」，菜品区块改为服务端开关门控；
+// rules R15/R16/R31/R40/R51-R75/R89 + 2026-10 闪光点结构化）。
+// 语义真源：apps/miniapp/miniprogram/pages/dishes/index.js 逐函数移植。
+// 区块对照：自定义导航（保存并回问卷）/ 三步流程条（第二步 active）/ 加载与错误态 /
+// 消费小票区（保留既有上传/OCR 行为）/ 闪光点编辑器（0..5 条，每条文字+选填照片≤4 张，
+// 默认一条空白编辑器——完全空白在保存时忽略，零条可提交）/ 菜品列表（features.dishRecords
+// 开启才渲染；关闭时历史菜品既不展示也不校验、不阻断前进）/ 页面级校验错误 / 底部上一步/下一步。
 // PM 钉定 Web 适配点（本页）：
 // 1) 小票选图：隐藏 <input type="file" accept="image/jpeg,image/png" multiple>；类型判定
 //    file.type/name 后缀（.png→image/png 否则 image/jpeg）；文件名取 file.name 兜底 "receipt.jpg"；
@@ -19,11 +20,15 @@
 //    OCR 轮询定时器清理）；从 other 返回 dishes = 组件重挂载，load() 恢复 pendingReceipts/recovery/轮询。
 // 5) 401：捕获 kind=session → toast + redirectToLogin()。
 // 6) wx.pageScrollTo(selector) → scrollIntoView；wx.navigateBack/redirectTo → context.back(fallback)/replace。
+// 7) 闪光点照片走独立三步直传（先保存条目再传图，服务端按条目 id 归属校验）；条目 id 为客户端
+//    生成并跨导航/刷新稳定保留，保证照片关联不漂移、不产生跨记录串写。
 import React, { useEffect, useRef, useState } from "react";
-import { Button, Card, FlowSteps, Muted, PageNav, SectionHeading } from "../design/components.jsx";
+import { Button, Card, FlowSteps, Muted, PageNav, SectionHeading, TextArea } from "../design/components.jsx";
 import { useApp } from "./app-context.jsx";
 import { getAssignment } from "../services/assignments.js";
-import { getDraft, saveDishes } from "../services/drafts.js";
+import {
+  completeHighlightPhotoUpload, deleteHighlightPhoto, getDraft, initHighlightPhotoUpload, saveDishes, saveOtherRecords,
+} from "../services/drafts.js";
 import {
   applyReceiptOcrJob, completeReceiptUpload, createReceiptOcrJob, deleteReceiptAttachment,
   getReceiptOcrJob, initializeReceiptUpload, listReceiptAttachments,
@@ -46,10 +51,16 @@ const ALL_STATUSES = [
   { value: "extra", label: "额外菜品" },
 ];
 const RECEIPT_STATUS_LABELS = { uploading: "上传中", ready: "上传完成", failed: "上传失败", local_selected: "等待上传", confirming: "正在确认" };
+// 闪光点有界上限（与服务端 contracts HIGHLIGHT_ENTRY_LIMIT/HIGHLIGHT_PHOTO_LIMIT 对齐；
+// 本地常量避免把 zod 契约包带进 web 产物）。
+const HIGHLIGHT_ENTRY_LIMIT = 5;
+const HIGHLIGHT_PHOTO_LIMIT = 4;
 
 // 待传小票的 File 运行时缓存（模块级）：persistLocal 脱敏会剔除 File，重挂载恢复的待传项
 // 重传时由此取回文件；生命周期与 blob URL 一致（SPA 会话内有效，整页刷新后失效）。
 const receiptFileCache = new Map();
+// 待传闪光点照片的 File 运行时缓存（同 receiptFileCache 语义，按 clientFileId 取回）。
+const highlightFileCache = new Map();
 
 // hash 路由查询参数（Web 适配：页面自读，等价 miniapp onLoad(options)）。
 function routeQuery() {
@@ -74,6 +85,12 @@ export function DishesPage() {
   const [ocrView, setOcrView] = useState(() => ocrStatusView(null));
   const [ocrBusy, setOcrBusy] = useState(false);
   const [ocrError, setOcrError] = useState("");
+  const [highlights, setHighlights] = useState([]);
+  const [highlightBusy, setHighlightBusy] = useState(false);
+  // 忙互斥以 ref 为准（同步可见）：React 状态经批量更新延迟提交，异步闭包内读 state 会
+  // 读到旧值导致首个上传被静默跳过；state 仅用于渲染禁用。
+  const highlightBusyRef = useRef(false);
+  const applyHighlightBusy = (value) => { highlightBusyRef.current = value; setHighlightBusy(value); };
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -93,14 +110,20 @@ export function DishesPage() {
   const applyingJobIdRef = useRef(null);
   const cancelledUploadsRef = useRef(null);
   if (!cancelledUploadsRef.current) cancelledUploadsRef.current = createCancelledUploads();
+  // 闪光点照片上传取消登记（与 cancelledUploadsRef 同语义，按条目内 clientFileId）。
+  const cancelledHighlightUploadsRef = useRef(null);
+  if (!cancelledHighlightUploadsRef.current) cancelledHighlightUploadsRef.current = createCancelledUploads();
   // blob URL 登记表（url → clientFileId）：移除/上传完成时按 id 回收。
   const objectUrlsRef = useRef(new Map());
   // 选图（PM 适配点 1）：添加小票（可多选）与失败小票换图（单选）各一个隐藏 input。
   const fileInputRef = useRef(null);
   const replaceInputRef = useRef(null);
   const replaceTargetRef = useRef(null);
+  // 闪光点照片选图（每条一个隐藏 input，data-highlight 区分条目）。
+  const highlightInputRef = useRef(null);
+  const highlightInputTargetRef = useRef(null);
 
-  latestRef.current = { dishes, receipts, pendingReceipts, receiptBusy, saving, ocrBusy, meta };
+  latestRef.current = { dishes, receipts, pendingReceipts, receiptBusy, saving, ocrBusy, meta, highlights, highlightBusy };
 
   // ---------- 基础投影与序列化（等价 miniapp 底部工具函数） ----------
 
@@ -114,6 +137,7 @@ export function DishesPage() {
     try {
       saveDraft(routeMetaRef.current, {
         dishes: latestRef.current.dishes.map((dish, index) => serialiseDish(dish, index)),
+        highlights: latestRef.current.highlights.map(serializeHighlight),
         receiptRecovery: {
           pendingReceipts: latestRef.current.pendingReceipts.map(stripPendingSecrets),
           jobId: recoveryRef.current?.jobId || null,
@@ -234,20 +258,29 @@ export function DishesPage() {
       const nextDishes = (useLocal ? local.dishes : serverDishes).map((dish) => projectDish(enrichDish(dish, result.dishRequirements || [])));
       const recovery = local.receiptRecovery || {};
       const nextPending = (recovery.pendingReceipts || []).filter((item) => item.localPath).map(projectPendingReceipt);
-      if (!useLocal) {
-        saveDraft(nextMeta, { dishes: nextDishes.map((dish, index) => serialiseDish(dish, index)) });
-        markDraftSynced(nextMeta, nextMeta.revision);
-      }
+      // 闪光点：本地未同步优先；否则采用服务端结构化条目；无结构化条目时按旧单条
+      // highlight 字符串兜底为一条未持久化条目（首次保存落库，历史数据不丢）。
+      const useLocalHighlights = local.synced === false && Array.isArray(local.highlights);
+      const nextHighlights = useLocalHighlights
+        ? local.highlights.map(rehydrateHighlight)
+        : buildServerHighlights(result.otherRecords || {});
+      // 草稿 synced 标志是 dishes/highlights 共用的「本地有未同步内容」语义：
+      // 只有两边都以服务端为准时才可整体置已同步，任一维本地未同步都保持 synced:false。
+      if (!useLocal) saveDraft(nextMeta, { dishes: nextDishes.map((dish, index) => serialiseDish(dish, index)) });
+      if (!useLocalHighlights) saveDraft(nextMeta, { highlights: nextHighlights.map(serializeHighlight) });
+      if (!useLocal && !useLocalHighlights) markDraftSynced(nextMeta, nextMeta.revision);
       routeMetaRef.current = nextMeta;
       // R51 边注：首访（服务端无 dishes）也置脏，确保落本地草稿。
       dirtyRef.current = Boolean(useLocal) || !(result.dishes || []).length;
       recoveryRef.current = { jobId: recovery.jobId || null, applyKey: recovery.applyKey || null, appliedJobId: recovery.appliedJobId || null };
       latestRef.current.dishes = nextDishes;
       latestRef.current.pendingReceipts = nextPending;
+      latestRef.current.highlights = nextHighlights;
       if (unloadedRef.current) return;
       setMeta(nextMeta);
       applyDishes(nextDishes);
       applyPending(nextPending);
+      applyHighlights(nextHighlights);
       setReceiptRequired(Boolean(assignment.receiptRequired));
       setLoading(false);
       await loadReceipts();
@@ -650,6 +683,307 @@ export function DishesPage() {
     }
   };
 
+  // ---------- 闪光点编辑器（0..5 条，每条文字 + 选填照片 ≤4 张） ----------
+
+  const applyHighlights = (next) => { latestRef.current.highlights = next; setHighlights(next); };
+
+  const patchHighlights = (next, { persist = true } = {}) => {
+    dirtyRef.current = true;
+    applyHighlights(next);
+    if (persist) persistLocal();
+  };
+
+  const updateHighlight = (highlightId, patch) => {
+    patchHighlights(latestRef.current.highlights.map((item) => (item.id === highlightId ? { ...item, ...patch } : item)));
+  };
+
+  const addHighlight = () => {
+    if (latestRef.current.highlights.length >= HIGHLIGHT_ENTRY_LIMIT) return;
+    setValidationMessage("");
+    patchHighlights([...latestRef.current.highlights, { id: secureUuid(), text: "", persisted: false, photos: [], pending: [] }]);
+  };
+
+  const removeHighlight = (highlightId) => {
+    const entry = latestRef.current.highlights.find((item) => item.id === highlightId);
+    if (!entry) return;
+    const hasContent = entry.text.trim() || entry.photos.length || entry.pending.length;
+    if (hasContent && !window.confirm("删除这条闪光点？已附照片会一起删除。")) return;
+    setValidationMessage("");
+    patchHighlights(latestRef.current.highlights.filter((item) => item.id !== highlightId));
+  };
+
+  const inputHighlight = (highlightId, text) => {
+    setValidationMessage("");
+    updateHighlight(highlightId, { text });
+  };
+
+  // 把全部条目保存到服务端：条目 id 即服务端行 id，照片上传前必须先保存落库。
+  // 常规保存过滤完全空白条目（默认空白编辑器被忽略、零条可提交）；
+  // 传图前保存用 includeIds 强制带上目标条目（此刻它文字为空且无照片，但必须先落库）。
+  const persistHighlightsToServer = async ({ includeIds = [] } = {}) => {
+    const payload = latestRef.current.highlights
+      .filter((item) => item.text.trim() || item.photos.length || item.pending.length || includeIds.includes(item.id))
+      .map((item) => ({ id: item.id, text: item.text.trim() }));
+    const saved = await saveOtherRecords(routeMetaRef.current.attemptId, { highlights: payload, revision: routeMetaRef.current.revision });
+    updateRevision(saved.revision);
+    patchHighlights(latestRef.current.highlights.map((item) => ({ ...item, persisted: payload.some((entry) => entry.id === item.id) })), { persist: true });
+    return saved;
+  };
+
+  const chooseHighlightPhoto = (highlightId) => {
+    const entry = latestRef.current.highlights.find((item) => item.id === highlightId);
+    if (!entry || highlightBusyRef.current) return;
+    if (entry.photos.length + entry.pending.length >= HIGHLIGHT_PHOTO_LIMIT) {
+      toast(`每条闪光点最多上传 ${HIGHLIGHT_PHOTO_LIMIT} 张照片`);
+      return;
+    }
+    highlightInputTargetRef.current = highlightId;
+    highlightInputRef.current?.click();
+  };
+
+  const onHighlightFilesChosen = async (event) => {
+    const inputEl = event.target;
+    const chosen = Array.from(inputEl.files || []);
+    inputEl.value = ""; // 允许重复选择同一文件
+    const highlightId = highlightInputTargetRef.current;
+    highlightInputTargetRef.current = null;
+    const entry = latestRef.current.highlights.find((item) => item.id === highlightId);
+    if (!entry) return;
+    const remaining = HIGHLIGHT_PHOTO_LIMIT - entry.photos.length - entry.pending.length;
+    const files = chosen.slice(0, Math.max(0, remaining));
+    if (!files.length) return;
+    if (files.some((file) => file.size > 10 * 1024 * 1024)) {
+      toast("单个文件不能超过 10MB");
+      return;
+    }
+    setValidationMessage("");
+    try {
+      // 照片必须挂到已落库条目：目标条目（此刻文字为空且无照片）先随整组强制落库。
+      if (latestRef.current.highlights.some((item) => !item.persisted || item.id === highlightId)) {
+        applyHighlightBusy(true);
+        try {
+          await persistHighlightsToServer({ includeIds: [highlightId] });
+        } finally {
+          applyHighlightBusy(false); // 释放忙标志：后续上传链自身的忙互斥接管
+        }
+      }
+    } catch (saveError) {
+      applyHighlightBusy(false);
+      if (unloadedRef.current) return;
+      if (handleSessionError(saveError)) return;
+      const message = safeMessage(saveError, "暂时无法保存闪光点，请重试");
+      setValidationMessage(message);
+      toast(message);
+      return;
+    }
+    const pending = files.map((file) => {
+      const clientFileId = secureUuid();
+      const item = {
+        clientFileId,
+        localPath: trackObjectUrl(URL.createObjectURL(file), clientFileId),
+        sizeBytes: file.size,
+        mimeType: receiptMime(file),
+        fileName: receiptName(file),
+        status: "local_selected",
+        progressPercent: 0,
+        message: "等待上传",
+      };
+      item.file = file;
+      highlightFileCache.set(clientFileId, file);
+      return item;
+    });
+    updateHighlight(highlightId, { pending: [...entry.pending, ...pending] });
+    const runSerial = async () => {
+      for (const item of pending) await uploadHighlightPhoto(highlightId, item.clientFileId);
+    };
+    runSerial();
+  };
+
+  const updateHighlightPending = (highlightId, next) => {
+    patchHighlights(latestRef.current.highlights.map((item) => (item.id === highlightId
+      ? { ...item, pending: item.pending.map((pending) => (pending.clientFileId === next.clientFileId ? { ...pending, ...next } : pending)) }
+      : item)));
+  };
+
+  const uploadHighlightPhoto = async (highlightId, clientFileId) => {
+    const entry = latestRef.current.highlights.find((item) => item.id === highlightId);
+    const pending = entry?.pending.find((item) => item.clientFileId === clientFileId);
+    if (!entry || !pending || highlightBusyRef.current) return;
+    applyHighlightBusy(true);
+    // 把服务端确认的照片落位（complete 成功 / init ready 重放两条路径共用）。
+    const markReadyAndCleanup = (readyPhoto, revision) => {
+      if (revision !== undefined) updateRevision(revision);
+      updateHighlight(highlightId, {
+        photos: [...entry.photos, { id: readyPhoto.id, previewUrl: readyPhoto.previewUrl, status: "ready" }],
+        persisted: true,
+      });
+      releaseObjectUrl(clientFileId);
+      highlightFileCache.delete(clientFileId);
+      patchHighlights(latestRef.current.highlights.map((item) => (item.id === highlightId
+        ? { ...item, pending: item.pending.filter((pending) => pending.clientFileId !== clientFileId) }
+        : item)));
+      setValidationMessage("");
+    };
+    try {
+      // 重试语义（保留同一 clientFileId，状态按失败原因分流）：
+      //   - verifyPending 且已知 attachmentId（complete 返回 202，服务端租约校验中）：绝不重发
+      //     init/直传覆盖对象，仅按 Retry-After 间隔重放 complete；确定性失败（校验失败/STALE 等）
+      //     清标记走全链重 init。attachmentId 未知（init 响应丢失且撞租约）时绝不调 complete，
+      //     只重试受保护的 init 直到可用或租约到期。
+      //   - 其他失败（直传/init/complete 失败）：一律重新 init 刷新状态与凭据（failed 复位、
+      //     过期目标重签），绝不复用可能已失效的 uploadTarget；ready 重放（target=null）则直接采纳。
+      const replayVerify = Boolean(pending.verifyPending && pending.attachmentId);
+      if (replayVerify) {
+        await new Promise((resolve) => setTimeout(resolve, 1000)); // honor Retry-After（服务器 202 附带 1s）
+        if (unloadedRef.current) return;
+        if (cancelledHighlightUploadsRef.current.has(clientFileId)) return;
+        const current = { ...pending, status: "confirming", progressPercent: 100, message: "正在确认上传" };
+        updateHighlightPending(highlightId, current);
+        const completed = await completeHighlightPhotoUpload(routeMetaRef.current.attemptId, highlightId, current.attachmentId, {
+          fileMeta: { clientFileId, fileName: current.fileName, mimeType: current.mimeType, sizeBytes: current.sizeBytes },
+          revision: routeMetaRef.current.revision,
+        });
+        if (unloadedRef.current) return;
+        if (cancelledHighlightUploadsRef.current.has(clientFileId)) return;
+        if (completed.status === "verifying") {
+          updateHighlightPending(highlightId, { ...current, status: "failed", verifyPending: true, message: "照片确认仍在进行，请稍候点击重试" });
+          return;
+        }
+        markReadyAndCleanup(completed.photo, completed.revision);
+        return;
+      }
+      const mustReinit = pending.status === "failed" || !pending.uploadTarget;
+      let current = { ...pending, status: "uploading", message: "准备上传", progressPercent: 1 };
+      updateHighlightPending(highlightId, current);
+      let target = current.uploadTarget;
+      if (mustReinit || !target) {
+        const init = await initHighlightPhotoUpload(routeMetaRef.current.attemptId, highlightId, {
+          fileMeta: { clientFileId, fileName: current.fileName, mimeType: current.mimeType, sizeBytes: current.sizeBytes },
+          revision: routeMetaRef.current.revision,
+        });
+        if (unloadedRef.current) return;
+        if (cancelledHighlightUploadsRef.current.has(clientFileId)) return;
+        updateRevision(init.revision);
+        current = { ...current, attachmentId: init.photo.id, uploadTarget: init.uploadTarget, initReadyPhoto: init.uploadTarget ? null : init.photo };
+        target = init.uploadTarget;
+        updateHighlightPending(highlightId, current);
+      }
+      if (!target) {
+        // init 幂等重放返回 ready（uploadTarget=null）：对象已在服务端校验落位，绝不重传/覆盖，
+        // 直接把服务端确认的照片并入条目（与 complete 成功同一落地路径）。
+        const readyPhoto = current.initReadyPhoto || { id: current.attachmentId, previewUrl: null };
+        markReadyAndCleanup(readyPhoto);
+        return;
+      }
+      const file = current.file || highlightFileCache.get(clientFileId);
+      const uploaded = await uploadToSignedTarget(target, file, (progress) => updateHighlightPending(highlightId, { ...current, status: "uploading", progressPercent: progress, message: `正在上传 ${progress}%` }));
+      if (unloadedRef.current) return;
+      if (cancelledHighlightUploadsRef.current.has(clientFileId)) return;
+      current = { ...current, status: "confirming", progressPercent: 100, message: "正在确认上传" };
+      updateHighlightPending(highlightId, current);
+      // 先 await 真实摘要再发 complete：schema 要求 64-hex 字符串，未 await 的 Promise
+      // 会被 JSON 序列化成 {} 而被 422 拒绝（服务端 verifyObject 仍为唯一事实源）。
+      const clientSha256 = await uploadedSha(file, uploaded);
+      if (unloadedRef.current) return;
+      if (cancelledHighlightUploadsRef.current.has(clientFileId)) return;
+      const completed = await completeHighlightPhotoUpload(routeMetaRef.current.attemptId, highlightId, current.attachmentId, {
+        fileMeta: { clientFileId, fileName: current.fileName, mimeType: current.mimeType, sizeBytes: current.sizeBytes, sha256: clientSha256, etag: uploaded.etag },
+        revision: routeMetaRef.current.revision,
+      });
+      if (unloadedRef.current) return;
+      if (cancelledHighlightUploadsRef.current.has(clientFileId)) return;
+      if (completed.status === "verifying") {
+        // 服务端校验租约被占用（202）：标记 verifyPending，重试只重放 complete。
+        updateHighlightPending(highlightId, { ...current, status: "failed", verifyPending: true, message: "照片确认仍在进行，请稍候点击重试" });
+        return;
+      }
+      markReadyAndCleanup(completed.photo, completed.revision);
+    } catch (uploadError) {
+      if (unloadedRef.current) return;
+      if (handleSessionError(uploadError)) return;
+      const failed = latestRef.current.highlights.find((item) => item.id === highlightId)?.pending.find((item) => item.clientFileId === clientFileId);
+      if (failed) {
+        // verifyPending 仅对「瞬时错误」保留（BusinessError kind=network/timeout 或服务端
+        // retryable——含租约未到期时 init 的 HIGHLIGHT_VERIFY_PENDING 409）：下一次重试继续
+        // 只重放 complete，不重传对象。确定性 API 失败（HIGHLIGHT_FILE_INVALID / VERIFY_STALE /
+        // HASH_MISMATCH / NOT_FOUND 等非瞬时应答，服务端多已置 failed）一律清标记，让下一次
+        // 重试重新 init（复位 failed + 重签凭据）恢复；attachmentId 未知时同样清——只重试
+        // 受保护的 init，绝不凭空调 complete。
+        const transient = uploadError?.kind === "network" || uploadError?.kind === "timeout" || uploadError?.retryable === true;
+        const verifyStillPending = Boolean(failed.verifyPending && failed.attachmentId) && transient;
+        updateHighlightPending(highlightId, { ...failed, status: "failed", verifyPending: verifyStillPending, message: safeMessage(uploadError, "暂时无法上传照片，请重试") });
+      }
+    } finally {
+      applyHighlightBusy(false);
+    }
+  };
+
+  // 计算文件真实 SHA-256（浏览器 crypto.subtle）：complete 携带，与服务端 verifyObject 对账。
+  const uploadedSha = async (file, uploaded) => {
+    if (uploaded?.sha256) return uploaded.sha256;
+    const buffer = await file.arrayBuffer();
+    const digest = await crypto.subtle.digest("SHA-256", buffer);
+    return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  };
+
+  const retryHighlightUpload = (highlightId, clientFileId) => {
+    cancelledHighlightUploadsRef.current.delete(clientFileId);
+    uploadHighlightPhoto(highlightId, clientFileId);
+  };
+
+  // 移除待传照片：init 已建立服务端附件（attachmentId 存在）时必须走删除端点释放 1..4 槽位
+  // 并入队对象清理；init 未完成的纯本地项仅本地移除。取消登记防在途回填复活。
+  const removeHighlightPending = async (highlightId, clientFileId) => {
+    cancelledHighlightUploadsRef.current.add(clientFileId);
+    const pending = latestRef.current.highlights.find((item) => item.id === highlightId)?.pending.find((item) => item.clientFileId === clientFileId);
+    const dropLocal = () => {
+      releaseObjectUrl(clientFileId);
+      highlightFileCache.delete(clientFileId);
+      patchHighlights(latestRef.current.highlights.map((item) => (item.id === highlightId
+        ? { ...item, pending: item.pending.filter((pending) => pending.clientFileId !== clientFileId) }
+        : item)));
+    };
+    if (!pending?.attachmentId) {
+      dropLocal();
+      return;
+    }
+    applyHighlightBusy(true);
+    try {
+      const result = await deleteHighlightPhoto(routeMetaRef.current.attemptId, highlightId, pending.attachmentId, { revision: routeMetaRef.current.revision });
+      if (unloadedRef.current) return;
+      updateRevision(result.revision);
+      dropLocal();
+    } catch (removeError) {
+      if (unloadedRef.current) return;
+      if (handleSessionError(removeError)) return;
+      // 删除失败：保留本地项与重试入口（可恢复），不静默吞掉服务端配额占用。
+      const failed = latestRef.current.highlights.find((item) => item.id === highlightId)?.pending.find((item) => item.clientFileId === clientFileId);
+      if (failed) updateHighlightPending(highlightId, { ...failed, status: "failed", message: safeMessage(removeError, "暂时无法移除照片，请重试") });
+    } finally {
+      applyHighlightBusy(false);
+    }
+  };
+
+  const deleteHighlightPhotoItem = async (highlightId, photoId) => {
+    const entry = latestRef.current.highlights.find((item) => item.id === highlightId);
+    if (!entry || highlightBusyRef.current) return;
+    applyHighlightBusy(true);
+    try {
+      const result = await deleteHighlightPhoto(routeMetaRef.current.attemptId, highlightId, photoId, { revision: routeMetaRef.current.revision });
+      if (unloadedRef.current) return;
+      updateRevision(result.revision);
+      patchHighlights(latestRef.current.highlights.map((item) => (item.id === highlightId
+        ? { ...item, photos: item.photos.filter((photo) => photo.id !== photoId) }
+        : item)));
+    } catch (deleteError) {
+      if (unloadedRef.current) return;
+      if (handleSessionError(deleteError)) return;
+      toast(safeMessage(deleteError, "暂时无法删除照片，请重试"));
+    } finally {
+      applyHighlightBusy(false);
+    }
+  };
+
   // ---------- OCR（R15/R16/R68-R71） ----------
 
   const setOcrJob = (job) => {
@@ -755,7 +1089,11 @@ export function DishesPage() {
     scrollToSelector(".dish-list");
   };
 
-  // ---------- 保存与导航（R73/R74/R75） ----------
+  // ---------- 保存与导航（R73/R74/R75 + 闪光点结构化保存） ----------
+
+  // 菜品区块显隐（client-config features.dishRecords，默认关）：关闭时菜品不渲染、不校验、
+  // 不调用保存——历史菜品行原样留在服务端，也绝不因隐藏流程阻断前进/提交（R16 同款晚到补渲染）。
+  const isDishRecordsEnabled = () => publicConfig?.features?.dishRecords === true;
 
   const showDishError = (id, message) => {
     applyDishes(latestRef.current.dishes.map((dish) => (dish.id === id ? projectDish({ ...dish, showError: true, foldOpen: true }) : dish)));
@@ -763,25 +1101,38 @@ export function DishesPage() {
     scrollToId(`dish-${id}`);
   };
 
+  const showHighlightError = (id, message) => {
+    setValidationMessage(message);
+    setTimeout(() => scrollToId(`highlight-${id}`), 0);
+  };
+
   const saveAndNavigate = async (destination) => {
     if (latestRef.current.saving) return;
+    const dishesEnabled = isDishRecordsEnabled();
     const serialised = latestRef.current.dishes.map((dish, index) => serialiseDish(dish, index));
     setSaving(true);
     setValidationMessage("");
     // R75：先存本地（synced=false），服务端成功才 markDraftSynced。
-    saveDraft(routeMetaRef.current, { dishes: serialised });
+    saveDraft(routeMetaRef.current, { dishes: serialised, highlights: latestRef.current.highlights.map(serializeHighlight) });
     try {
-      const result = await saveDishes(routeMetaRef.current.attemptId, { dishes: serialised, revision: routeMetaRef.current.revision });
+      // 闪光点整组落库（条目 id 即服务端行 id；空白条目服务端忽略，不会产生脏行）。
+      await persistHighlightsToServer();
       if (unloadedRef.current) return;
-      updateRevision(result.revision);
-      markDraftSynced(routeMetaRef.current, result.revision);
+      if (dishesEnabled) {
+        const result = await saveDishes(routeMetaRef.current.attemptId, { dishes: serialised, revision: routeMetaRef.current.revision });
+        if (unloadedRef.current) return;
+        updateRevision(result.revision);
+        markDraftSynced(routeMetaRef.current, result.revision);
+      } else {
+        markDraftSynced(routeMetaRef.current, routeMetaRef.current.revision);
+      }
       dirtyRef.current = false;
       if (destination === "survey") routeToSurvey(false);
       else navigate(`${routeUrl("/other", routeMetaRef.current)}&source=${sourceRef.current}`);
     } catch (saveError) {
       if (unloadedRef.current) return;
       if (handleSessionError(saveError)) return;
-      const message = safeMessage(saveError, "暂时无法保存菜品，请重试");
+      const message = safeMessage(saveError, "暂时无法保存，请重试");
       setValidationMessage(message);
       toast(message);
     } finally {
@@ -789,14 +1140,16 @@ export function DishesPage() {
     }
   };
 
-  // R74：空白额外菜品阻断保存。
+  // R74：空白额外菜品阻断保存（菜品区块隐藏时不检查——历史数据不阻断返回）。
   const goBackToSurvey = () => {
-    const blank = latestRef.current.dishes.find(isBlankExtraDish);
-    if (blank) { showDishError(blank.id, "请补全这道额外菜品，或点击删除"); return; }
+    if (isDishRecordsEnabled()) {
+      const blank = latestRef.current.dishes.find(isBlankExtraDish);
+      if (blank) { showDishError(blank.id, "请补全这道额外菜品，或点击删除"); return; }
+    }
     saveAndNavigate("survey");
   };
 
-  // R73：五道校验按固定顺序短路，全过才保存跳转。
+  // R73：五道校验按固定顺序短路，全过才保存跳转；闪光点照片未传完/有照片无文字可恢复地拦下。
   const goNext = () => {
     if (receiptRequired && readyReceiptCount(latestRef.current.receipts) < 1) {
       setValidationMessage("该任务要求上传至少一张消费小票");
@@ -807,17 +1160,29 @@ export function DishesPage() {
       setValidationMessage("请等待小票上传完成，或删除未完成的图片");
       return;
     }
-    const review = latestRef.current.dishes.find((dish) => requiredReviewMessage(dish));
-    if (review) { showDishError(review.id, requiredReviewMessage(review)); return; }
-    const amountInvalid = latestRef.current.dishes.find((dish) => dish.amountError);
-    if (amountInvalid) { showDishError(amountInvalid.id, amountInvalid.amountError); return; }
-    const invalid = latestRef.current.dishes
-      .map((dish) => ({ id: dish.id, message: validateDish(dish) }))
-      .find((item) => item.message);
-    if (invalid) {
-      applyDishes(latestRef.current.dishes.map((dish) => projectDish({ ...dish, showError: true, foldOpen: true })));
-      showDishError(invalid.id, invalid.message);
+    const uploadingHighlight = latestRef.current.highlights.flatMap((entry) => entry.pending).find((item) => ["local_selected", "uploading", "confirming"].includes(item.status));
+    if (uploadingHighlight) {
+      setValidationMessage("请等待闪光点照片上传完成，或移除未完成的图片");
       return;
+    }
+    const textMissing = latestRef.current.highlights.find((entry) => !entry.text.trim() && entry.photos.length > 0);
+    if (textMissing) {
+      showHighlightError(textMissing.id, "请为已添加照片的闪光点填写文字，或删除该条闪光点");
+      return;
+    }
+    if (isDishRecordsEnabled()) {
+      const review = latestRef.current.dishes.find((dish) => requiredReviewMessage(dish));
+      if (review) { showDishError(review.id, requiredReviewMessage(review)); return; }
+      const amountInvalid = latestRef.current.dishes.find((dish) => dish.amountError);
+      if (amountInvalid) { showDishError(amountInvalid.id, amountInvalid.amountError); return; }
+      const invalid = latestRef.current.dishes
+        .map((dish) => ({ id: dish.id, message: validateDish(dish) }))
+        .find((item) => item.message);
+      if (invalid) {
+        applyDishes(latestRef.current.dishes.map((dish) => projectDish({ ...dish, showError: true, foldOpen: true })));
+        showDishError(invalid.id, invalid.message);
+        return;
+      }
     }
     saveAndNavigate("other");
   };
@@ -866,11 +1231,13 @@ export function DishesPage() {
 
   // R16：OCR 门控渲染期重求值（publicConfig 异步晚到时随 context 更新补显面板）。
   const ocrEnabled = isReceiptOcrEnabled(publicConfig);
+  // 菜品区块门控渲染期重求值：配置晚到时补显/补隐（关闭时历史菜品不渲染、不校验、不保存）。
+  const dishEnabled = publicConfig?.features?.dishRecords === true;
   const viewState = loading ? "loading" : error ? "error" : "ready";
 
   return (
-    <div className="app-page app-page--flat" data-page="dishes" data-state={viewState} data-receipt-locked={receiptLocked ? "true" : "false"}>
-      <PageNav title="菜品记录" onBack={goBackToSurvey} />
+    <div className="app-page app-page--flat" data-page="dishes" data-state={viewState} data-receipt-locked={receiptLocked ? "true" : "false"} data-dish-records={dishEnabled ? "enabled" : "disabled"}>
+      <PageNav title="其他照片" onBack={goBackToSurvey} />
       {/* 三步流程条：第 2 步 active（§1.9 a） */}
       <FlowSteps current="dishes" />
 
@@ -1008,7 +1375,91 @@ export function DishesPage() {
             ) : null}
           </Card>
 
-          {/* ---------- 菜品列表（§1.9 a.4） ---------- */}
+          {/* ---------- 闪光点编辑器（第二步新增；0..5 条，每条文字+选填照片≤4 张） ---------- */}
+          <Card className="highlight-section" style={{ marginTop: 8 }}>
+            <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
+              <SectionHeading>闪光点</SectionHeading>
+              <Muted>最多 {HIGHLIGHT_ENTRY_LIMIT} 条，每条可附最多 {HIGHLIGHT_PHOTO_LIMIT} 张照片（单张不超过 10MB）</Muted>
+            </div>
+            <div className="highlight-list">
+              {highlights.map((entry, index) => (
+                <div key={entry.id} id={`highlight-${entry.id}`} className="highlight-item" data-highlight-id={entry.id}>
+                  <div className="highlight-item__head">
+                    <span>{`闪光点 ${index + 1}`}</span>
+                    <Button variant="link" small disabled={highlightBusy || saving} onClick={() => removeHighlight(entry.id)}>删除本条</Button>
+                  </div>
+                  <TextArea
+                    value={entry.text}
+                    placeholder="描述这条闪光点（文字和照片都可留空）"
+                    aria-label={`闪光点 ${index + 1} 描述`}
+                    onChange={(event) => inputHighlight(entry.id, event.target.value)}
+                  />
+                  <div className="highlight-photos">
+                    {entry.photos.map((photo) => (
+                      <div key={photo.id} className="highlight-tile-wrap" style={{ position: "relative" }}>
+                        <button
+                          type="button"
+                          className="highlight-tile"
+                          onClick={() => previewReceipt(photo.previewUrl)}
+                          aria-label={`查看闪光点 ${index + 1} 的照片`}
+                        >
+                          {photo.previewUrl ? <img src={photo.previewUrl} alt="" /> : <span style={{ fontSize: 12, color: "#b7bac0" }}>处理中</span>}
+                        </button>
+                        <button
+                          type="button"
+                          className="highlight-tile__remove"
+                          aria-label={`删除闪光点 ${index + 1} 的这张照片`}
+                          disabled={highlightBusy}
+                          onClick={() => deleteHighlightPhotoItem(entry.id, photo.id)}
+                        >×</button>
+                      </div>
+                    ))}
+                    {entry.pending.map((pending) => (
+                      <div key={pending.clientFileId} className="highlight-tile-wrap" style={{ position: "relative" }}>
+                        <button type="button" className="highlight-tile" onClick={() => previewReceipt(pending.localPath)} aria-label="查看待上传闪光点照片">
+                          <img src={pending.localPath} alt="" />
+                        </button>
+                        {["uploading", "confirming"].includes(pending.status) ? (
+                          <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 3, background: "#e8e9eb" }}>
+                            <div style={{ width: `${pending.progressPercent}%`, height: "100%", background: "#f25f42" }} />
+                          </div>
+                        ) : null}
+                        {pending.status === "failed" ? (
+                          <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 2, background: "rgba(20,21,24,.6)", borderRadius: 6, padding: 4 }}>
+                            <span style={{ fontSize: 10, color: "#fff", textAlign: "center" }}>{pending.message}</span>
+                            <Button variant="link" small onClick={() => retryHighlightUpload(entry.id, pending.clientFileId)}>重试</Button>
+                          </div>
+                        ) : null}
+                        <button
+                          type="button"
+                          className="highlight-tile__remove"
+                          aria-label="移除待上传闪光点照片"
+                          disabled={pending.status === "uploading" || pending.status === "confirming"}
+                          onClick={() => removeHighlightPending(entry.id, pending.clientFileId)}
+                        >×</button>
+                      </div>
+                    ))}
+                    {entry.photos.length + entry.pending.length < HIGHLIGHT_PHOTO_LIMIT ? (
+                      <button
+                        type="button"
+                        className="highlight-add-photo"
+                        disabled={highlightBusy}
+                        aria-label={`为闪光点 ${index + 1} 添加照片`}
+                        onClick={() => chooseHighlightPhoto(entry.id)}
+                      >＋</button>
+                    ) : null}
+                  </div>
+                </div>
+              ))}
+            </div>
+            {highlights.length < HIGHLIGHT_ENTRY_LIMIT ? (
+              <Button variant="outline" block style={{ marginTop: 10 }} disabled={highlightBusy || saving} onClick={addHighlight}>+ 添加一条闪光点</Button>
+            ) : null}
+            <input ref={highlightInputRef} type="file" accept="image/jpeg,image/png" multiple style={{ display: "none" }} onChange={onHighlightFilesChosen} />
+          </Card>
+
+          {/* ---------- 菜品列表（§1.9 a.4；features.dishRecords 开启才渲染） ---------- */}
+          {dishEnabled ? (
           <Card className="dish-list" style={{ marginTop: 8 }}>
             <SectionHeading>菜品记录</SectionHeading>
             {dishes.length === 0 ? <div style={{ marginTop: 8 }}><Muted>暂无菜品，请在下方添加。</Muted></div> : null}
@@ -1178,6 +1629,7 @@ export function DishesPage() {
 
             <Button variant="outline" block style={{ marginTop: 10 }} disabled={saving} onClick={add}>+ 点击添加其他菜品</Button>
           </Card>
+          ) : null}
 
           {validationMessage ? <div className="inline-error" role="alert" style={{ marginTop: 8 }}>{validationMessage}</div> : null}
 
@@ -1283,6 +1735,46 @@ function projectReceipt(item) {
 
 function projectPendingReceipt(item) {
   return { ...item, origin: "local", statusLabel: RECEIPT_STATUS_LABELS[item.status] || "等待上传", progressText: `${item.progressPercent || 0}%` };
+}
+
+// 闪光点条目序列化（进本地草稿）：pending 照片脱敏（剔除 uploadTarget 与运行时 File，
+// 同 stripPendingSecrets 语义），blob URL 保留供 SPA 重挂载恢复展示。
+function serializeHighlight(entry) {
+  return {
+    id: entry.id,
+    text: entry.text,
+    persisted: Boolean(entry.persisted),
+    photos: (entry.photos || []).map((photo) => ({ id: photo.id, previewUrl: photo.previewUrl || null, status: "ready" })),
+    pending: (entry.pending || []).map(({ uploadTarget, file, initReadyPhoto, ...safe }) => safe),
+  };
+}
+
+function rehydrateHighlight(entry) {
+  return {
+    id: entry.id,
+    text: entry.text || "",
+    persisted: Boolean(entry.persisted),
+    photos: Array.isArray(entry.photos) ? entry.photos : [],
+    pending: Array.isArray(entry.pending) ? entry.pending.filter((item) => item.localPath) : [],
+  };
+}
+
+// 服务端结构化闪光点 → 编辑器条目；无结构化条目时按旧单条 highlight 字符串兜底为
+// 一条未持久化条目（首次保存落库；零闪光点时返回单条空白编辑器由用户自行增删）。
+function buildServerHighlights(otherRecords) {
+  const serverEntries = Array.isArray(otherRecords.highlights) ? otherRecords.highlights : [];
+  if (serverEntries.length) {
+    return serverEntries.map((item) => ({
+      id: item.id,
+      text: item.text || "",
+      persisted: true,
+      photos: (Array.isArray(item.photos) ? item.photos : []).map((photo) => ({ id: photo.id, previewUrl: photo.previewUrl || null, status: "ready" })),
+      pending: [],
+    }));
+  }
+  const legacy = String(otherRecords.highlight || "").trim();
+  if (!legacy) return [{ id: secureUuid(), text: "", persisted: false, photos: [], pending: [] }];
+  return [{ id: secureUuid(), text: legacy, persisted: false, photos: [], pending: [] }];
 }
 
 // R72：pendingReceipts 持久化脱敏——剔除 uploadTarget 与运行时 File（Web 侧新增 file 字段）。

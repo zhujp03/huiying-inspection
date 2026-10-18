@@ -6,6 +6,9 @@ const reconciliationRows = `SELECT id,storage_key,storage_version_id,size_bytes,
   UNION ALL
   SELECT id,storage_key,storage_version_id,size_bytes,sha256 FROM receipt_attachments
   WHERE status='ready' AND size_bytes IS NOT NULL AND sha256 IS NOT NULL
+  UNION ALL
+  SELECT id,storage_key,storage_version_id,size_bytes,sha256 FROM other_record_highlight_photos
+  WHERE status='ready' AND size_bytes IS NOT NULL AND sha256 IS NOT NULL
 ) objects ORDER BY md5(objects.id::text || current_date::text) LIMIT $1`;
 
 export async function runObjectReconciliation({ pool, cos, policyVersion, sampleSize, leaseSeconds = 900 }) {

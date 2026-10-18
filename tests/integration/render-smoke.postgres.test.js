@@ -53,7 +53,7 @@ describe.sequential("render deployment smoke", () => {
     expect(config.WEB_ORIGIN).toBe("https://junde-app.onrender.com");
     expect(config.MINIAPP_API_BASE_URL).toBe("https://junde-app.onrender.com");
     expect(config.LOCAL_STORAGE_DIR).toBe("/var/data/storage");
-    expect(publicClientConfig(config).features).toEqual({ receiptOcr: false, authSelfService: false });
+    expect(publicClientConfig(config).features).toEqual({ receiptOcr: false, authSelfService: false, dishRecords: false });
   });
 
   test("serves built H5/Admin, keeps API 404s JSON, and completes a signed upload to local disk", async (ctx) => {
@@ -126,7 +126,7 @@ describe.sequential("render deployment smoke", () => {
     // client-config：形态开关（OCR 关闭、自助休眠）与公开地图 Key 下发。
     const clientConfig = await app.inject({ method: "GET", url: "/api/public/client-config" });
     expect(clientConfig.statusCode).toBe(200);
-    expect(clientConfig.json().features).toEqual({ receiptOcr: false, authSelfService: false });
+    expect(clientConfig.json().features).toEqual({ receiptOcr: false, authSelfService: false, dishRecords: false });
     expect(clientConfig.json().tencentMapKey).toBe("render-smoke-map-key-0123456789");
 
     // 签名直传 → 本地磁盘落盘 → 完成校验（与线上形态同一代码路径）。

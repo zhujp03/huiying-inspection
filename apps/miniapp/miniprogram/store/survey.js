@@ -9,7 +9,7 @@ function identity(meta) {
 export function getDraft(meta) {
   const { key } = identity(meta);
   const value = wx.getStorageSync(key);
-  if (!value || value.revision !== meta.revision) return { answers: {}, dishes: [], highlight: "", suggestion: "", receiptRecovery: { pendingReceipts: [], jobId: null, applyKey: null, appliedJobId: null }, revision: meta.revision };
+  if (!value || value.revision !== meta.revision) return { answers: {}, dishes: [], highlight: "", suggestion: "", highlights: [], receiptRecovery: { pendingReceipts: [], jobId: null, applyKey: null, appliedJobId: null }, revision: meta.revision };
   return value;
 }
 

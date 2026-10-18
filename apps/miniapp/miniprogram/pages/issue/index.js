@@ -23,7 +23,8 @@ Page({
   },
   remark(event) { this.setData({ remark: event.detail.value }); },
   chooseImage() {
-    const maxCount = this.data.question.evidence.imageMaxCount || 3;
+    // 问题照片所有题可选、选填；上限默认 4 张（服务端未配置 imageMaxCount 时同值）。
+    const maxCount = this.data.question.evidence.imageMaxCount || 4;
     const remaining = maxCount - this.data.images.length;
     if (remaining <= 0) return this.message(`每题最多上传 ${maxCount} 张照片`);
     wx.chooseMedia({ count: remaining, mediaType: ["image"], sourceType: ["camera", "album"], success: (result) => result.tempFiles.forEach((file) => this.stageFile({ type: "image", path: file.tempFilePath, size: file.size })) });
@@ -73,8 +74,8 @@ Page({
   },
   async save() {
     if (this.data.target === "unscored") {
+      // 问题照片选填：历史 imageRequired 配置不再作为确认门槛；音频要求保持既有口径。
       if (!this.data.remark.trim()) return this.message("请填写问题说明");
-      if (this.data.question.evidence.imageRequired && !this.data.images.some((item) => ["active", "staged_ready"].includes(item.status))) return this.message("请先上传成功的问题照片");
       if (this.data.question.evidence.audioRequired && !this.data.audios.some((item) => ["active", "staged_ready"].includes(item.status))) return this.message("请先上传成功的问题音频");
       if ([...this.data.images, ...this.data.audios].some((item) => item.status === "uploading")) return this.message("请等待附件上传完成");
     }

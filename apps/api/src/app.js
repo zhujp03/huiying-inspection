@@ -99,7 +99,7 @@ export function buildApp({ config, pool, providers, storage, staticDirs, logger 
   registerAuthRoutes(app, { pool, config, passwordService: createPasswordService({ maxConcurrency: config.AUTH_HASH_MAX_CONCURRENCY, maxQueue: config.AUTH_HASH_MAX_QUEUE }), providers: providers || missingProviders() });
   registerCampaignCleanupRoutes(app, { pool, config });
   registerBatch2Routes(app, { pool, config });
-  registerBatch3Routes(app, { pool, cos: app.jundeCos });
+  registerBatch3Routes(app, { pool, cos: app.jundeCos, config });
   registerBatch4Routes(app, { pool, cos: app.jundeCos, config });
   registerBatch5Routes(app, { pool, cos: app.jundeCos });
   registerStatsRoutes(app, { pool });

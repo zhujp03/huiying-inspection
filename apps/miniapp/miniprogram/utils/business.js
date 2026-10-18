@@ -36,8 +36,8 @@ export function firstIncompleteQuestion(questions, answers) {
     if (!answer || !["scored", "unscored"].includes(answer.answer)) return true;
     if (answer.answer !== "unscored") return false;
     if (!answer.remark?.trim()) return true;
+    // 问题照片已全面选填（2026-10）：缺照片不再视为未完成；音频要求保持既有口径。
     const attachments = (answer.attachments || []).filter((item) => item.status === "active" && !item.pendingRemoval);
-    if (question.evidence?.imageRequired && !attachments.some((item) => item.type === "image")) return true;
     if (question.evidence?.audioRequired && !attachments.some((item) => item.type === "audio")) return true;
     return false;
   });

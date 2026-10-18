@@ -1,12 +1,15 @@
 import { getAssignment, getDraft, saveOtherRecords, submitQuestionnaire } from "../../services/api.js";
 import { clearDraft, getDraft as getLocalDraft, markDraftSynced, saveDraft as saveLocalDraft } from "../../store/survey.js";
 import { backToParentOrRedirect, sanitizeSource } from "../../utils/navigation.js";
+import { computeSurveyScore } from "../../utils/scoring.js";
 import { secureUuid } from "../../utils/business.js";
 
+// 2026-10 变更：闪光点编辑移至第二步（dishes 其他照片页），本页只保留「其他建议」与提交；
+// 提交前的不可逆确认改为自定义 WXML 弹窗（不再 wx.showModal），展示当前问卷得分百分比
+// 与「问卷提交后无法再次修改」警示；取消关闭弹窗并保留全部编辑，可继续修改后再提交。
 Page({
   data: {
     meta: null,
-    highlight: "",
     suggestion: "",
     submitState: "draft",
     message: "",
@@ -14,8 +17,10 @@ Page({
     loading: true,
     saving: false,
     focusField: "",
-    highlightError: "",
     keyboardOpen: false,
+    confirmOpen: false,
+    // 提交确认弹窗的得分预览：null=无法计算（绝不虚构 100%）。
+    confirmScore: null,
     statusBarHeight: 20,
     navBarHeight: 44,
   },
@@ -32,7 +37,7 @@ Page({
       questionnaireVersionId: options.questionnaireVersionId,
       revision: Number(options.revision || 0),
     };
-    // 任务链来源（菜品页写入）：只读回跳任务详情时原样带回。
+    // 任务链来源（其他照片页写入）：只读回跳任务详情时原样带回。
     this.source = sanitizeSource(options.source);
     await this.load();
   },
@@ -60,7 +65,7 @@ Page({
       const useLocal = local.synced === false;
       const records = useLocal ? local : (result.otherRecords || {});
       if (!useLocal) {
-        saveLocalDraft(meta, { highlight: records.highlight || "", suggestion: records.suggestion || "" });
+        saveLocalDraft(meta, { suggestion: records.suggestion || "" });
         markDraftSynced(meta, meta.revision);
       }
       this.routeMeta = meta;
@@ -68,7 +73,6 @@ Page({
       this.dirty = useLocal;
       this.setData({
         meta,
-        highlight: records.highlight || "",
         suggestion: records.suggestion || "",
         submitState: "draft",
         message: result.attempt.status === "failed" ? "上次提交未完成，请检查内容后重新提交" : "",
@@ -86,14 +90,17 @@ Page({
     const field = event.currentTarget.dataset.field;
     if (["retryable_failed", "terminal_failed"].includes(this.data.submitState)) this.submitToken = null;
     this.dirty = true;
-    this.setData({ [field]: event.detail.value, submitState: "draft", ...(field === "highlight" ? { highlightError: "", message: "" } : {}) });
+    this.setData({ [field]: event.detail.value, submitState: "draft", message: "" });
     this.persistLocal();
   },
 
   keyboard(event) { this.setData({ keyboardOpen: Number(event.detail.height || 0) > 0 }); },
 
-  // 返回菜品：仅当紧邻父页确为同任务菜品页才原生返回；直达进入/无关栈不算证据，
-  // 此时 redirectTo 携全量参数的规范菜品页，绝不落到无关任务或退出小程序。
+  // 弹窗内容区阻止冒泡（catchtap 目标），点遮罩才触发取消。
+  noop() {},
+
+  // 返回其他照片：仅当紧邻父页确为同任务其他照片页才原生返回；直达进入/无关栈不算证据，
+  // 此时 redirectTo 携全量参数的规范页，绝不落到无关任务或退出小程序。
   async back() {
     if (this.locked()) return;
     const saved = await this.saveRecords();
@@ -105,44 +112,71 @@ Page({
     });
   },
 
+  // 提交入口：可重试失败带 token 直接重放；否则保存后先弹应用内确认弹窗（含得分预览）。
   async confirm() {
     if (this.locked()) return;
     if (this.data.submitState === "retryable_failed" && this.submitToken) {
       await this.retrySubmit();
       return;
     }
-    if (!this.data.highlight.trim()) {
-      this.setData({ highlightError: "请填写闪光点", focusField: "highlight", message: "" }, () => {
-        wx.pageScrollTo({ selector: "#highlight-field", duration: 220 });
-      });
-      return;
-    }
+    await this.openConfirmModal();
+  },
+
+  // 弹窗得分预览：保存同步后重新拉取当前问卷（启用题+作答，含停用题残留），用与服务端
+  // 提交落库一致的计分口径（domain.applyScoreWipe：持久化 awardedScore + 清零 + orphan）
+  // 计算百分比；拉取失败/0 满分/作答缺失 → confirmScore=null，弹窗禁用确认并给出
+  // 「重新获取得分」可恢复入口（绝不虚构 100%）。取消后编辑全部保留。
+  async fetchConfirmScore() {
+    try {
+      const result = await getDraft(this.routeMeta.attemptId);
+      if (result.attempt.id !== this.routeMeta.attemptId) return;
+      const score = computeSurveyScore(result.questions, result.answers || {});
+      this.setData({ confirmScore: score || null });
+    } catch { /* 拉取失败保持「无法计算」占位 */ }
+  },
+
+  async openConfirmModal() {
     const saved = await this.saveRecords();
     if (!saved) return;
-    wx.showModal({
-      title: "确认提交问卷？",
-      content: "提交后将无法回看或修改本次问卷，请确认所有内容已经完成。",
-      confirmText: "确认提交",
-      confirmColor: "#f26445",
-      cancelText: "取消",
-      success: (result) => { if (result.confirm) this.submit(); },
-    });
+    this.confirmGuard = false; // 同步 guard：防 setData 批量提交前的重复确认点击
+    this.setData({ confirmOpen: true, confirmScore: null });
+    await this.fetchConfirmScore();
+  },
+
+  confirmModalRetryScore() {
+    if (this.locked() || !this.data.confirmOpen) return;
+    this.fetchConfirmScore();
+  },
+
+  confirmModalCancel() {
+    if (this.locked()) return;
+    // 取消/关闭弹窗：编辑全部保留（数据仍在 data 与本地草稿），可继续修改后再提交。
+    this.confirmGuard = false;
+    this.setData({ confirmOpen: false, confirmScore: null });
+  },
+
+  confirmModalSubmit() {
+    if (this.locked() || this.confirmGuard || !this.data.confirmScore) return;
+    this.confirmGuard = true;
+    this.setData({ confirmOpen: false });
+    this.submit();
   },
 
   async saveRecords() {
     if (this.data.saving) return null;
-    const highlight = this.data.highlight.trim();
     const suggestion = this.data.suggestion.trim();
     this.setData({ saving: true, message: "" });
-    saveLocalDraft(this.routeMeta, { highlight, suggestion });
+    saveLocalDraft(this.routeMeta, { suggestion });
     try {
-      const saved = await saveOtherRecords(this.routeMeta.attemptId, { highlight, suggestion, revision: this.routeMeta.revision });
+      // 只写建议：闪光点由第二步编辑与持久化，此处不带 highlights/suggestion 以外的键，
+      // 服务端按「键缺省不改动」语义保留第二步已保存的闪光点。
+      const saved = await saveOtherRecords(this.routeMeta.attemptId, { suggestion, revision: this.routeMeta.revision });
       const meta = { ...this.routeMeta, revision: saved.revision };
       markDraftSynced(meta, saved.revision);
       this.routeMeta = meta;
       this.assignmentRevision = saved.assignmentRevision ?? this.assignmentRevision ?? saved.revision;
       this.dirty = false;
-      this.setData({ meta, highlight, suggestion });
+      this.setData({ meta, suggestion });
       return saved;
     } catch (error) {
       this.setData({ message: `${error.message}，请重试` });
@@ -214,14 +248,14 @@ Page({
     clearTimeout(this.pollTimer);
     clearDraft(this.routeMeta);
     this.dirty = false;
-    this.setData({ submitState: "submitted", submittedAt: result.submittedAt || "", message: "提交成功" });
+    this.setData({ submitState: "submitted", submittedAt: result.submittedAt || "", message: "提交成功", confirmOpen: false });
   },
 
   locked() { return ["submitting", "processing", "submitted"].includes(this.data.submitState); },
 
   persistLocal() {
     if (!this.routeMeta) return;
-    try { saveLocalDraft(this.routeMeta, { highlight: this.data.highlight, suggestion: this.data.suggestion }); } catch { /* Session errors are handled by the next API request. */ }
+    try { saveLocalDraft(this.routeMeta, { suggestion: this.data.suggestion }); } catch { /* Session errors are handled by the next API request. */ }
   },
 
   onUnload() {

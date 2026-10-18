@@ -147,6 +147,16 @@ export function buildSubmissionExportModel({ submission, scoreRows, scoreSource,
   if (deltaAwarded < 0 || deltaMax !== 0) throw exportError(EXPORT_SUBMISSION_SCORES_MISSING, "逐题得分与提交总分不一致，无法安全导出这份提交");
   const evidence = Array.isArray(submission.evidence_snapshot_json) ? submission.evidence_snapshot_json : [];
   const receipts = Array.isArray(submission.receipt_snapshot_json) ? submission.receipt_snapshot_json : [];
+  // 结构化闪光点：新提交快照携带（文字 + 照片行引用）；历史提交按旧单条 highlight 字符串兜底为一条。
+  const snapshotHighlights = Array.isArray(submission.other_snapshot_json?.highlights) ? submission.other_snapshot_json.highlights : [];
+  const legacyHighlight = String(submission.other_snapshot_json?.highlight ?? "").trim();
+  const highlights = snapshotHighlights.length
+    ? snapshotHighlights.map((item, index) => ({
+      index: index + 1,
+      text: String(item.text ?? "").trim(),
+      photos: (Array.isArray(item.photos) ? item.photos : []).filter((photo) => photo && photo.id),
+    }))
+    : (legacyHighlight ? [{ index: 1, text: legacyHighlight, photos: [] }] : []);
   return {
     meta: {
       submissionId: submission.id, taskName: submission.task_name, businessNo: submission.business_no,
@@ -157,7 +167,9 @@ export function buildSubmissionExportModel({ submission, scoreRows, scoreSource,
     },
     categories,
     totals: { sumAwarded, sumMax, deltaAwarded, overallRate: rateOf(totalScore, maxScore) },
-    highlight: String(submission.other_snapshot_json?.highlight ?? "").trim(),
+    // highlight 保留为旧单条字段（历史快照/兜底展示）；highlights 为结构化全集（含照片引用）。
+    highlight: legacyHighlight,
+    highlights,
     suggestion: String(submission.other_snapshot_json?.suggestion ?? "").trim(),
     dishes: Array.isArray(submission.dish_snapshot_json) ? submission.dish_snapshot_json : [],
     attachments: { evidence, receipts },
@@ -579,7 +591,10 @@ export async function buildSubmissionWorkbook(model) {
     outlineBlock(sheet, blockStart, blockStart + blockRowCount - 1, 1, GRID_COLUMNS);
     row = blockStart + blockRowCount - 1;
   };
-  footerBlock("闪光点", model.highlight || "未填写", 3);
+  // 闪光点：结构化条目逐条成行（含照片编号引用，编号取附件清单同款后 8 位）；
+  // 历史提交走旧单条字符串兜底；零条如实标注未填写。
+  const highlightLines = (model.highlights || []).map((highlight) => `闪光点${highlight.index}：${highlight.text || "（未填写文字）"}${highlight.photos.length ? `（附照片 ${highlight.photos.length} 张：${highlight.photos.map((photo) => String(photo.id).slice(-8)).join("、")}）` : ""}`);
+  footerBlock("闪光点", highlightLines.join("\n") || model.highlight || "未填写", 3);
   // 未改善连续失分项：全宽标签行 + 保留内容行（当前系统没有历史失分统计，绝不编造历史数据）
   row += 1;
   sheet.getRow(row).height = 6;
@@ -687,7 +702,8 @@ export async function buildSubmissionWorkbook(model) {
     list.push(item);
     evidenceByType.set(type, list);
   }
-  if (evidenceByType.size || model.attachments.receipts.length) {
+  const highlightPhotoCount = (model.highlights || []).reduce((count, highlight) => count + highlight.photos.length, 0);
+  if (evidenceByType.size || model.attachments.receipts.length || highlightPhotoCount) {
     const attachmentSheet = workbook.addWorksheet("附件清单", { pageSetup: { paperSize: 9, orientation: "portrait", fitToPage: true, fitToWidth: 1, fitToHeight: 0 } });
     attachmentSheet.properties.defaultRowHeight = 20; // 参考模板默认行高 20
     attachmentSheet.columns = [{ width: 18 }, { width: 30 }, { width: 8 }, { width: 60 }];
@@ -709,6 +725,9 @@ export async function buildSubmissionWorkbook(model) {
     for (const [type, items] of evidenceByType) {
       const positions = [...new Set(items.map((item) => labelByQuestionId.get(item.question_id) ?? "未知题目"))].join("、");
       attachmentLine(type === "image" ? "题目证据（照片）" : "题目证据（录音）", positions, items);
+    }
+    for (const highlight of model.highlights || []) {
+      if (highlight.photos.length) attachmentLine("闪光点照片", `闪光点${highlight.index}`, highlight.photos);
     }
     if (model.attachments.receipts.length) attachmentLine("消费小票", "小票照片", model.attachments.receipts);
   }

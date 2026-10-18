@@ -15,7 +15,7 @@
 .score-wipe-tag { display: inline-block; margin-top: 10rpx; padding: 4rpx 14rpx; border-radius: 6rpx; color: #f25f42; background: rgba(242, 95, 66, 0.08); font-size: 22rpx; line-height: 1.5; }
 .expand { margin: 4rpx auto 14rpx; background: transparent; color: #a4a7ac; font-size: 18rpx; }
 .answer-actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14rpx; }
-.answer-actions button { width: 100%; min-width: 0; height: 58rpx; margin: 0; padding: 0; box-sizing: border-box; background: #e5e5e5; color: #8b8e93; font-size: 22rpx; line-height: 58rpx; }
+.answer-actions button { width: 100%; min-width: 0; height: 58rpx; margin: 0; padding: 0; box-sizing: border-box; background: #fff; color: #f25f42; border: 2rpx solid #f25f42; font-size: 22rpx; line-height: 56rpx; }
 .answer-actions button.active { color: #fff; background: #f25f42; }
 .issue-summary { margin-bottom: 14rpx; padding: 14rpx; overflow: hidden; color: #7c4d3f; background: #fff; font-size: 20rpx; white-space: nowrap; text-overflow: ellipsis; }
 .dishes-next { margin-top: 16rpx; }

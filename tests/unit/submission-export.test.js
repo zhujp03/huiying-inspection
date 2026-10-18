@@ -518,6 +518,35 @@ describe("submission export workbook", () => {
     expect(attachmentText.join("\n")).not.toMatch(/storage|http|signature/);
   });
 
+  it("includes highlight-only photos in the attachment sheet gate (zero evidence / zero receipts)", async () => {
+    // 只有闪光点照片（无题目证据、无小票）也必须出现附件清单页：元数据引用（编号）照旧，
+    // 不含存储密钥/签名 URL；闪光点正文逐条完整展示（full text，绝不截断）。
+    const highlightText = `服务 ${"非常主动".repeat(30)}`;
+    const model = buildModel({
+      submission: {
+        total_score: 10, max_score: 10, issue_count: 0,
+        other_snapshot_json: { highlight: "", suggestion: "无", highlights: [
+          { id: "hl-1", sort_order: 1, text: highlightText, photos: [{ id: "hlp-1", display_order: 1, storage_key: "attempts/x/highlight-photos/a/b", status: "ready" }] },
+        ] },
+        evidence_snapshot_json: [], receipt_snapshot_json: [],
+      },
+    });
+    expect(model.highlights[0].text).toBe(highlightText);
+    expect(model.highlights[0].photos.length).toBe(1);
+    const workbook = await workbookOf(model);
+    expect(workbook.worksheets.map((sheet) => sheet.name)).toContain("附件清单");
+    const attachmentSheet = workbook.getWorksheet("附件清单");
+    const text = sheetText(attachmentSheet, 4);
+    expect(text).toContain("闪光点照片");
+    expect(text).toContain("闪光点1");
+    expect(text).toContain("hlp-1".slice(-8)); // 附件编号引用（后 8 位），与其他附件同款
+    expect(text).not.toMatch(/storage|http|signature/);
+    // 长文字按行切段续行（内容零丢失）：首段与尾段都必须出现（不截断）
+    const main = sheetText(workbook.getWorksheet("暗访评估表"));
+    expect(main).toContain(`闪光点1：${highlightText.slice(0, 20)}`);
+    expect(main).toContain(highlightText.slice(-20));
+  });
+
   it("labels attachment positions with per-category numbers for mixed-category submissions", async () => {
     const model = buildModel({
       scoreRows: [

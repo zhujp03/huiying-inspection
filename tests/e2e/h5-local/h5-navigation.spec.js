@@ -100,6 +100,10 @@ test.beforeAll(async ({ playwright, baseURL }) => {
   await pool.query("SELECT 1 FROM users LIMIT 1"); // schema 未迁移时立即失败
   await pool.query(`TRUNCATE auth_sessions, password_reset_tokens, phone_verification_challenges, rate_limit_buckets, inspector_registrations, user_roles, role_permissions, user_data_scopes, roles, permissions, users, questionnaire_templates, questionnaire_versions, questions, question_evidence_requirements, regions, stores, audit_campaigns, audit_assignments, survey_attempts, question_evidence_attachments, question_answer_edit_sessions, question_answer_edit_session_removals, receipt_attachments, receipt_ocr_jobs, receipt_ocr_job_attachments, receipt_ocr_candidates, receipt_ocr_applications, export_jobs, object_cleanup_jobs, submission_versions, submission_question_scores, audit_logs, idempotency_keys, dish_records, other_records, audit_checkins, checkin_exemptions RESTART IDENTITY CASCADE`);
   await seedRbac(pool);
+  // 评估分类基线自足：其他套件会 TRUNCATE question_categories 并只回种部分行，按 0025 规范集合补齐。
+  await pool.query(`INSERT INTO question_categories (id,code,name,sort_order) VALUES
+    (gen_random_uuid(),'environment','环境卫生',1),(gen_random_uuid(),'service','为客服务',2),(gen_random_uuid(),'product','产品品质',3)
+    ON CONFLICT (code) DO NOTHING`);
   world = await seedWorld();
   api = await playwright.request.newContext({ baseURL });
 });
@@ -237,7 +241,7 @@ test("selected category survives issue roundtrip, dishes roundtrip and reload; i
   await expect(survey).toContainText("已保存");
 
   // 全题完成 → 下一步进菜品页（receiptRequired=false 无小票要求）→ 上一步回问卷。
-  await survey.getByRole("button", { name: "下一步：菜品与小票" }).click();
+  await survey.getByRole("button", { name: "下一步：其他照片" }).click();
   const dishes = page.locator('[data-page="dishes"]');
   await expect(dishes).toBeVisible();
   await dishes.getByRole("button", { name: "上一步：答题" }).click();
@@ -444,7 +448,7 @@ test("direct-entry other with source=home falls back through dishes/survey/task 
   await expect(other).toBeVisible();
   await other.locator("textarea").first().fill("导航回归：其他记录闪光点");
   // 上一步：菜品（保存先行）→ 无父页 → replace 规范菜品页（携来源）。
-  await other.getByRole("button", { name: "上一步：菜品" }).click();
+  await other.getByRole("button", { name: "上一步：其他照片" }).click();
   const dishes = page.locator('[data-page="dishes"]');
   await expect(dishes).toBeVisible();
   expect(page.url()).toContain("&source=home");

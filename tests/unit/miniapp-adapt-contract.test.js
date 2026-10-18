@@ -134,19 +134,38 @@ describe("提交链路任务版本号来源锁定（主来源为任务详情）"
       navigateBack: vi.fn(),
     };
     globalThis.getApp = () => ({ globalData: { apiBase: "https://api.test" } });
-    const context = makeContext(pageConfig, mergeData(pageConfig, { highlight: "闪光点" }), {
+    const context = makeContext(pageConfig, mergeData(pageConfig, { suggestion: "建议" }), {
       routeMeta: { assignmentId: "assignment-1", attemptId: "attempt-1", questionnaireVersionId: "qv-1", revision: 3 },
     });
     await pageConfig.load.call(context);
     expect(context.assignmentRevision).toBe(7);
     expect(context.assignmentRevision).not.toBe(3);
-    // load 会用服务端 otherRecords 重置表单，闪光点需在 load 之后、提交确认之前填写。
-    context.setData({ highlight: "闪光点" });
+    // load 会用服务端 otherRecords 重置表单，建议需在 load 之后、提交确认之前填写。
+    context.setData({ suggestion: "建议" });
+    // 2026-10：confirm 先保存并弹应用内确认弹窗（不再直接提交）；得分缺失时确认禁用，
+    // 得分就绪后确认才走 submit（提交 token 幂等设计不变）。
     await pageConfig.confirm.call(context);
+    await flush();
+    expect(context.data.confirmOpen).toBe(true);
+    expect(submitPayloads).toHaveLength(0);
+    // 得分未就绪（fixture 问卷无题目 → 预览 null）：确认被拒绝
+    await pageConfig.confirmModalSubmit.call(context);
+    await flush();
+    expect(submitPayloads).toHaveLength(0);
+    // 得分就绪：确认放行
+    context.setData({ confirmScore: { totalScore: 9, maxScore: 10, percent: 90 } });
+    await pageConfig.confirmModalSubmit.call(context);
     await flush();
     expect(submitPayloads).toHaveLength(1);
     expect(submitPayloads[0].assignmentRevision).toBe(7);
     expect(submitPayloads[0].assignmentRevision).not.toBe(3);
+    // 取消路径：弹窗取消关闭且绝不触发提交。
+    submitPayloads.length = 0;
+    await pageConfig.confirm.call(context);
+    await flush();
+    await pageConfig.confirmModalCancel.call(context);
+    expect(context.data.confirmOpen).toBe(false);
+    expect(submitPayloads).toHaveLength(0);
   });
 });
 

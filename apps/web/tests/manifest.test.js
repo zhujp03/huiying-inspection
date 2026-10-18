@@ -23,7 +23,7 @@ const PINNED_PAGES = [
 ];
 const PINNED_TABS = ["home", "schedule", "profile"];
 
-// services/api.js 的 33 个导出函数（api.js:56-97）。
+// services/api.js 的 36 个导出函数（含闪光点照片三端点）。
 const API_FUNCTIONS = [
   "login", "logout", "requestRegisterCode", "register", "resubmitRegistration",
   "requestPasswordCode", "verifyPasswordCode", "completePasswordReset",
@@ -33,6 +33,7 @@ const API_FUNCTIONS = [
   "listReceiptAttachments", "initializeReceiptUpload", "completeReceiptUpload",
   "deleteReceiptAttachment", "createReceiptOcrJob", "getReceiptOcrJob", "applyReceiptOcrJob",
   "saveOtherRecords", "submitQuestionnaire", "uploadToSignedTarget",
+  "initHighlightPhotoUpload", "completeHighlightPhotoUpload", "deleteHighlightPhoto",
 ];
 // 两个随 H5 移植新增的服务函数（非 api.js 导出）。
 const PORTED_FUNCTIONS = ["loadPublicConfig", "obtainCaptchaTicket"];
@@ -42,7 +43,7 @@ const EXPECTED_UNION = [...API_FUNCTIONS, ...PORTED_FUNCTIONS].sort();
 const PINNED_SERVICES = {
   auth: ["login", "logout", "requestRegisterCode", "register", "resubmitRegistration", "requestPasswordCode", "verifyPasswordCode", "completePasswordReset"],
   assignments: ["getMyAssignments", "getAssignment", "checkIn", "startAssignment", "getQuestionnaire"],
-  drafts: ["getDraft", "saveAnswer", "createEditSession", "updateEditSession", "initEvidenceUpload", "completeEvidenceUpload", "removeEvidence", "confirmIssue", "cancelIssue", "saveDishes", "saveOtherRecords", "submitQuestionnaire"],
+  drafts: ["getDraft", "saveAnswer", "createEditSession", "updateEditSession", "initEvidenceUpload", "completeEvidenceUpload", "removeEvidence", "confirmIssue", "cancelIssue", "saveDishes", "saveOtherRecords", "submitQuestionnaire", "initHighlightPhotoUpload", "completeHighlightPhotoUpload", "deleteHighlightPhoto"],
   receipts: ["listReceiptAttachments", "initializeReceiptUpload", "completeReceiptUpload", "deleteReceiptAttachment", "createReceiptOcrJob", "getReceiptOcrJob", "applyReceiptOcrJob"],
   uploads: ["uploadToSignedTarget"],
   "public-config": ["loadPublicConfig"],
@@ -76,15 +77,15 @@ describe("app-manifest 结构契约", () => {
     assert.deepEqual([...tabBarPageNames].sort(), [...PINNED_TABS].sort());
   });
 
-  it("services 七域函数逐域钉定，并集恰为 33 个 api 函数 + 2 个移植函数且无跨域重复", async () => {
+  it("services 七域函数逐域钉定，并集恰为 36 个 api 函数 + 2 个移植函数且无跨域重复", async () => {
     const manifest = await loadSrc("app-manifest.js");
     assert.deepEqual(Object.keys(manifest.services).sort(), Object.keys(PINNED_SERVICES).sort());
     for (const [domain, functions] of Object.entries(PINNED_SERVICES)) {
       assert.deepEqual(manifest.services[domain].functions, functions, `services.${domain}.functions 应与契约一致`);
     }
     const union = serviceFunctionUnion(manifest);
-    assert.equal(union.length, 35);
-    assert.equal(new Set(union).size, 35, "services 函数不允许跨域重复");
+    assert.equal(union.length, 38);
+    assert.equal(new Set(union).size, 38, "services 函数不允许跨域重复");
     assert.deepEqual([...union].sort(), EXPECTED_UNION);
   });
 
@@ -141,11 +142,12 @@ describe("src 模块加载与导出契约（srcPathList 全部 24 项）", () =>
     ]);
   });
 
-  it("services/drafts.js 导出 12 个同名函数", async () => {
+  it("services/drafts.js 导出 15 个同名函数", async () => {
     assertFunctionExports(await loadSrc("services/drafts.js"), [
       "getDraft", "saveAnswer", "createEditSession", "updateEditSession", "initEvidenceUpload",
       "completeEvidenceUpload", "removeEvidence", "confirmIssue", "cancelIssue", "saveDishes",
       "saveOtherRecords", "submitQuestionnaire",
+      "initHighlightPhotoUpload", "completeHighlightPhotoUpload", "deleteHighlightPhoto",
     ]);
   });
 
@@ -195,9 +197,9 @@ describe("src 模块加载与导出契约（srcPathList 全部 24 项）", () =>
     ]);
   });
 
-  it("utils/business.js 导出 4 个业务函数", async () => {
+  it("utils/business.js 导出 5 个业务函数", async () => {
     assertFunctionExports(await loadSrc("utils/business.js"), [
-      "secureUuid", "validateDish", "firstIncompleteQuestion", "isBlankExtraDish",
+      "secureUuid", "validateDish", "firstIncompleteQuestion", "isBlankExtraDish", "computeSurveyScore",
     ]);
   });
 

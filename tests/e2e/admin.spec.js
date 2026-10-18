@@ -191,6 +191,41 @@ test("任务指派完整保存问卷、时间、预算和菜品", async ({ page 
   expect(savedAssignment.inspectorId).toBe("user-inspector-two");
 });
 
+test("提交详情展示结构化闪光点（照片预览）并回退历史单条高亮", async ({ page }, testInfo) => {
+  const consoleCollector = attachBusinessConsoleCollector(page);
+  await login(page);
+  // 历史回退形态：详情无结构化 highlights 时按旧单条 highlight 展示为一条（照片区缺省）。
+  await page.getByRole("button", { name: "提交记录" }).click();
+  await page.getByRole("button", { name: "查看详情" }).first().click();
+  await expect(page.getByText("其他记录")).toBeVisible();
+  const legacyList = page.locator(".highlight-result-list article");
+  await expect(legacyList).toHaveCount(1);
+  await expect(legacyList.first()).toContainText("员工主动巡台");
+  await page.getByRole("button", { name: "返回提交列表" }).click();
+  // 结构化形态：两条闪光点，第一条带已签名照片预览，第二条有照片但预览不可用（可空回退）。
+  await page.route("**/api/admin/submissions/submission-one", async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    await route.fulfill({ response, json: { ...body, highlights: [
+      { id: "hl-1", text: "服务主动加汤两次", photos: [{ id: "hlp-1", previewUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==" }] },
+      { id: "hl-2", text: "环境一尘不染", photos: [{ id: "hlp-2", previewUrl: null }] },
+    ] } });
+  });
+  await page.getByRole("button", { name: "提交记录" }).click();
+  await page.getByRole("button", { name: "查看详情" }).first().click();
+  await expect(page.getByText("其他记录")).toBeVisible();
+  const structured = page.locator(".highlight-result-list article");
+  await expect(structured).toHaveCount(2);
+  await expect(structured.nth(0)).toContainText("服务主动加汤两次");
+  await expect(structured.nth(0).locator("img")).toHaveCount(1);
+  // data:URL 的 1x1 PNG 必须真实解码（naturalWidth>0），不是裂图占位
+  await expect.poll(async () => structured.nth(0).locator("img").evaluate((el) => el.naturalWidth)).toBeGreaterThan(0);
+  await expect(structured.nth(1)).toContainText("环境一尘不染");
+  await expect(structured.nth(1)).toContainText("照片暂不可预览");
+  await page.screenshot({ path: testInfo.outputPath("admin-submission-highlights.png"), fullPage: true });
+  await consoleCollector.expectClean();
+});
+
 test("提交筛选、分类得分、菜品和审计详情", async ({ page }, testInfo) => {
   await login(page);
   await page.getByRole("button", { name: "提交记录" }).click();

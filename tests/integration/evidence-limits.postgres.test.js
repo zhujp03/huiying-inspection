@@ -92,31 +92,34 @@ describe.sequential("evidence limits", () => {
   });
   afterAll(async () => { await pool?.end(); });
 
-  test("draft questionnaire exposes per-question evidence limits", async () => {
+  test("draft questionnaire exposes the uniform photo cap 4 and stored audio limits", async () => {
+    // 2026-10：问题照片有效上限统一为 4（存量 image_max_count 列不再作为有效上限下发）；
+    // 录音时长仍按题目存储配置逐题下发。
     const world = await seedWorld(pool, { imageMaxCount: 2, audioMaxDurationSeconds: 5 });
     const app = buildApp({ config, pool, logger: false, providers, storage });
     const { inspectorHeaders, attemptId } = await inspectorAttempt(app, world.assignmentId);
     const draft = await app.inject({ method: "GET", url: `/api/questionnaires/secret/drafts/${attemptId}`, headers: inspectorHeaders });
     expect(draft.statusCode).toBe(200);
-    expect(draft.json().questions[0].evidence).toMatchObject({ imageRequired: true, audioRequired: true, imageMaxCount: 2, audioMaxDurationSeconds: 5 });
+    expect(draft.json().questions[0].evidence).toMatchObject({ imageRequired: true, audioRequired: true, imageMaxCount: 4, audioMaxDurationSeconds: 5 });
     await app.close();
   });
 
-  test("rejects the fourth image when the limit is 3 and audio longer than 10 seconds", async () => {
+  test("admits four photos under the uniform cap regardless of stored limit 3; audio limits stay per-question", async () => {
+    // 2026-10：存量 image_max_count=3 不再作为有效上限；现行策略 4 张放行、第 5 张拒绝。
     const world = await seedWorld(pool, { imageMaxCount: 3, audioMaxDurationSeconds: 10 });
     const app = buildApp({ config, pool, logger: false, providers, storage });
     const { inspectorHeaders, attemptId } = await inspectorAttempt(app, world.assignmentId);
     const edit = await app.inject({ method: "POST", url: `/api/questionnaires/secret/drafts/${attemptId}/questions/${world.questionId}/edit-sessions`, headers: inspectorHeaders, payload: { baseAnswerRevision: 0, targetAnswer: "unscored" } });
     const editSessionId = edit.json().id;
-    // 3 张图片应全部成功
-    for (let index = 0; index < 3; index += 1) {
+    // 4 张图片全部成功（统一上限 4）
+    for (let index = 0; index < 4; index += 1) {
       const upload = await app.inject({ method: "POST", url: `/api/questionnaires/secret/drafts/${attemptId}/questions/${world.questionId}/edit-sessions/${editSessionId}/evidence-uploads`, headers: inspectorHeaders, payload: { clientFileId: uuidv7(), type: "image", mimeType: "image/jpeg", sizeBytes: 100 + index } });
       expect(upload.statusCode, upload.body).toBe(201);
     }
-    // 第 4 张被拒
-    const fourth = await app.inject({ method: "POST", url: `/api/questionnaires/secret/drafts/${attemptId}/questions/${world.questionId}/edit-sessions/${editSessionId}/evidence-uploads`, headers: inspectorHeaders, payload: { clientFileId: uuidv7(), type: "image", mimeType: "image/jpeg", sizeBytes: 200 } });
-    expect(fourth.statusCode).toBe(422);
-    expect(fourth.json().error.code).toBe("EVIDENCE_LIMIT_EXCEEDED");
+    // 第 5 张被拒
+    const fifth = await app.inject({ method: "POST", url: `/api/questionnaires/secret/drafts/${attemptId}/questions/${world.questionId}/edit-sessions/${editSessionId}/evidence-uploads`, headers: inspectorHeaders, payload: { clientFileId: uuidv7(), type: "image", mimeType: "image/jpeg", sizeBytes: 200 } });
+    expect(fifth.statusCode).toBe(422);
+    expect(fifth.json().error.code).toBe("EVIDENCE_LIMIT_EXCEEDED");
     // 11 秒录音被拒（上限 10 秒）
     const longAudio = await app.inject({ method: "POST", url: `/api/questionnaires/secret/drafts/${attemptId}/questions/${world.questionId}/edit-sessions/${editSessionId}/evidence-uploads`, headers: inspectorHeaders, payload: { clientFileId: uuidv7(), type: "audio", mimeType: "audio/mpeg", sizeBytes: 300, durationSeconds: 11 } });
     expect(longAudio.statusCode).toBe(422);
@@ -127,19 +130,24 @@ describe.sequential("evidence limits", () => {
     await app.close();
   });
 
-  test("confirming an unscored answer rejects image count above the limit", async () => {
+  test("存量超限照片保留可确认；新增一律被 init 拦截（2026-10 照片选填兼容语义）", async () => {
     const world = await seedWorld(pool, { imageMaxCount: 1, audioMaxDurationSeconds: 10 });
     const app = buildApp({ config, pool, logger: false, providers, storage });
     const { inspectorHeaders, attemptId } = await inspectorAttempt(app, world.assignmentId);
     const edit = await app.inject({ method: "POST", url: `/api/questionnaires/secret/drafts/${attemptId}/questions/${world.questionId}/edit-sessions`, headers: inspectorHeaders, payload: { baseAnswerRevision: 0, targetAnswer: "unscored" } });
     const editSessionId = edit.json().id;
-    // 绕过上传接口直接插入 2 张 active 附件（上限 1），确认时应被防御层拦截
+    // 绕过上传接口直接插入 4 张 active 附件：模拟历史累计存量（统一上限 4 的满额）。
     await pool.query(`INSERT INTO question_evidence_attachments (id,attempt_id,question_id,type,storage_key,edit_session_id,status,client_file_id,upload_nonce,declared_content_type,declared_size_bytes)
-      VALUES (gen_random_uuid(),$1,$2,'image','key-a',$3,'active',gen_random_uuid(),gen_random_uuid(),'image/jpeg',100),(gen_random_uuid(),$1,$2,'image','key-b',$3,'active',gen_random_uuid(),gen_random_uuid(),'image/jpeg',101)`, [attemptId, world.questionId, editSessionId]);
+      SELECT gen_random_uuid(),$1,$2,'image','legacy-' || n,$3,'active',gen_random_uuid(),gen_random_uuid(),'image/jpeg',100 + n
+      FROM generate_series(1,4) n`, [attemptId, world.questionId, editSessionId]);
+    // 新增第 5 张：init 是张数上限的唯一强制点 → 422
+    const fifth = await app.inject({ method: "POST", url: `/api/questionnaires/secret/drafts/${attemptId}/questions/${world.questionId}/edit-sessions/${editSessionId}/evidence-uploads`, headers: inspectorHeaders, payload: { clientFileId: uuidv7(), type: "image", mimeType: "image/jpeg", sizeBytes: 102 } });
+    expect(fifth.statusCode).toBe(422);
+    expect(fifth.json().error.code).toBe("EVIDENCE_LIMIT_EXCEEDED");
+    // 存量 2 张保留：确认（无 image_min_count 强制、不再按存量数拒绝）与提交均放行
     await app.inject({ method: "PATCH", url: `/api/questionnaires/secret/drafts/${attemptId}/questions/${world.questionId}/edit-sessions/${editSessionId}`, headers: inspectorHeaders, payload: { draftIssueRemark: "照片超限测试", revision: 0 } });
     const confirmed = await app.inject({ method: "POST", url: `/api/questionnaires/secret/drafts/${attemptId}/questions/${world.questionId}/edit-sessions/${editSessionId}/confirm`, headers: inspectorHeaders, payload: { answer: "unscored", revision: 0 } });
-    expect(confirmed.statusCode).toBe(422);
-    expect(confirmed.json().error.code).toBe("EVIDENCE_LIMIT_EXCEEDED");
+    expect(confirmed.statusCode, confirmed.body).toBe(200);
     await app.close();
   });
 

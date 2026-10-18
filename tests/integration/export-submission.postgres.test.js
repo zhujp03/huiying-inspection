@@ -231,7 +231,7 @@ describe.sequential("PostgreSQL single-submission export", () => {
     expect(text).toContain("清零：C1「环境清零题」被判不得分"); // environment → C，触发题用可见编号
     expect(text).toContain("此大项分数直接清零");
     expect(text).toContain("发现过期食材");
-    expect(text).toContain("闪光点\n环境整洁，服务主动");
+    expect(text).toContain("闪光点\n闪光点1：环境整洁，服务主动");
     expect(text).toContain("改善建议：\n高峰期加派人手");
     // 右上矩阵总评 = 权威得分率 50%（5/10）；成绩记录保留原始分与满分
     expect(sheet.getCell("K4").value).toBe(50);

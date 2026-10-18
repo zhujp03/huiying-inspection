@@ -32,6 +32,8 @@ const DELETE_STEPS = [
   ["evidenceAttachments", `DELETE FROM question_evidence_attachments WHERE attempt_id IN (${ATTEMPT_IDS})`],
   ["editSessions", `DELETE FROM question_answer_edit_sessions WHERE attempt_id IN (${ATTEMPT_IDS})`],
   ["answers", `DELETE FROM question_answers WHERE attempt_id IN (${ATTEMPT_IDS})`],
+  ["highlightPhotos", `DELETE FROM other_record_highlight_photos WHERE attempt_id IN (${ATTEMPT_IDS})`],
+  ["highlights", `DELETE FROM other_record_highlights WHERE attempt_id IN (${ATTEMPT_IDS})`],
   ["otherRecords", `DELETE FROM other_records WHERE attempt_id IN (${ATTEMPT_IDS})`],
   ["dishRequirements", `DELETE FROM assignment_dish_requirements WHERE assignment_id IN (${ASSIGNMENT_IDS})`],
   ["idempotencyKeys", `DELETE FROM idempotency_keys WHERE attempt_id IN (${ATTEMPT_IDS})`],
@@ -57,6 +59,8 @@ async function gatherCounts(querier, campaignId) {
     receiptAttachments: await one(`SELECT count(*)::int n FROM receipt_attachments WHERE attempt_id IN (${ATTEMPT_IDS})`),
     ocrJobs: await one(`SELECT count(*)::int n FROM receipt_ocr_jobs WHERE attempt_id IN (${ATTEMPT_IDS})`),
     dishes: await one(`SELECT count(*)::int n FROM dish_records WHERE attempt_id IN (${ATTEMPT_IDS})`),
+    highlightPhotos: await one(`SELECT count(*)::int n FROM other_record_highlight_photos WHERE attempt_id IN (${ATTEMPT_IDS})`),
+    highlights: await one(`SELECT count(*)::int n FROM other_record_highlights WHERE attempt_id IN (${ATTEMPT_IDS})`),
     otherRecords: await one(`SELECT count(*)::int n FROM other_records WHERE attempt_id IN (${ATTEMPT_IDS})`),
     idempotencyKeys: await one(`SELECT count(*)::int n FROM idempotency_keys WHERE attempt_id IN (${ATTEMPT_IDS})`),
     submissions: await one(`SELECT count(*)::int n FROM submission_versions WHERE campaign_id=$1`),
@@ -138,7 +142,8 @@ export function registerCampaignCleanupRoutes(app, { pool }) {
       // 去重：同一附件只入队一次（UNIQUE(attachment_id)，已入队/已完成的不重复）。
       const evidence = await client.query(`SELECT id,storage_key FROM question_evidence_attachments WHERE attempt_id IN (${ATTEMPT_IDS})`, [id]);
       const receipts = await client.query(`SELECT id,storage_key FROM receipt_attachments WHERE attempt_id IN (${ATTEMPT_IDS})`, [id]);
-      for (const attachment of [...evidence.rows, ...receipts.rows]) {
+      const highlightPhotos = await client.query(`SELECT id,storage_key FROM other_record_highlight_photos WHERE attempt_id IN (${ATTEMPT_IDS})`, [id]);
+      for (const attachment of [...evidence.rows, ...receipts.rows, ...highlightPhotos.rows]) {
         await client.query(`INSERT INTO object_cleanup_jobs (id,attachment_id,storage_key,status) VALUES ($1,$2,$3,'queued')
           ON CONFLICT (attachment_id) DO NOTHING`, [uuidv7(), attachment.id, attachment.storage_key]);
       }

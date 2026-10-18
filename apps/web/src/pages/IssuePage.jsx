@@ -237,8 +237,9 @@ export function IssuePage() {
   };
 
   // 选图（R43 / PM 适配点 3）：余量 ≤0 toast；选择数量取余量。
+  // 问题照片已全面选填，但所有题都可传；上限默认 4 张（服务端未配置时同值）。
   const chooseImage = () => {
-    const maxCount = latestRef.current.question?.evidence?.imageMaxCount || 3;
+    const maxCount = latestRef.current.question?.evidence?.imageMaxCount || 4;
     const remaining = maxCount - latestRef.current.images.length;
     if (remaining <= 0) {
       toast(`每题最多上传 ${maxCount} 张照片`);
@@ -251,7 +252,7 @@ export function IssuePage() {
     const input = event.target;
     const chosen = Array.from(input.files || []);
     input.value = ""; // 允许重复选择同一文件
-    const maxCount = latestRef.current.question?.evidence?.imageMaxCount || 3;
+    const maxCount = latestRef.current.question?.evidence?.imageMaxCount || 4;
     const remaining = maxCount - latestRef.current.images.length;
     chosen.slice(0, Math.max(0, remaining)).forEach((file) => {
       stageFile({ type: "image", file, path: "", size: file.size, name: file.name, mime: file.type });
@@ -425,13 +426,10 @@ export function IssuePage() {
     const currentTarget = targetRef.current;
     if (currentTarget === "unscored") {
       // R49 必填校验（按固定顺序；target=scored 全部跳过）。
+      // 问题照片已全面选填：历史 imageRequired 配置不再强制（无照片+说明可确认）；
+      // 音频要求保持既有口径；在途附件仍需等待完成。
       if (!remarkRef.current.trim()) {
         toast("请填写问题说明");
-        return;
-      }
-      if (questionRef.current?.evidence?.imageRequired
-        && !latestRef.current.images.some((item) => ["active", "staged_ready"].includes(item.status))) {
-        toast("请先上传成功的问题照片");
         return;
       }
       if (questionRef.current?.evidence?.audioRequired
@@ -611,7 +609,7 @@ export function IssuePage() {
 
   const viewState = loading ? "loading" : error ? "error" : "ready";
   const evidence = question?.evidence || {};
-  const imageMaxCount = evidence.imageMaxCount || 3;
+  const imageMaxCount = evidence.imageMaxCount || 4;
   const audioMaxSeconds = evidence.audioMaxDurationSeconds || 10;
   const imageRemaining = imageMaxCount - images.length;
   const evidenceLabel = (item, savedText) => item.progressLabel || (item.status === "active" ? savedText : "上传成功");
@@ -659,34 +657,34 @@ export function IssuePage() {
                 {remarkMissing ? <div className="inline-error" style={{ marginTop: 6 }}>请填写问题说明后再确认</div> : null}
               </Card>
 
-              {/* 问题照片（imageRequired 时，§1.8 a.4） */}
-              {evidence.imageRequired ? (
-                <Card>
-                  <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
-                    <span className="field__label">问题照片 <span className="required">*</span></span>
-                    <Muted>每题最多 {imageMaxCount} 张，单张不超过 10MB</Muted>
-                  </div>
-                  <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
-                    {images.map((item) => (
-                      <div key={item.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
-                        <span style={{ flex: 1 }}>{evidenceLabel(item, "已保存照片")}</span>
-                        {item.status === "failed" ? <Button variant="link" small onClick={() => retryUpload(item.id)}>重试</Button> : null}
-                        <Button variant="link" small onClick={() => deleteEvidence(item.id, "image")}>删除</Button>
-                      </div>
-                    ))}
+              {/* 问题照片：所有题目可见、选填（历史 imageRequired 配置不再强制；默认上限 4 张） */}
+              <Card data-evidence-photos="optional">
+                <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
+                  <span className="field__label">问题照片（选填）</span>
+                  <Muted>每题最多 {imageMaxCount} 张，单张不超过 10MB</Muted>
+                </div>
+                <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
+                  {images.map((item) => (
+                    <div key={item.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+                      <span style={{ flex: 1 }}>{evidenceLabel(item, "已保存照片")}</span>
+                      {item.status === "failed" ? <Button variant="link" small onClick={() => retryUpload(item.id)}>重试</Button> : null}
+                      <Button variant="link" small onClick={() => deleteEvidence(item.id, "image")}>删除</Button>
+                    </div>
+                  ))}
+                  {imageRemaining > 0 ? (
                     <Button variant="outline" small onClick={chooseImage}>拍照或相册（最多 {imageMaxCount} 张）</Button>
-                  </div>
-                  {/* PM 适配点 3：隐藏 file input，multiple 按余量 */}
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="image/jpeg,image/png"
-                    multiple={imageRemaining > 1}
-                    style={{ display: "none" }}
-                    onChange={onFilesChosen}
-                  />
-                </Card>
-              ) : null}
+                  ) : null}
+                </div>
+                {/* PM 适配点 3：隐藏 file input，multiple 按余量 */}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/jpeg,image/png"
+                  multiple={imageRemaining > 1}
+                  style={{ display: "none" }}
+                  onChange={onFilesChosen}
+                />
+              </Card>
 
               {/* 问题音频（audioRequired 时，§1.8 a.5） */}
               {evidence.audioRequired ? (

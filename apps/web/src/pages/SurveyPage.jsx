@@ -451,17 +451,22 @@ export function SurveyPage({ routeCategory = "" }) {
                 </div>
               ) : null}
               <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                {/* 计分选择按钮：未选=白底橙红字+橙红边（outline），选中=橙红底白字（primary）。
+                    以真实持久化作答状态渲染（而非默认得分），aria-pressed 表达选中语义。 */}
                 <Button
                   small
-                  style={question.current?.answer === "scored" ? { borderColor: "#f25f42", color: "#f25f42" } : undefined}
+                  variant={question.current?.answer === "scored" ? "primary" : "outline"}
+                  aria-pressed={question.current?.answer === "scored"}
+                  data-answer-state={question.current?.answer === "scored" ? "selected" : "unselected"}
                   onClick={() => score(question.id)}
                 >
                   {question.isScoreWipe ? "否" : "得分"}
                 </Button>
                 <Button
                   small
-                  variant="outline"
-                  style={question.current?.answer === "unscored" ? { borderColor: "#f25f42", color: "#f25f42" } : undefined}
+                  variant={question.current?.answer === "unscored" ? "primary" : "outline"}
+                  aria-pressed={question.current?.answer === "unscored"}
+                  data-answer-state={question.current?.answer === "unscored" ? "selected" : "unselected"}
                   onClick={() => (question.isScoreWipe ? confirmWipeThenIssue(question.id) : openIssue(question.id, "unscored"))}
                 >
                   {question.isScoreWipe ? "是" : "不得分"}
@@ -472,7 +477,7 @@ export function SurveyPage({ routeCategory = "" }) {
 
           {/* 最后一类才显示下一步（等价 miniapp wx:if isLastCategory） */}
           {isLastCategory ? (
-            <Button block onClick={goDishes}>下一步：菜品与小票</Button>
+            <Button block onClick={goDishes}>下一步：其他照片</Button>
           ) : null}
         </>
       )}

@@ -114,6 +114,11 @@ const ConfigSchema = z.object({
   RETENTION_POLICY_VERSION: z.string().trim().min(1).max(100).default("phase1-v1"),
   OBJECT_RECONCILIATION_SAMPLE_SIZE: z.coerce.number().int().min(1).max(10000).default(100),
   BACKUP_PREFIX: z.string().trim().min(1).max(64).default("postgres"),
+
+  // 菜品记录工作流开关（第二步骤内的菜品区块）：disabled（默认）= 两端隐藏菜品区块、
+  // 服务端提交校验不再要求菜品，历史菜品数据原样保留；enabled = 恢复既有可选菜品流程。
+  // 经 client-config（features.dishRecords）动态下发，开关切换无需客户端发版。
+  DISH_RECORDS_ENABLED: z.enum(["enabled", "disabled"]).default("disabled"),
 });
 
 const PLACEHOLDER_PATTERN = /YOUR_|change-me|example\.com|example\.cn/i;
@@ -268,6 +273,8 @@ export function publicClientConfig(config) {
     features: {
       receiptOcr: (config.OCR_PROVIDER || "none") !== "none",
       authSelfService: config.AUTH_SELF_SERVICE === "enabled",
+      // 菜品记录区块显隐：默认关闭（隐藏菜品区块，提交也不再校验菜品）。
+      dishRecords: config.DISH_RECORDS_ENABLED === "enabled",
     },
   };
 }

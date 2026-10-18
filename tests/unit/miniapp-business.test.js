@@ -40,16 +40,20 @@ describe("questionnaire continuation guard", () => {
     { id: "two", number: 2, evidence: { imageRequired: true } },
   ];
 
-  it("finds missing answers, remarks and required evidence", () => {
+  it("finds missing answers and remarks; photos no longer count as required evidence (2026-10 选填)", () => {
     const completeQuestions = Array.from({ length: 50 }, (_, index) => ({ id: String(index + 1), number: index + 1, evidence: {} }));
     const completeAnswers = Object.fromEntries(completeQuestions.map((question) => [question.id, { answer: "scored" }]));
     // 题量不设上限后，两道题也是合法题库：直接返回第一道未答题
     expect(firstIncompleteQuestion(questions, {})?.number).toBe(1);
     expect(firstIncompleteQuestion(completeQuestions, { ...completeAnswers, "2": { answer: "unscored", remark: " " } })?.number).toBe(2);
     expect(firstIncompleteQuestion(completeQuestions, { ...completeAnswers, "2": { answer: "unscored", remark: "有问题", attachments: [] } })?.number).toBeUndefined();
+    // 问题照片选填：历史 imageRequired 配置不再阻断继续填写（无照片+说明=已完成）
     completeQuestions[1].evidence = { imageRequired: true };
+    expect(firstIncompleteQuestion(completeQuestions, { ...completeAnswers, "2": { answer: "unscored", remark: "有问题", attachments: [] } })?.number).toBeUndefined();
+    // 音频要求仍按既有口径
+    completeQuestions[1].evidence = { audioRequired: true };
     expect(firstIncompleteQuestion(completeQuestions, { ...completeAnswers, "2": { answer: "unscored", remark: "有问题", attachments: [] } })?.number).toBe(2);
-    expect(firstIncompleteQuestion(completeQuestions, { ...completeAnswers, "2": { answer: "unscored", remark: "有问题", attachments: [{ type: "image", status: "active" }] } })).toBeUndefined();
+    expect(firstIncompleteQuestion(completeQuestions, { ...completeAnswers, "2": { answer: "unscored", remark: "有问题", attachments: [{ type: "audio", status: "active" }] } })).toBeUndefined();
     // 题号出现缺口时仍兜底报缺号（防御异常状态）
     expect(firstIncompleteQuestion([{ id: "a", number: 1, evidence: {} }, { id: "b", number: 3, evidence: {} }], {})?.number).toBe(2);
   });

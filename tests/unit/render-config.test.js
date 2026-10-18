@@ -27,7 +27,7 @@ describe("render deployment target config gates", () => {
     const origins = new Set([config.PUBLIC_API_ORIGIN, config.MINIAPP_API_BASE_URL, config.ADMIN_ORIGIN, config.WEB_ORIGIN]);
     expect(origins.size).toBe(1);
     expect(config.PUBLIC_API_ORIGIN).toBe("https://junde-app.onrender.com");
-    expect(publicClientConfig(config).features).toEqual({ receiptOcr: false, authSelfService: false });
+    expect(publicClientConfig(config).features).toEqual({ receiptOcr: false, authSelfService: false, dishRecords: false });
   });
 
   it("accepts explicit origins without RENDER_EXTERNAL_URL and rejects missing ones", () => {

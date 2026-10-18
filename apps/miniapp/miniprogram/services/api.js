@@ -92,6 +92,19 @@ export function createReceiptOcrJob(attemptId, attachmentIds, idempotencyKey, re
 export function getReceiptOcrJob(attemptId, jobId) { return request({ url: API.drafts.receiptOcrJob(attemptId, jobId), validate: assertReceiptOcrJob, dedupeKey: `receipt-ocr-get:${attemptId}:${jobId}` }); }
 export function applyReceiptOcrJob(attemptId, jobId, idempotencyKey, dishRevision) { return request({ url: API.drafts.receiptOcrApply(attemptId, jobId), method: "POST", data: { idempotencyKey, revision: dishRevision }, validate: assertReceiptOcrApply, dedupeKey: `receipt-ocr-apply:${attemptId}:${jobId}:${idempotencyKey}` }); }
 export function saveOtherRecords(attemptId, data) { return request({ url: API.drafts.otherRecords(attemptId), method: "PUT", data, validate: assertRevision, dedupeKey: `other:${attemptId}` }); }
+// 闪光点照片三步直传（与消费小票同构）：init/complete 返回 { photo, uploadTarget?/revision }，删除返回 { revision }。
+// init 的 ready 幂等重放返回 uploadTarget:null（对象已校验落位，无凭据可发），不能复用
+// 生成的 assertUploadInit（它要求 uploadTarget 恒为对象），这里用专用断言。
+function assertHighlightUploadInit(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("upload initialization must be an object");
+  if (!value.photo || typeof value.photo !== "object" || typeof value.photo.id !== "string" || !value.photo.id) throw new Error("upload initialization.photo.id must be a non-empty string");
+  if (value.photo.status !== "ready" && (!value.uploadTarget || typeof value.uploadTarget !== "object")) throw new Error("upload initialization.uploadTarget must be an object");
+  if (!Number.isInteger(value.revision) || value.revision < 0) throw new Error("upload initialization.revision must be a non-negative integer");
+  return value;
+}
+export function initHighlightPhotoUpload(attemptId, highlightId, payload) { return request({ url: API.drafts.highlightPhotoUploads(attemptId, highlightId), method: "POST", data: payload, validate: assertHighlightUploadInit, dedupeKey: `highlight-photo-init:${attemptId}:${highlightId}:${payload.fileMeta.clientFileId}` }); }
+export function completeHighlightPhotoUpload(attemptId, highlightId, attachmentId, payload) { return request({ url: API.drafts.highlightPhotoComplete(attemptId, highlightId, attachmentId), method: "POST", data: payload, validate: assertReceiptMutation, dedupeKey: `highlight-photo-complete:${attemptId}:${highlightId}:${attachmentId}` }); }
+export function deleteHighlightPhoto(attemptId, highlightId, attachmentId, payload) { return request({ url: API.drafts.highlightPhoto(attemptId, highlightId, attachmentId), method: "DELETE", data: payload, validate: assertReceiptMutation, dedupeKey: `highlight-photo-delete:${attemptId}:${highlightId}:${attachmentId}` }); }
 export function submitQuestionnaire(attemptId, payload) { return request({ url: API.drafts.submit(attemptId), method: "POST", data: payload, validate: assertSubmit, dedupeKey: `submit:${attemptId}:${payload.submitToken}` }); }
 
 export function uploadToSignedTarget({ url, method, fileFieldName, formData, expiresAt }, filePath, onProgress) {

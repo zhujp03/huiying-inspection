@@ -8,8 +8,39 @@ import { writeAudit } from "../audit.js";
 const attemptRow = (attempt) => ({ id: attempt.id, status: attempt.status, revision: Number(attempt.revision) });
 const versionRow = (version) => ({ id: version.id, name: version.template_name, versionLabel: `V${version.version_number}` });
 const hash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+// 不得分问题照片现行有效上限（选填、全题开放；历史存量 >4 保留可提交，仅禁止新增）。
+const QUESTION_IMAGE_LIMIT = 4;
 
-export function registerBatch3Routes(app, { pool, cos }) {
+// 结构化闪光点视图（草稿 DTO / 提交快照共用）：ready 照片签发预签名 URL；
+// 文字为空且无照片的条目不会落库（保存端点忽略），此处无需再过滤。
+const otherRecordsView = async (db, cos, attemptId, { signPreviews = true } = {}) => {
+  const highlights = await db.query("SELECT id,text FROM other_record_highlights WHERE attempt_id=$1 ORDER BY sort_order,id", [attemptId]);
+  if (!highlights.rows.length) return [];
+  const photos = await db.query(`SELECT id,highlight_id,display_order,storage_key,status FROM other_record_highlight_photos
+    WHERE attempt_id=$1 AND status='ready' ORDER BY highlight_id,display_order,id`, [attemptId]);
+  const previewByPhoto = new Map();
+  if (signPreviews) {
+    await Promise.all(photos.rows.map(async (photo) => {
+      try {
+        previewByPhoto.set(photo.id, (await cos.createPreviewUrl(photo.storage_key)).url);
+      } catch {
+        previewByPhoto.set(photo.id, null); // 单张预签名失败不阻断整页：按无预览呈现
+      }
+    }));
+  }
+  const photosByHighlight = new Map();
+  for (const photo of photos.rows) {
+    const list = photosByHighlight.get(photo.highlight_id) || [];
+    list.push({ id: photo.id, displayOrder: Number(photo.display_order), status: "ready", previewUrl: previewByPhoto.get(photo.id) || null });
+    photosByHighlight.set(photo.highlight_id, list);
+  }
+  return highlights.rows.map((item) => ({ id: item.id, text: item.text, photos: photosByHighlight.get(item.id) || [] }));
+};
+
+export function registerBatch3Routes(app, { pool, cos, config }) {
+  // 菜品记录工作流开关（client-config features.dishRecords 同源）：disabled 时提交不再校验菜品，
+  // 历史菜品行原样保留并照常进入提交快照（绝不删除/改写既有数据）。
+  const dishRecordsEnabled = config?.DISH_RECORDS_ENABLED === "enabled";
   const requireInspector = async (request) => {
     if (!app.jundeAuth.configured) throw app.jundeAuth.businessError("AUTH_NOT_CONFIGURED", "认证服务暂未配置", 503, { retryable: true });
     const session = await app.jundeAuth.sessionFor(request, false);
@@ -37,7 +68,7 @@ export function registerBatch3Routes(app, { pool, cos }) {
   };
   const questionnaire = async (client, attempt) => {
     const questions = await client.query(`SELECT q.id,q.question_number,q.category,q.text,q.max_score,q.is_score_wipe,COALESCE(e.image_required,false) image_required,COALESCE(e.audio_required,false) audio_required,
-      COALESCE(e.image_max_count,3) image_max_count,COALESCE(e.audio_max_duration_seconds,10) audio_max_duration_seconds
+      COALESCE(e.audio_max_duration_seconds,10) audio_max_duration_seconds
       FROM questions q LEFT JOIN question_evidence_requirements e ON e.question_id=q.id WHERE q.version_id=$1 AND q.enabled ORDER BY q.question_number`, [attempt.questionnaire_version_id]);
     const answers = await client.query("SELECT * FROM question_answers WHERE attempt_id=$1", [attempt.id]);
     const attachments = await client.query("SELECT question_id,id,type,mime_type,size_bytes,duration_seconds,storage_key FROM question_evidence_attachments WHERE attempt_id=$1 AND status='active' ORDER BY created_at", [attempt.id]);
@@ -57,6 +88,7 @@ export function registerBatch3Routes(app, { pool, cos }) {
     const dishes = await client.query(`SELECT id,requirement_id,planned_name,actual_name,quantity,planned_quantity,unit_price_cents,line_total_cents,fulfillment_status,substitution_reason,unavailable_reason,evaluation,fully_satisfied,source,manually_modified,price_derived,review_fields,required_snapshot,allow_substitution_snapshot
       FROM dish_records WHERE attempt_id=$1 ORDER BY sort_order,id`, [attempt.id]);
     const other = await client.query("SELECT highlight,suggestion FROM other_records WHERE attempt_id=$1", [attempt.id]);
+    const highlights = await otherRecordsView(client, cos, attempt.id);
     // 分类标签页 = 本问卷版本中存在启用题目的分类聚合：分类行即使 active=false 也纳入（名称仍可查，FK 保证 code 不删），
     // 避免发布后管理员停用分类导致题目不可达而提交仍要求作答的死锁；无启用题目的分类不出现，按 sort_order 稳定排序
     const categories = await client.query(`SELECT qc.code, qc.name FROM question_categories qc
@@ -65,10 +97,10 @@ export function registerBatch3Routes(app, { pool, cos }) {
     return {
       attempt: attemptRow(attempt), questionnaireVersion: versionRow({ id: attempt.questionnaire_version_id, template_name: attempt.template_name, version_number: attempt.version_number }),
       categories: categories.rows.map((item) => ({ id: item.code, label: item.name })),
-      questions: questions.rows.map((item) => ({ id: item.id, number: item.question_number, category: item.category, text: item.text, score: item.max_score, isScoreWipe: Boolean(item.is_score_wipe), evidence: { imageRequired: item.image_required, audioRequired: item.audio_required, imageMaxCount: Number(item.image_max_count), audioMaxDurationSeconds: Number(item.audio_max_duration_seconds) } })),
+      questions: questions.rows.map((item) => ({ id: item.id, number: item.question_number, category: item.category, text: item.text, score: item.max_score, isScoreWipe: Boolean(item.is_score_wipe), evidence: { imageRequired: item.image_required, audioRequired: item.audio_required, imageMaxCount: QUESTION_IMAGE_LIMIT, audioMaxDurationSeconds: Number(item.audio_max_duration_seconds) } })),
       answers: Object.fromEntries(answers.rows.map((item) => [item.question_id, { answer: item.answer, awardedScore: item.awarded_score, remark: item.issue_remark, attachments: previewsByQuestion.get(item.question_id) || [], revision: Number(item.revision) }])),
       dishes: dishes.rows.map((item) => ({ id: item.id, requirementId: item.requirement_id, plannedName: item.planned_name, actualName: item.actual_name, quantity: Number(item.quantity || item.planned_quantity || 1), unitPriceCents: item.unit_price_cents, lineTotalCents: item.line_total_cents, fulfillmentStatus: item.fulfillment_status, substitutionReason: item.substitution_reason, unavailableReason: item.unavailable_reason, evaluation: item.evaluation, fullySatisfied: item.fully_satisfied, source: item.source, manuallyModified: item.manually_modified, priceDerived: item.price_derived, reviewFields: item.review_fields || [], required: item.required_snapshot, allowSubstitution: item.allow_substitution_snapshot })),
-      otherRecords: other.rows[0] ? { highlight: other.rows[0].highlight, suggestion: other.rows[0].suggestion } : { highlight: "", suggestion: "" },
+      otherRecords: { highlight: other.rows[0]?.highlight || "", suggestion: other.rows[0]?.suggestion || "", highlights },
     };
   };
 
@@ -179,7 +211,7 @@ export function registerBatch3Routes(app, { pool, cos }) {
         const submitDeadline = assignmentRow.questionnaire_deadline_at || assignmentRow.due_at;
         if (new Date(submitDeadline) <= new Date()) throw app.jundeAuth.businessError("TASK_OVERDUE", "问卷已过最终截止时间，请等待管理员延期后刷新任务", 409, { requiresNewToken: true });
         const questions = await client.query(`SELECT q.id,q.question_key,q.question_number,q.category,q.text,q.max_score,q.is_score_wipe,COALESCE(r.image_required,false) image_required,COALESCE(r.audio_required,false) audio_required,
-          COALESCE(r.image_max_count,3) image_max_count,COALESCE(r.audio_max_duration_seconds,10) audio_max_duration_seconds
+          COALESCE(r.audio_max_duration_seconds,10) audio_max_duration_seconds
           FROM questions q LEFT JOIN question_evidence_requirements r ON r.question_id=q.id WHERE q.version_id=$1 AND q.enabled ORDER BY q.question_number FOR UPDATE OF q`, [attemptRow.questionnaire_version_id]);
         const answers = await client.query("SELECT * FROM question_answers WHERE attempt_id=$1 ORDER BY question_id FOR UPDATE", [attemptId]);
         // 启用题必须每题都有作答；答题期间被管理员停用的题留下的多余答案不阻断提交。
@@ -193,24 +225,48 @@ export function registerBatch3Routes(app, { pool, cos }) {
           if (answer.answer === "unscored") {
             if (!String(answer.issue_remark ?? "").trim()) throw app.jundeAuth.businessError("ISSUE_REMARK_REQUIRED", "不得分说明不能为空", 422);
             const evidenceForQuestion = await client.query("SELECT type,duration_seconds FROM question_evidence_attachments WHERE attempt_id=$1 AND question_id=$2 AND status='active'", [attemptId, question.id]);
-            const imageCount = evidenceForQuestion.rows.filter((item) => item.type === "image").length;
             const audioRows = evidenceForQuestion.rows.filter((item) => item.type === "audio");
-            if ((question.image_required && imageCount < 1) || (question.audio_required && audioRows.length < 1)) throw app.jundeAuth.businessError("EVIDENCE_REQUIRED", "不得分题目缺少必要证据", 422);
-            if (imageCount > Number(question.image_max_count)) throw app.jundeAuth.businessError("EVIDENCE_LIMIT_EXCEEDED", "不得分题目的照片数量超出上限", 422);
+            // 问题照片已全面改为选填（历史 image_required/image_min_count 配置不再作为强制校验），
+            // 无照片不得阻断提交；音频要求保持既有口径。照片张数上限由上传 init 端点强制，
+            // 存量超限（旧配置 image_max_count<现存张数）照片保留照常提交，只禁止继续新增。
+            if (question.audio_required && audioRows.length < 1) throw app.jundeAuth.businessError("EVIDENCE_REQUIRED", "不得分题目缺少必要证据", 422);
             if (audioRows.some((item) => Number(item.duration_seconds) > Number(question.audio_max_duration_seconds))) throw app.jundeAuth.businessError("EVIDENCE_LIMIT_EXCEEDED", "不得分题目的录音时长超出上限", 422);
           }
         }
         const dishes = await client.query("SELECT * FROM dish_records WHERE attempt_id=$1 ORDER BY sort_order,id FOR UPDATE", [attemptId]);
-        const dishErrors = validateDishes(dishes.rows.map((dish) => ({ ...dish, requirementId: dish.requirement_id, fulfillmentStatus: dish.fulfillment_status, actualName: dish.actual_name, substitutionReason: dish.substitution_reason, unavailableReason: dish.unavailable_reason, fullySatisfied: dish.fully_satisfied, evaluation: dish.evaluation, required: dish.required_snapshot, allowSubstitution: dish.allow_substitution_snapshot })));
-        if (dishErrors.length) throw app.jundeAuth.businessError("DISH_INVALID", dishErrors[0].message, 422);
+        // 菜品区块隐藏（开关 disabled）时菜品不再阻断提交；开关开启时保持既有校验。
+        if (dishRecordsEnabled) {
+          const dishErrors = validateDishes(dishes.rows.map((dish) => ({ ...dish, requirementId: dish.requirement_id, fulfillmentStatus: dish.fulfillment_status, actualName: dish.actual_name, substitutionReason: dish.substitution_reason, unavailableReason: dish.unavailable_reason, fullySatisfied: dish.fully_satisfied, evaluation: dish.evaluation, required: dish.required_snapshot, allowSubstitution: dish.allow_substitution_snapshot })));
+          if (dishErrors.length) throw app.jundeAuth.businessError("DISH_INVALID", dishErrors[0].message, 422);
+        }
         const other = await client.query("SELECT * FROM other_records WHERE attempt_id=$1 FOR UPDATE", [attemptId]);
-        if (!other.rows[0]?.highlight?.trim()) throw app.jundeAuth.businessError("OTHER_RECORD_REQUIRED", "请填写本次探店亮点", 422);
+        // 结构化闪光点：0 条可提交（不再要求「本次探店亮点」必填）；有照片但文字为空的条目
+        // 给出可恢复的文字校验（照片不会因此丢失，补文字后即可提交）。
+        const highlights = await client.query("SELECT * FROM other_record_highlights WHERE attempt_id=$1 ORDER BY sort_order,id FOR UPDATE", [attemptId]);
+        const highlightPhotos = await client.query("SELECT * FROM other_record_highlight_photos WHERE attempt_id=$1 AND status='ready' ORDER BY highlight_id,display_order,id FOR UPDATE", [attemptId]);
+        const photoCountByHighlight = new Map();
+        for (const photo of highlightPhotos.rows) photoCountByHighlight.set(photo.highlight_id, (photoCountByHighlight.get(photo.highlight_id) || 0) + 1);
+        if (highlights.rows.some((item) => (photoCountByHighlight.get(item.id) || 0) > 0 && !String(item.text ?? "").trim())) {
+          throw app.jundeAuth.businessError("OTHER_HIGHLIGHT_TEXT_REQUIRED", "请为已添加照片的闪光点填写文字", 422);
+        }
         const receipts = await client.query("SELECT * FROM receipt_attachments WHERE attempt_id=$1 AND status='ready' ORDER BY display_order FOR UPDATE", [attemptId]);
         if (assignmentRow.receipt_required && !receipts.rows.length) throw app.jundeAuth.businessError("RECEIPT_REQUIRED", "请至少上传一张已完成校验的消费小票", 422);
         const evidence = await client.query("SELECT * FROM question_evidence_attachments WHERE attempt_id=$1 AND status='active' ORDER BY question_id,id", [attemptId]);
         const ocr = await client.query("SELECT candidate.* FROM receipt_ocr_candidates candidate JOIN receipt_ocr_jobs job ON job.id=candidate.job_id WHERE job.attempt_id=$1 ORDER BY candidate.sort_order,candidate.id", [attemptId]);
         await client.query("UPDATE survey_attempts SET status='submitting',submit_token=$2,submitting_since=now() WHERE id=$1", [attemptId, body.submitToken]);
-        return { assignment: assignmentRow, attempt: attemptRow, questions: questions.rows, answers: answers.rows, dishes: dishes.rows, other: other.rows[0], evidence: evidence.rows, receipts: receipts.rows, ocr: ocr.rows };
+        // 冻结快照包含全部结构化闪光点文字与 ready 照片引用（照片整行入快照，供管理端预签名/导出清单）。
+        const photosByHighlight = new Map();
+        for (const photo of highlightPhotos.rows) {
+          const list = photosByHighlight.get(photo.highlight_id) || [];
+          list.push(photo);
+          photosByHighlight.set(photo.highlight_id, list);
+        }
+        const otherSnapshot = {
+          highlight: other.rows[0]?.highlight ?? null,
+          suggestion: other.rows[0]?.suggestion ?? null,
+          highlights: highlights.rows.map((item) => ({ id: item.id, sort_order: Number(item.sort_order), text: item.text, photos: photosByHighlight.get(item.id) || [] })),
+        };
+        return { assignment: assignmentRow, attempt: attemptRow, questions: questions.rows, answers: answers.rows, dishes: dishes.rows, other: otherSnapshot, evidence: evidence.rows, receipts: receipts.rows, ocr: ocr.rows };
       });
       if (occupied.response) {
         await app.jundeAuth.transaction(async (client) => {
@@ -289,10 +345,12 @@ export function registerBatch3Routes(app, { pool, cos }) {
   });
 
   const lockedQuestion = async (client, attempt, questionId) => {
+    // image_max_count 一律取现行策略常量（QUESTION_IMAGE_LIMIT=4）：存量列（旧默认 3/老配置 9）
+    // 不再作为有效上限；存量超限照片保留可见可提交，init 只按 4 拒绝新增。
     const question = await client.query(`SELECT q.*,COALESCE(e.evidence_required,false) evidence_required,
       COALESCE(e.image_required,false) image_required,COALESCE(e.audio_required,false) audio_required,
       COALESCE(e.image_min_count,0) image_min_count,COALESCE(e.audio_min_count,0) audio_min_count,
-      COALESCE(e.image_max_count,3) image_max_count,COALESCE(e.audio_max_duration_seconds,10) audio_max_duration_seconds FROM questions q
+      COALESCE(e.audio_max_duration_seconds,10) audio_max_duration_seconds FROM questions q
       LEFT JOIN question_evidence_requirements e ON e.question_id=q.id WHERE q.id=$1 AND q.version_id=$2`, [questionId, attempt.questionnaire_version_id]);
     if (!question.rows[0]) throw app.jundeAuth.businessError("QUESTION_NOT_FOUND", "题目不存在", 404);
     return question.rows[0];
@@ -411,8 +469,10 @@ export function registerBatch3Routes(app, { pool, cos }) {
         ) GROUP BY attachment.type`, [attemptId, questionId, editSessionId]) : { rows: [] };
       const evidenceCounts = Object.fromEntries(evidence.rows.map((item) => [item.type, item.count]));
       const evidenceMaxDuration = await client.query("SELECT COALESCE(max(duration_seconds),0)::int max_duration FROM question_evidence_attachments WHERE attempt_id=$1 AND question_id=$2 AND type='audio' AND status='active'", [attemptId, questionId]);
-      if (body.answer === "unscored" && (!edit.draft_issue_remark.trim() || evidenceCounts.image < question.image_min_count || evidenceCounts.audio < question.audio_min_count)) throw app.jundeAuth.businessError(!edit.draft_issue_remark.trim() ? "ISSUE_REMARK_REQUIRED" : "EVIDENCE_REQUIRED", !edit.draft_issue_remark.trim() ? "不得分说明不能为空" : "该题需要上传所需证据后才能确认", 422);
-      if (body.answer === "unscored" && (Number(evidenceCounts.image || 0) > Number(question.image_max_count) || Number(evidenceMaxDuration.rows[0].max_duration) > Number(question.audio_max_duration_seconds))) throw app.jundeAuth.businessError("EVIDENCE_LIMIT_EXCEEDED", "该题照片数量或录音时长超出上限", 422);
+      // 问题照片选填：历史 image_required/image_min_count 配置不再作为确认门槛（无照片+说明可确认）；
+      // 音频要求保持既有口径。照片张数上限由上传 init 强制；存量超限照片保留可确认，仅禁止新增。
+      if (body.answer === "unscored" && (!edit.draft_issue_remark.trim() || evidenceCounts.audio < question.audio_min_count)) throw app.jundeAuth.businessError(!edit.draft_issue_remark.trim() ? "ISSUE_REMARK_REQUIRED" : "EVIDENCE_REQUIRED", !edit.draft_issue_remark.trim() ? "不得分说明不能为空" : "该题需要上传所需证据后才能确认", 422);
+      if (body.answer === "unscored" && Number(evidenceMaxDuration.rows[0].max_duration) > Number(question.audio_max_duration_seconds)) throw app.jundeAuth.businessError("EVIDENCE_LIMIT_EXCEEDED", "该题录音时长超出上限", 422);
       const current = await client.query("SELECT revision FROM question_answers WHERE attempt_id=$1 AND question_id=$2 FOR UPDATE", [attemptId, questionId]);
       if (Number(current.rows[0]?.revision || 0) !== Number(edit.base_answer_revision)) throw app.jundeAuth.businessError("REVISION_CONFLICT", "内容已更新，请刷新后重试", 409);
       if (body.answer === "scored") {
@@ -495,7 +555,8 @@ export function registerBatch3Routes(app, { pool, cos }) {
       const attempt = await attemptForOwner(client, attemptId, session.user_id, true);
       if (attempt.status !== "draft" || attempt.assignment_status !== "in_progress") throw app.jundeAuth.businessError("QUESTIONNAIRE_LOCKED", "当前问卷不能修改", 409);
       const question = await lockedQuestion(client, attempt, questionId);
-      if (!question.evidence_required) throw app.jundeAuth.businessError("EVIDENCE_NOT_REQUIRED", "该题无需上传证据", 409);
+      // 问题照片对所有题目开放（选填、上限 image_max_count，默认 4）；音频仍按既有证据要求门控。
+      if (body.type === "audio" && !question.evidence_required) throw app.jundeAuth.businessError("EVIDENCE_NOT_REQUIRED", "该题无需上传证据", 409);
       const edit = await lockedSession(client, attemptId, questionId, editSessionId);
       if (edit.status !== "open" || new Date(edit.expires_at) <= new Date()) throw app.jundeAuth.businessError("EDIT_SESSION_EXPIRED", "编辑会话已过期，请重新打开", 409);
       const existing = await client.query("SELECT * FROM question_evidence_attachments WHERE edit_session_id=$1 AND client_file_id=$2 FOR UPDATE", [editSessionId, body.clientFileId]);
@@ -503,8 +564,14 @@ export function registerBatch3Routes(app, { pool, cos }) {
         VALUES ($1,$2,$3,$4,$5,$6,'staged_uploading',$7,$8,$9,$10,$11) RETURNING *`, [uuidv7(), attemptId, questionId, body.type, `attempts/${attemptId}/question-evidence/${uuidv7()}/${cos.newObjectSuffix()}`, editSessionId, body.clientFileId, uuidv7(), body.mimeType, body.sizeBytes, body.durationSeconds || null])).rows[0];
       if (attachment.type !== body.type || Number(attachment.declared_size_bytes) !== body.sizeBytes || attachment.declared_content_type !== body.mimeType) throw app.jundeAuth.businessError("EVIDENCE_UPLOAD_CONFLICT", "同一文件标识的上传内容不一致", 409);
       if (body.type === "audio" && Number(body.durationSeconds) > Number(question.audio_max_duration_seconds)) throw app.jundeAuth.businessError("EVIDENCE_LIMIT_EXCEEDED", `录音时长不能超过 ${question.audio_max_duration_seconds} 秒`, 422);
-      const maxCount = body.type === "image" ? Number(question.image_max_count) : 3;
-      const count = await client.query("SELECT count(*)::int count FROM question_evidence_attachments WHERE attempt_id=$1 AND question_id=$2 AND type=$3 AND status IN ('staged_uploading','staged_ready','active')", [attemptId, questionId, body.type]);
+      const maxCount = body.type === "image" ? QUESTION_IMAGE_LIMIT : 3;
+      // 有效张数与 confirm 同口径：active 扣除本会话已标记删除（question_answer_edit_session_removals），
+      // 加上本会话 staged（上传中/已就绪）。否则「删 1 补 1」会被会话前的存量计数误拒。
+      const count = await client.query(`SELECT count(*)::int count FROM question_evidence_attachments attachment
+        WHERE attachment.attempt_id=$1 AND attachment.question_id=$2 AND attachment.type=$3 AND (
+          (attachment.status='active' AND NOT EXISTS (SELECT 1 FROM question_answer_edit_session_removals removal WHERE removal.edit_session_id=$4 AND removal.attachment_id=attachment.id))
+          OR (attachment.status IN ('staged_uploading','staged_ready') AND attachment.edit_session_id=$4)
+        )`, [attemptId, questionId, body.type, editSessionId]);
       if (count.rows[0].count > maxCount) throw app.jundeAuth.businessError("EVIDENCE_LIMIT_EXCEEDED", body.type === "image" ? `该题最多上传 ${maxCount} 张照片` : "该题音频数量已达上限", 422);
       const target = cos.createPostTarget({ key: attachment.storage_key, sizeBytes: attachment.declared_size_bytes, uploadNonce: attachment.upload_nonce, contentType: attachment.declared_content_type });
       await client.query("UPDATE question_evidence_attachments SET upload_target_expires_at=$2,updated_at=now() WHERE id=$1", [attachment.id, target.expiresAt]);
