@@ -988,6 +988,5 @@ test("在途的旧版本后台刷新不会覆盖新版本数据", async ({ page 
 
 async function wizardFillStore(page) {
   await page.getByLabel(new RegExp("^品牌")).selectOption("1a6fd7a0-1111-4111-8111-000000000001");
-  await page.getByLabel(new RegExp("^店号")).selectOption("JD-SH-001");
   await page.getByLabel(new RegExp("^店名")).selectOption("store-one");
 }

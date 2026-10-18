@@ -17,8 +17,9 @@ const SubmissionsListQuerySchema = CursorPageSchema.extend({
   maxIssueCount: z.coerce.number().int().nonnegative().optional(),
   order: z.enum(["asc", "desc"]).default("asc"),
 });
-// 管理列表排序：order=desc 时按 id 倒序取最新（id 为 uuidv7，时间有序），默认 asc；与 batch2 列表游标模式一致
-const listOrder = (query) => (query?.order === "desc" ? { sql: "DESC", op: "<" } : { sql: "ASC", op: ">" });
+// 提交记录排序：按实际提交时间 submitted_at（非 id/创建/更新时间；id 仅作同刻并列的稳定兜底），
+// 空提交时间恒排最后；order=desc 最新在前（默认 asc 沿用游标列表约定，与 batch2 等不受影响）。
+const submissionsOrder = (query) => (query?.order === "desc" ? { direction: "DESC", op: "<" } : { direction: "ASC", op: ">" });
 
 const percent = (score, max) => `${Math.round((Number(score) / Number(max)) * 100)}%`;
 const restoreView = (job) => ({ id: job.id, status: job.status === "ready" && new Date(job.restore_expires_at) > new Date() ? "ready" : ["queued", "restoring"].includes(job.status) ? "restoring" : "unavailable", expiresAt: job.restore_expires_at?.toISOString?.() || null });
@@ -113,7 +114,7 @@ export function registerBatch5Routes(app, { pool, cos }) {
   app.get("/api/admin/submissions", async (request) => {
     const session = await admin(request);
     const query = SubmissionsListQuerySchema.parse(request.query);
-    const order = listOrder(query);
+    const order = submissionsOrder(query);
     const fromSql = `FROM submission_versions submission JOIN audit_assignments assignment ON assignment.id=submission.assignment_id
       JOIN audit_campaigns campaign ON campaign.id=submission.campaign_id JOIN stores store ON store.id=campaign.store_id
       JOIN regions region ON region.id=store.region_id JOIN users inspector ON inspector.id=submission.submitted_by`;
@@ -141,10 +142,17 @@ export function registerBatch5Routes(app, { pool, cos }) {
       conditions.push(`${column} ${op} $${params.length}`);
     }
     params.push(query.cursor || null);
-    const cursorSql = `($${params.length}::uuid IS NULL OR submission.id ${order.op} $${params.length})`;
+    // 游标仍为上一页最后一条 id（契约 cursor 为 uuid）：LEFT JOIN 反查该行的提交时间后按键集定位，
+    // 排序在切片前全局生效，跨页不重不漏；游标行已删除时 cursor_row 不命中 → 条件恒假（安全空页，不回卷重复）。
+    // 空提交时间排最后（NULLS LAST）：游标行非空时，空值行整体位于其后也需返回；游标行同为空时按 id 续页。
+    const cursorParam = `$${params.length}`;
+    const cursorJoin = `LEFT JOIN submission_versions cursor_row ON cursor_row.id = ${cursorParam}::uuid`;
+    const cursorSql = `(${cursorParam}::uuid IS NULL OR (
+      (cursor_row.id IS NOT NULL AND cursor_row.submitted_at IS NOT NULL AND (submission.submitted_at IS NULL OR submission.submitted_at ${order.op} cursor_row.submitted_at OR (submission.submitted_at = cursor_row.submitted_at AND submission.id ${order.op} ${cursorParam})))
+      OR (cursor_row.id IS NOT NULL AND cursor_row.submitted_at IS NULL AND submission.submitted_at IS NULL AND submission.id ${order.op} ${cursorParam})))`;
     const rows = await pool.query(`SELECT submission.id,campaign.name task_name,assignment.business_no,store.name store_name,region.name region_name,
       inspector.display_name inspector_name,submission.submitted_at,submission.total_score,submission.max_score,submission.issue_count
-      ${fromSql} WHERE ${[...conditions, cursorSql].join(" AND ")} ORDER BY submission.id ${order.sql} LIMIT $${params.length + 1}`, [...params, query.limit + 1]);
+      ${fromSql} ${cursorJoin} WHERE ${[...conditions, cursorSql].join(" AND ")} ORDER BY submission.submitted_at ${order.direction} NULLS LAST, submission.id ${order.direction} NULLS LAST LIMIT $${params.length + 1}`, [...params, query.limit + 1]);
     // total 与列表共用同一 FROM/筛选条件，但不含游标条件（游标参数固定在 params 末位）
     const total = await pool.query(`SELECT count(*)::int AS total ${fromSql} WHERE ${conditions.join(" AND ")}`, params.slice(0, -1));
     return { items: rows.rows.slice(0, query.limit).map((row) => ({ id: row.id, taskName: row.task_name, businessNo: row.business_no, storeName: row.store_name, regionName: row.region_name, inspectorName: row.inspector_name, status: "submitted", submittedAt: row.submitted_at.toISOString(), scoreRate: percent(row.total_score, row.max_score), issueCount: Number(row.issue_count) })), total: total.rows[0].total, nextCursor: rows.rows.length > query.limit ? rows.rows[query.limit - 1].id : null };

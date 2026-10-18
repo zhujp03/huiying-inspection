@@ -263,11 +263,22 @@ export function registerBatch2Routes(app, { pool, config }) {
   // 管理列表排序：order=desc 时按 id 倒序取最新（id 为 uuidv7，时间有序），默认 asc 保持既有行为；未知值按 asc。
   const listOrder = (query) => (query?.order === "desc" ? { sql: "DESC", op: "<" } : { sql: "ASC", op: ">" });
 
+  // 门店列表全局排序：店号自然序（数字段按数值，2 在 10 前；非数字段按字节序 COLLATE "C" 保证跨环境确定性）。
+  // 排序键把每段数字原值定宽补零（66 位 ≥ business_no 64 上限）再拼回，"007" 与 "7" 数值相等时键相同，
+  // 由 (店号, id) 兜底成全序——与前端 store-cascade 的 compareBusinessNoNatural 同一语义。
+  const businessNoSortKey = (expr) => `(COALESCE((SELECT string_agg(CASE WHEN (m.val)[1] IS NOT NULL THEN lpad((m.val)[1], 66, '0') ELSE (m.val)[2] END, '' ORDER BY m.ord)
+    FROM regexp_matches(${expr}, '([0-9]+)|([^0-9]+)', 'g') WITH ORDINALITY AS m(val, ord)), '') COLLATE "C")`;
+  // 游标仍为上一页最后一条 id（契约 cursor 为 uuid）：键集条件先反查该行店号再按 (店号键,店号,id) 定位，
+  // 排序在切片前全局生效，跨页不重不漏；游标行已删除时 EXISTS 不成立 → 条件恒假（安全空页，不回卷重复）。
+  const cursorBusinessNo = "(SELECT business_no FROM stores WHERE id = $1)";
+  const storeCursorPredicate = (order) => `($1::uuid IS NULL OR (EXISTS (SELECT 1 FROM stores WHERE id = $1)
+    AND (${businessNoSortKey("s.business_no")}, s.business_no, s.id) ${order.op} (${businessNoSortKey(cursorBusinessNo)}, ${cursorBusinessNo}, $1)))`;
+
   app.get("/api/admin/stores", async (request) => {
     const session = await requireStoreAdmin(request);
     const query = StoreListQuerySchema.parse(request.query);
     const order = listOrder(request.query);
-    const conditions = [`($1::uuid IS NULL OR s.id ${order.op} $1)`];
+    const conditions = [storeCursorPredicate(order)];
     const params = [query.cursor || null, query.limit + 1];
     if (query.brandId) { params.push(query.brandId); conditions.push(`s.brand_id = $${params.length}`); }
     if (query.cityRegionId) { params.push(query.cityRegionId); conditions.push(`r.parent_id = $${params.length}`); }
@@ -275,7 +286,7 @@ export function registerBatch2Routes(app, { pool, config }) {
     if (query.businessNo) { params.push(query.businessNo); conditions.push(`s.business_no = $${params.length}`); }
     // 范围受限管理员：列表静默过滤（与 batch5/stats 同构的三层子树 + store 精确）
     if (!hasFullScope(session.scopes)) { params.push(session.user_id); conditions.push(storeScopeFilter({ scopes: session.scopes, storeAlias: "s", regionAlias: "r", userParam: `$${params.length}` })); }
-    const result = await pool.query(`${selectStore} WHERE ${conditions.join(" AND ")} ORDER BY s.id ${order.sql} LIMIT $2`, params);
+    const result = await pool.query(`${selectStore} WHERE ${conditions.join(" AND ")} ORDER BY ${businessNoSortKey("s.business_no")} ${order.sql}, s.business_no ${order.sql}, s.id ${order.sql} LIMIT $2`, params);
     const items = result.rows.slice(0, query.limit).map(row);
     return { items, nextCursor: result.rows.length > query.limit ? items.at(-1).id : null };
   });

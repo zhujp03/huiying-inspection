@@ -9,10 +9,15 @@ async function login(page, username = "ops") {
   await expect(page.getByText("暗访执行工作台")).toBeVisible();
 }
 
-// 向导门店三级下拉的可访问名以选项文本结尾（如"店号请先选择品牌"），
-// getByLabel 默认子串匹配会让"品牌"误中"店号"，这里用锚定正则只认字段自身的 span 文本。
+// 向导门店下拉的可访问名以选项文本结尾（如"店名请先选择品牌"），
+// getByLabel 默认子串匹配会让"品牌"误中"店名"，这里用锚定正则只认字段自身的 span 文本。
 function wizardStoreSelect(page, label) {
   return page.getByLabel(new RegExp(`^${label}`));
+}
+
+// 店号为只读自动带出（aria-label 与字段 span 文本不同，需单独定位）
+function wizardBusinessNoInput(page) {
+  return page.getByLabel("店号（自动带出）");
 }
 
 test("管理员登录、角色菜单和主要业务数据", async ({ page }) => {
@@ -114,9 +119,9 @@ test("父任务表单使用服务端门店并保存完整时间窗口", async ({
   await expect(page.getByRole("heading", { name: "新建探店任务" })).toBeVisible();
   await page.getByLabel("任务名称").fill("秋季暗访计划");
   await wizardStoreSelect(page, "品牌").selectOption("1a6fd7a0-1111-4111-8111-000000000001");
-  await wizardStoreSelect(page, "店号").selectOption("JD-SH-001");
-  // JD-SH-001 在建新园组内对应两家门店，不会自动收敛，需手选店名
+  // 店名为主选择（值即 storeId）：选店即带出店号
   await wizardStoreSelect(page, "店名").selectOption("store-one");
+  await expect(wizardBusinessNoInput(page)).toHaveValue("JD-SH-001");
   await page.getByLabel("探店开始日期").fill("2026-07-20");
   await page.getByLabel("探店结束日期").fill("2026-07-20");
   await page.getByLabel("探店开始时间").fill("10:00");
@@ -129,7 +134,7 @@ test("父任务表单使用服务端门店并保存完整时间窗口", async ({
   await expect(page.getByRole("button", { name: "添加探店员" })).toBeVisible();
 });
 
-test("父任务表单门店三级级联选择与组切换清空", async ({ page }) => {
+test("父任务表单门店级联：店名主选择、同名追加店号区域、组切换清空", async ({ page }) => {
   let savedCampaign;
   page.on("request", (request) => { if (request.method() === "POST" && request.url().endsWith("/api/admin/campaigns")) savedCampaign = request.postDataJSON(); });
   await login(page);
@@ -137,18 +142,16 @@ test("父任务表单门店三级级联选择与组切换清空", async ({ page 
   await page.getByRole("button", { name: "新建探店任务" }).click();
   await expect(page.getByRole("heading", { name: "新建探店任务" })).toBeVisible();
   await expect(wizardStoreSelect(page, "品牌")).toBeEnabled();
-  await expect(wizardStoreSelect(page, "店号")).toBeDisabled();
   await expect(wizardStoreSelect(page, "店名")).toBeDisabled();
+  await expect(wizardBusinessNoInput(page)).toBeDisabled();
   await wizardStoreSelect(page, "品牌").selectOption("1a6fd7a0-1111-4111-8111-000000000001");
-  await expect(wizardStoreSelect(page, "店号")).toBeEnabled();
-  const noOptions = await wizardStoreSelect(page, "店号").locator("option").evaluateAll((options) => options.filter((option) => option.value).map((option) => option.value));
-  expect(noOptions).toEqual(["JD-SH-001"]);
-  await wizardStoreSelect(page, "店号").selectOption("JD-SH-001");
   await expect(wizardStoreSelect(page, "店名")).toBeEnabled();
   await expect(wizardStoreSelect(page, "店名")).toHaveValue("");
+  // 选项按店名优先（zh 拼音序）；同名「静安晶品店」两家追加「店号 · 区域」区分，并按店号自然序排列
   const nameOptions = await wizardStoreSelect(page, "店名").locator("option").evaluateAll((options) => options.filter((option) => option.value).map((option) => option.textContent.trim()));
-  expect(nameOptions).toEqual(["静安嘉里中心店 · 静安区", "静安大融城店 · 静安区"]);
+  expect(nameOptions).toEqual(["静安大融城店", "静安嘉里中心店", "静安晶品店（JD-SH-003 · 静安区）", "静安晶品店（JD-SH-004 · 静安区）"]);
   await wizardStoreSelect(page, "店名").selectOption("store-three");
+  await expect(wizardBusinessNoInput(page)).toHaveValue("JD-SH-002");
   await page.getByLabel("任务名称").fill("级联暗访计划");
   await page.getByLabel("探店开始日期").fill("2026-07-21");
   await page.getByLabel("探店结束日期").fill("2026-07-21");
@@ -159,11 +162,31 @@ test("父任务表单门店三级级联选择与组切换清空", async ({ page 
   await expect(page.getByText("任务草稿已创建，请继续指派探店员")).toBeVisible();
   expect(savedCampaign.storeId).toBe("store-three");
   await page.getByRole("button", { name: "上一步" }).click();
+  // 组切换清空旧选择：店名与店号一并清空，避免残留其他品牌门店
   await wizardStoreSelect(page, "品牌").selectOption("__unbranded__");
-  await expect(wizardStoreSelect(page, "店号")).toHaveValue("");
   await expect(wizardStoreSelect(page, "店名")).toHaveValue("");
-  await wizardStoreSelect(page, "店号").selectOption("JD-SH-002");
-  await expect(wizardStoreSelect(page, "店名")).toHaveValue("store-two");
+  await expect(wizardBusinessNoInput(page)).toHaveValue("");
+  // 未分品牌组直接按店名选择
+  await wizardStoreSelect(page, "店名").selectOption("store-two");
+  await expect(wizardBusinessNoInput(page)).toHaveValue("JD-SH-10");
+  // 同名门店可精确选中其中一家（store-dup-two），店号随之带出
+  await wizardStoreSelect(page, "品牌").selectOption("1a6fd7a0-1111-4111-8111-000000000001");
+  await wizardStoreSelect(page, "店名").selectOption("store-dup-two");
+  await expect(wizardBusinessNoInput(page)).toHaveValue("JD-SH-004");
+});
+
+test("编辑向导按已保存门店回填品牌与店名并自动带出店号", async ({ page }) => {
+  // campaign-one 已保存 storeId=store-one：进入编辑页第 1 步应回填级联（品牌 + 店名选中 + 店号自动带出）
+  await login(page);
+  await page.goto("/admin/campaigns/campaign-one/edit?from=list");
+  await expect(page.getByRole("heading", { name: "编辑探店任务" })).toBeVisible();
+  await expect(wizardStoreSelect(page, "品牌")).toHaveValue("1a6fd7a0-1111-4111-8111-000000000001");
+  await expect(wizardStoreSelect(page, "店名")).toHaveValue("store-one");
+  await expect(wizardBusinessNoInput(page)).toHaveValue("JD-SH-001");
+  // 换品牌清空旧选择：store-one 属建新园，切到未分品牌后店名/店号不再残留
+  await wizardStoreSelect(page, "品牌").selectOption("__unbranded__");
+  await expect(wizardStoreSelect(page, "店名")).toHaveValue("");
+  await expect(wizardBusinessNoInput(page)).toHaveValue("");
 });
 
 test("任务指派完整保存问卷、时间、预算和菜品", async ({ page }, testInfo) => {

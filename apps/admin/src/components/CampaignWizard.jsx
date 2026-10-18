@@ -5,7 +5,7 @@ import { API, AdminUserOptionSchema, AssignmentUpsertSchema, BrandRowSchema, Cam
 import { request } from "../api/client.js";
 import { useAdminAuth } from "../auth/AdminAuth.jsx";
 import { useNavigationGuard } from "../router.jsx";
-import { brandGroups, businessNoOptions, cascadeFromStore, storeOptions } from "../utils/store-cascade.js";
+import { brandGroups, cascadeFromStore, duplicateStoreNames, storeNameOptionLabel, storeNameOptions } from "../utils/store-cascade.js";
 
 // 游标分页 schema 派生：zod 默认 strip 未知字段，需显式声明 nextCursor 才能读到「加载更多」游标
 // （不改 packages/contracts，在本文件内联派生）。cursor 是不透明定位串，用 z.string() 而非 z.uuid()。
@@ -89,8 +89,7 @@ export function CampaignWizard({ campaign, step: stepProp = 1, returnTo = "list"
   const [rows, setRows] = useState(() => (editing ? seedRows(campaign) : []));
   const [removedRows, setRemovedRows] = useState([]); // 已落库、待在第 2 步保存时删除的指派
   const UNBRANDED = "__unbranded__"; // 级联里"未分品牌"组的哨兵值（组 brandId 为 null）
-  const [brandValue, setBrandValue] = useState(""); // 第 1 步门店级联：品牌（提交真值仍是 form.storeId）
-  const [businessNoValue, setBusinessNoValue] = useState(""); // 第 1 步门店级联：店号
+  const [brandValue, setBrandValue] = useState(""); // 第 1 步门店级联：品牌（提交真值仍是 form.storeId，店名下拉直接以其为值）
   // 未保存修改守卫：与挂载/保存后的快照比较（第 1 步表单 + 指派行各有一份基线）。
   // 改动后改回原值即不脏；新增行（未落库）与删除已保存行视为脏；保存成功后对应基线推进。
   const formRef = useRef(form);
@@ -140,14 +139,15 @@ export function CampaignWizard({ campaign, step: stepProp = 1, returnTo = "list"
     finally { setLoadingMore((current) => ({ ...current, [source]: false })); }
   };
 
-  // 编辑/复制回填：门店列表加载完成后用 storeId 反查级联值，只回填一次（避免覆盖用户手动清空后的选择）；
-  // 反查未命中（门店不在 active 列表）时级联保持空，form.storeId 原值保留由摘要区 campaign?.storeName 兜底。
+  // 编辑/复制回填：门店列表加载完成后用 storeId 反查品牌并回填，只回填一次（避免覆盖用户手动清空后的选择）；
+  // 店名下拉直接以 form.storeId 为值，门店在已加载列表内即自动选中并带出店号；
+  // 反查未命中（门店不在已加载列表，如首页 100 条之外）时品牌保持空，form.storeId 原值保留由摘要区 campaign?.storeName 兜底。
   const cascadeHydratedRef = useRef(false);
   useEffect(() => {
     if (cascadeHydratedRef.current || loading || !campaign?.storeId) return;
     cascadeHydratedRef.current = true;
     const cascade = cascadeFromStore(options.stores, campaign.storeId);
-    if (cascade) { setBrandValue(cascade.brandId ?? UNBRANDED); setBusinessNoValue(cascade.businessNo); }
+    if (cascade) setBrandValue(cascade.brandId ?? UNBRANDED);
   }, [campaign, options.stores, loading]);
 
   const patch = (field, value) => setForm((current) => ({ ...current, [field]: value }));
@@ -161,17 +161,14 @@ export function CampaignWizard({ campaign, step: stepProp = 1, returnTo = "list"
   const searchedVersions = useMemo(() => activeVersions.filter((version) => matchOption(search.versions, version.name, version.versionLabel)), [activeVersions, search.versions]);
   // 检索过滤后仍保证「当前已选值」的下拉选项在场，避免已选值显示丢失。
   const withSelected = (list, all, selectedId) => (!selectedId || list.some((item) => item.id === selectedId) ? list : [all.find((item) => item.id === selectedId), ...list].filter(Boolean));
-  // 第 1 步门店三级级联（品牌 → 店号 → 店名）的派生选项与联动（选项从检索后的累积门店集派生）
+  // 第 1 步门店级联（品牌 → 店名）的派生选项：店名为主选择（选项值即 storeId），店号只读自动带出；
+  // 同名门店在选项文案追加「店号 · 区域」区分（选项从检索后的累积门店集派生）。
   const resolvedBrandId = brandValue === UNBRANDED ? null : brandValue;
   const brandOptions = brandGroups(searchedStores, activeBrands);
-  const noOptions = businessNoOptions(searchedStores, resolvedBrandId);
-  const nameOptions = storeOptions(searchedStores, resolvedBrandId, businessNoValue);
-  const selectBrand = (value) => { setBrandValue(value); setBusinessNoValue(""); patch("storeId", ""); };
-  const selectBusinessNo = (value) => {
-    setBusinessNoValue(value);
-    const matches = storeOptions(searchedStores, resolvedBrandId, value);
-    patch("storeId", matches.length === 1 ? matches[0].id : ""); // 组+店号唯一命中时自动选中店名
-  };
+  const nameOptions = storeNameOptions(searchedStores, resolvedBrandId);
+  const nameDuplicates = duplicateStoreNames(searchedStores, resolvedBrandId);
+  const selectedStoreBusinessNo = options.stores.find((store) => store.id === form.storeId)?.businessNo || "";
+  const selectBrand = (value) => { setBrandValue(value); patch("storeId", ""); }; // 换品牌即清空旧选择，避免残留其他品牌的门店
   const campaignWindow = () => ({
     start: form.visitStartDate && form.visitStartTime ? new Date(`${form.visitStartDate}T${form.visitStartTime}`) : null,
     due: form.visitEndDate && form.visitEndTime ? new Date(`${form.visitEndDate}T${form.visitEndTime}`) : null,
@@ -330,8 +327,8 @@ export function CampaignWizard({ campaign, step: stepProp = 1, returnTo = "list"
       <div className="field-grid">
         <label className="admin-field"><span>任务名称</span><input value={form.name} onChange={(event) => patch("name", event.target.value)} placeholder="例如：XX 门店 8 月暗访" /></label>
         <label className="admin-field"><span>品牌</span><select value={brandValue} disabled={loading} onChange={(event) => selectBrand(event.target.value)}><option value="">{loading ? "正在加载品牌…" : "请选择品牌"}</option>{brandOptions.map((group) => <option key={group.brandId ?? UNBRANDED} value={group.brandId ?? UNBRANDED}>{group.label}</option>)}</select></label>
-        <label className="admin-field"><span>店号</span><select value={businessNoValue} disabled={loading || !brandValue} onChange={(event) => selectBusinessNo(event.target.value)}><option value="">{!brandValue ? "请先选择品牌" : "请选择店号"}</option>{noOptions.map((businessNo) => <option key={businessNo} value={businessNo}>{businessNo}</option>)}</select></label>
-        <label className="admin-field"><span>店名</span><select value={form.storeId} disabled={loading || !businessNoValue} onChange={(event) => patch("storeId", event.target.value)}><option value="">{!businessNoValue ? "请先选择店号" : "请选择门店"}</option>{nameOptions.map((store) => <option key={store.id} value={store.id}>{store.name} · {store.regionName}</option>)}</select></label>
+        <label className="admin-field"><span>店名</span><select value={form.storeId} disabled={loading || !brandValue} onChange={(event) => patch("storeId", event.target.value)}><option value="">{!brandValue ? "请先选择品牌" : "请选择门店"}</option>{nameOptions.map((store) => <option key={store.id} value={store.id}>{storeNameOptionLabel(store, nameDuplicates)}</option>)}</select></label>
+        <label className="admin-field"><span>店号</span><input value={selectedStoreBusinessNo} readOnly disabled placeholder="选择门店后自动带出" aria-label="店号（自动带出）" /></label>
         <label className="admin-field"><span>探店开始日期</span><input type="date" value={form.visitStartDate} onChange={(event) => patch("visitStartDate", event.target.value)} /></label>
         <label className="admin-field"><span>探店结束日期</span><input type="date" value={form.visitEndDate} onChange={(event) => patch("visitEndDate", event.target.value)} /></label>
         <label className="admin-field"><span>探店时间段</span><span className="time-range"><input type="time" aria-label="探店开始时间" value={form.visitStartTime} onChange={(event) => patch("visitStartTime", event.target.value)} /> 至 <input type="time" aria-label="探店结束时间" value={form.visitEndTime} onChange={(event) => patch("visitEndTime", event.target.value)} /></span></label>

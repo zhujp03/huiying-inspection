@@ -108,14 +108,32 @@ function send(response, status, body, headers = {}) { response.writeHead(status,
 function readBody(request) { return new Promise((resolve) => { let body = ""; request.on("data", (chunk) => { body += chunk; }); request.on("end", () => resolve(body ? JSON.parse(body) : {})); }); }
 function session(request) { const match = request.headers.cookie?.match(/adminRole=([^;]+)/); return match?.[1] || ""; }
 function list(items) { return { items }; }
+// 店号自然排序比较器（与后端 businessNoSortKey / 前端 compareBusinessNoNatural 同语义）：
+// 数字段按数值（2 在 10 前），非数字段按字典序；"007" 与 "7" 数值相等由店号文本兜底。
+function businessNoChunks(value) { return String(value ?? "").match(/\d+|\D+/g) || []; }
+function compareBusinessNo(a, b) {
+  const left = businessNoChunks(a); const right = businessNoChunks(b);
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const chunkA = left[index]; const chunkB = right[index];
+    if (chunkA === undefined) return -1;
+    if (chunkB === undefined) return 1;
+    if (/^\d+$/.test(chunkA) && /^\d+$/.test(chunkB)) {
+      const bareA = chunkA.replace(/^0+/, ""); const bareB = chunkB.replace(/^0+/, "");
+      if (bareA.length !== bareB.length) return bareA.length < bareB.length ? -1 : 1;
+      if (bareA !== bareB) return bareA < bareB ? -1 : 1;
+    } else if (chunkA !== chunkB) return chunkA < chunkB ? -1 : 1;
+  }
+  return 0;
+}
 // 游标分页（与后端契约一致）：limit 默认 20 上限 100；cursor=上一页最后一条 id，定位其后；
-// order asc|desc 按 id 字典序模拟时间序，缺省 asc（与后端 listOrder「默认 asc 保持既有行为」一致）；
+// order asc|desc 按 compare（缺省按 id 字典序模拟时间序）排序，缺省 asc（与后端「默认 asc 保持既有行为」一致）；
 // 多取一条探测到底，本页不足一页时 nextCursor=null。exports/audit-logs 由调用方固定 desc。
-function paged(url, items, forcedOrder) {
+function paged(url, items, forcedOrder, compare) {
   const limitRaw = Number(url.searchParams.get("limit"));
   const limit = Math.min(Number.isFinite(limitRaw) && limitRaw >= 1 ? limitRaw : 20, 100);
   const order = forcedOrder || (url.searchParams.get("order") === "desc" ? "desc" : "asc");
-  const sorted = [...items].sort((a, b) => (order === "asc" ? 1 : -1) * String(a.id).localeCompare(String(b.id)));
+  const base = compare || ((a, b) => String(a.id).localeCompare(String(b.id)));
+  const sorted = [...items].sort((a, b) => (order === "asc" ? 1 : -1) * base(a, b));
   const cursor = url.searchParams.get("cursor");
   const start = cursor ? sorted.findIndex((item) => item.id === cursor) + 1 : 0;
   const window = sorted.slice(Math.max(start, 0), Math.max(start, 0) + limit + 1);
@@ -150,8 +168,12 @@ const bulkStores = Array.from({ length: 127 }, (_, index) => ({
 }));
 const adminStores = [
   { id: "store-one", name: "静安嘉里中心店", businessNo: "JD-SH-001", brandId: "1a6fd7a0-1111-4111-8111-000000000001", brandName: "建新园", cityRegionId: REGION_CITY, cityName: "上海市市辖区", regionId: REGION_JINGAN, regionName: "静安区", address: "静安区南京西路 1515 号", active: true, locationVerified: true, radiusMeters: 300, latitudeGcj02: 31.2265, longitudeGcj02: 121.4452, accuracyAllowanceMaxMeters: 150, revision: 2 },
-  { id: "store-three", name: "静安大融城店", businessNo: "JD-SH-001", brandId: "1a6fd7a0-1111-4111-8111-000000000001", brandName: "建新园", cityRegionId: REGION_CITY, cityName: "上海市市辖区", regionId: REGION_JINGAN, regionName: "静安区", address: "静安区南京西路 1515 号", active: true, locationVerified: true, radiusMeters: 300, latitudeGcj02: 31.2265, longitudeGcj02: 121.4452, accuracyAllowanceMaxMeters: 150, revision: 2 },
-  { id: "store-two", name: "浦东世纪公园店", businessNo: "JD-SH-002", brandId: null, brandName: null, cityRegionId: REGION_CITY, cityName: "上海市市辖区", regionId: REGION_JINGAN, regionName: "静安区", address: "静安区南京西路 1515 号", active: true, locationVerified: true, radiusMeters: 300, latitudeGcj02: 31.2265, longitudeGcj02: 121.4452, accuracyAllowanceMaxMeters: 150, revision: 2 },
+  { id: "store-three", name: "静安大融城店", businessNo: "JD-SH-002", brandId: "1a6fd7a0-1111-4111-8111-000000000001", brandName: "建新园", cityRegionId: REGION_CITY, cityName: "上海市市辖区", regionId: REGION_JINGAN, regionName: "静安区", address: "静安区南京西路 1515 号", active: true, locationVerified: true, radiusMeters: 300, latitudeGcj02: 31.2265, longitudeGcj02: 121.4452, accuracyAllowanceMaxMeters: 150, revision: 2 },
+  // 同品牌同名「静安晶品店」两家：向导店名下拉用「店号 · 区域」区分（店号全局唯一，与生产约束一致）
+  { id: "store-dup-one", name: "静安晶品店", businessNo: "JD-SH-003", brandId: "1a6fd7a0-1111-4111-8111-000000000001", brandName: "建新园", cityRegionId: REGION_CITY, cityName: "上海市市辖区", regionId: REGION_JINGAN, regionName: "静安区", address: "静安区南京西路 1515 号", active: true, locationVerified: true, radiusMeters: 300, latitudeGcj02: 31.2265, longitudeGcj02: 121.4452, accuracyAllowanceMaxMeters: 150, revision: 2 },
+  { id: "store-dup-two", name: "静安晶品店", businessNo: "JD-SH-004", brandId: "1a6fd7a0-1111-4111-8111-000000000001", brandName: "建新园", cityRegionId: REGION_CITY, cityName: "上海市市辖区", regionId: REGION_JINGAN, regionName: "静安区", address: "静安区南京西路 1515 号", active: true, locationVerified: true, radiusMeters: 300, latitudeGcj02: 31.2265, longitudeGcj02: 121.4452, accuracyAllowanceMaxMeters: 150, revision: 2 },
+  // 未分品牌门店店号带数值位（JD-SH-10）：门店列表自然排序下 JD-SH-2 排在 JD-SH-10 前
+  { id: "store-two", name: "浦东世纪公园店", businessNo: "JD-SH-10", brandId: null, brandName: null, cityRegionId: REGION_CITY, cityName: "上海市市辖区", regionId: REGION_JINGAN, regionName: "静安区", address: "静安区南京西路 1515 号", active: true, locationVerified: true, radiusMeters: 300, latitudeGcj02: 31.2265, longitudeGcj02: 121.4452, accuracyAllowanceMaxMeters: 150, revision: 2 },
   ...bulkStores,
 ];
 const adminAdminUsers = [{ id: "admin-one", username: "admin", displayName: "管理员", maskedPhone: "138****0000", roleCode: "admin", scopeType: "all", scopeLabel: "全部", regionId: null, storeId: null, source: "manual", status: "approved_active", revision: 1 }];
@@ -440,7 +462,8 @@ createServer(async (request, response) => {
     const cityRegionId = url.searchParams.get("cityRegionId");
     const businessNo = url.searchParams.get("businessNo");
     const filtered = allStores().filter((store) => (!brandId || store.brandId === brandId) && (!cityRegionId || store.cityRegionId === cityRegionId) && (!businessNo || store.businessNo === businessNo));
-    return send(response, 200, paged(url, filtered));
+    // 与生产一致：按店号自然序全局排序后再切片（2 在 10 前），同店号数值相等时按店号文本、id 兜底
+    return send(response, 200, paged(url, filtered, null, (a, b) => compareBusinessNo(a.businessNo, b.businessNo) || String(a.businessNo).localeCompare(String(b.businessNo)) || String(a.id).localeCompare(String(b.id))));
   }
   // 新建门店（编辑器恢复流程）：可注入 401/断连场景；成功后进入有状态列表，唯一编号可回查（对账复用）。
   if (url.pathname === "/api/admin/stores" && request.method === "POST") {
@@ -669,8 +692,15 @@ createServer(async (request, response) => {
       contains(row.inspectorName, "inspectorName") && contains(row.businessNo, "businessNo") &&
       (!query.get("brandId") || query.get("brandId") === "1a6fd7a0-1111-4111-8111-000000000001") &&
       (!query.get("status") || row.status === query.get("status")));
-    // 仅 submissions 额外带 total（全量计数，供「共 X 条」展示）
-    return send(response, 200, { ...paged(url, filtered), total: filtered.length });
+    // 仅 submissions 额外带 total（全量计数，供「共 X 条」展示）；排序与生产一致：按实际提交时间（空值恒排最后）、id 兜底
+    const bySubmittedAt = (a, b) => {
+      if (a.submittedAt == null || b.submittedAt == null) {
+        if (a.submittedAt == null && b.submittedAt == null) return String(a.id).localeCompare(String(b.id));
+        return a.submittedAt == null ? 1 : -1;
+      }
+      return String(a.submittedAt).localeCompare(String(b.submittedAt)) || String(a.id).localeCompare(String(b.id));
+    };
+    return send(response, 200, { ...paged(url, filtered, null, bySubmittedAt), total: filtered.length });
   }
   // 与生产端点真实 DTO 同构：substitution/unavailable 原因、evaluation 可空、得分题不带 issueRemark 键
   if (url.pathname === "/api/admin/submissions/submission-one") return send(response, 200, { taskName: "夏季门店服务品质暗访", storeName: "静安嘉里中心店", inspectorName: "周雨晴", submittedAt: "2026-07-19T13:20:00Z", questionnaireName: "暗访问卷", versionLabel: "2026 夏季版", totalScore: 94, scoreRate: "94%", issueCount: 3, categoryScores: [{ category: "environment", scoreRate: "95%", score: 19 }, { category: "service", scoreRate: "93%", score: 41 }, { category: "product", scoreRate: "94%", score: 34 }], highlight: "员工主动巡台", suggestion: "高峰期增加引导", dishes: [
