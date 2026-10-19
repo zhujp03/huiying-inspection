@@ -6,10 +6,10 @@ import React from "react";
 
 /* ---------- 通用 ---------- */
 
-export function Card({ flush = false, gapless = false, className = "", style, onClick, children }) {
+export function Card({ flush = false, gapless = false, className = "", style, onClick, children, ...rest }) {
   const cls = ["card", flush ? "card--flush" : "", gapless ? "card--gapless" : "", className].filter(Boolean).join(" ");
   return (
-    <div className={cls} style={style} onClick={onClick}>
+    <div className={cls} style={style} onClick={onClick} {...rest}>
       {children}
     </div>
   );

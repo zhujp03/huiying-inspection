@@ -10,9 +10,12 @@ import { useApp } from "./app-context.jsx";
 import { getQuestionnaire } from "../services/assignments.js";
 import { saveAnswer } from "../services/drafts.js";
 import { advanceDraftRevision, markDraftSynced, peekDraft, saveDraft } from "../store/survey.js";
-import { recallSurveyCategory, rememberSurveyCategory } from "../store/survey-view.js";
+import {
+  forgetSurveyReturnAnchor, recallSurveyCategory, recallSurveyReturnAnchor,
+  rememberSurveyCategory, rememberSurveyReturnAnchor,
+} from "../store/survey-view.js";
 import { mergeSurveyAnswers } from "../store/survey-merge.js";
-import { navEntryIsPage, sanitizeTaskSource } from "../router/nav-history.js";
+import { navEntryIsPage, nextNavEntry, sanitizeTaskSource } from "../router/nav-history.js";
 import { firstIncompleteQuestion } from "../utils/business.js";
 
 // 分类由服务端动态下发（管理员可扩展）；此处仅作接口异常时的兜底展示（R33）。
@@ -65,8 +68,10 @@ export function SurveyPage({ routeCategory = "" }) {
   // load 进行中互斥：online 恢复/初始加载/手点重试并发时防同题双发。
   const loadInProgressRef = useRef(false);
   const loadRef = useRef(null);
+  // 问题页返回恢复（恰好一次）：挂载时从 survey-view 消费的返回锚点，列表就绪后应用。
+  const pendingRestoreRef = useRef(null);
 
-  latestRef.current = { answers, questions, categories, category, meta };
+  latestRef.current = { answers, questions, categories, category, meta, expanded };
 
   const putAnswers = (value) => {
     latestRef.current.answers = value;
@@ -232,6 +237,22 @@ export function SurveyPage({ routeCategory = "" }) {
         setCategory(recalled);
       }
     }
+    // 问题页返回锚点的消费（确认/取消返回与浏览器后退都经 hashchange 重挂载到本页，
+    // 光标后的 forward 条目即来路；确为同任务问题页才恢复）。读后即清：恢复恰好一次，
+    // 重载/再进入/其他任务不重放。StrictMode 双挂载时第二次 recall 为空，保留首次
+    // 消费结果即可，恢复链路不受双挂载影响。
+    const forwardEntry = nextNavEntry();
+    const returnAnchor = forwardEntry && navEntryIsPage(forwardEntry, "/issue", { assignmentId, attemptId })
+      ? recallSurveyReturnAnchor(attemptId, questionnaireVersionId)
+      : null;
+    pendingRestoreRef.current = returnAnchor || pendingRestoreRef.current;
+    forgetSurveyReturnAnchor(attemptId, questionnaireVersionId);
+    // 展开态先于列表首帧恢复（锚点题卡的最终高度在滚动定位前落定）。
+    if (returnAnchor?.expandedIds?.length) {
+      const restoredExpanded = {};
+      for (const id of returnAnchor.expandedIds) restoredExpanded[id] = true;
+      setExpanded((prev) => ({ ...prev, ...restoredExpanded }));
+    }
     load();
     return () => { unloadedRef.current = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -258,6 +279,28 @@ export function SurveyPage({ routeCategory = "" }) {
     setCategory(routeCategory);
     rememberSurveyCategory(routeMetaRef.current?.attemptId, routeCategory);
   }, [routeCategory]);
+
+  // 返回恢复（恰好一次）：题目列表在正确分类下渲染完成后，把锚点题卡滚回离开时的视口
+  // 偏移——以题卡元素为锚（对上方高度变化稳健），不做 scrollY 直录直放。应用前即清除
+  // 待恢复态，其后的作答/分类切换/重载不会再次触发；锚点题缺失或分类上下文不符一律
+  // 安全降级为不滚动（分类与展开态已还原）。
+  useEffect(() => {
+    if (loading || error) return;
+    const anchor = pendingRestoreRef.current;
+    if (!anchor) return;
+    pendingRestoreRef.current = null;
+    if ((anchor.category || "") !== (latestRef.current.category || "")) return;
+    let card = null;
+    try {
+      card = document.querySelector(`[data-question-id="${CSS.escape(String(anchor.questionId))}"]`);
+    } catch {
+      card = null;
+    }
+    if (!card) return;
+    const delta = card.getBoundingClientRect().top - anchor.offsetTop;
+    if (Math.abs(delta) >= 1) window.scrollBy(0, delta);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, error, questions, category]);
 
   const retry = () => {
     if (!routeMetaRef.current) return; // 参数缺失的阻断错误无重试意义
@@ -302,6 +345,25 @@ export function SurveyPage({ routeCategory = "" }) {
   // 需要完整来源链与当前分类（分类仅为路由参数，不进草稿身份）。
   const openIssue = (questionId, target) => {
     const current = routeMetaRef.current;
+    // 离开前捕获返回锚点（锚点题卡视口偏移 + 当前分类 + 已展开题集合）：问题页任何返回
+    // 路径（确认/取消/浏览器后退）重挂载问卷后按锚点恢复位置。测量失败不记忆，返回时
+    // 保持现状（等价旧行为）。
+    if (current && typeof document !== "undefined" && typeof CSS !== "undefined" && CSS.escape) {
+      try {
+        const card = document.querySelector(`[data-question-id="${CSS.escape(String(questionId))}"]`);
+        if (card) {
+          const expandedIds = Object.entries(latestRef.current.expanded || {})
+            .filter(([, value]) => value)
+            .map(([id]) => id);
+          rememberSurveyReturnAnchor(current.attemptId, current.questionnaireVersionId, {
+            questionId: String(questionId),
+            offsetTop: Math.round(card.getBoundingClientRect().top),
+            category: latestRef.current.category || "",
+            expandedIds,
+          });
+        }
+      } catch { /* 锚点捕获失败：仅退化为不恢复 */ }
+    }
     navigate(`/issue?assignmentId=${encodeURIComponent(current.assignmentId)}&attemptId=${encodeURIComponent(current.attemptId)}&questionnaireVersionId=${encodeURIComponent(current.questionnaireVersionId)}&revision=${current.revision}&questionId=${encodeURIComponent(questionId)}&target=${target}&source=${sourceRef.current}&category=${encodeURIComponent(latestRef.current.category)}`);
   };
 
@@ -418,9 +480,9 @@ export function SurveyPage({ routeCategory = "" }) {
             已完成 {answeredCount} / {questions.length} 题{syncMessage ? ` · ${syncMessage}` : ""}
           </div>
 
-          {/* 题目卡列表（§1.7 a.5） */}
+          {/* 题目卡列表（§1.7 a.5）；data-question-id 供问题页返回锚点定位题卡 */}
           {visible.map((question) => (
-            <Card key={question.id}>
+            <Card key={question.id} data-question-id={question.id}>
               <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
                 <span style={{ fontWeight: 600 }}>第 {question.number} 题</span>
                 <Button variant="link" small onClick={() => toggleExpand(question.id)}>

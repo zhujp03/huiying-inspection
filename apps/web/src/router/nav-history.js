@@ -150,6 +150,13 @@ export function previousNavEntry() {
   return log.cursor > 0 ? log.list[log.cursor - 1].hash : null;
 }
 
+// 光标后一条应用内路由（没有则 null）——「刚从该页返回」的往返证据（后退/前进都不丢
+// forward 记录；survey 重挂载时它若为同任务问题页，即为问题页返回，可消费返回锚点）。
+export function nextNavEntry() {
+  const log = readLog();
+  return log.cursor + 1 < log.list.length ? log.list[log.cursor + 1].hash : null;
+}
+
 // 与 window.history.back() 配对调用：光标先退一格（随后的 hashchange 按身份对齐为 no-op）。
 export function forgetCurrentNav() {
   const log = readLog();

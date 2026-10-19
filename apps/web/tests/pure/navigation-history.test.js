@@ -243,6 +243,45 @@ describe("router/nav-history.js（光标语义：多步跳转保持相邻关系�
     assert.doesNotThrow(() => nav.forgetCurrentNav());
     assert.equal(nav.previousNavEntry(), null);
   });
+
+  it("nextNavEntry（问题页返回证据）：survey→issue 后退回 survey，光标后的 forward 条目即来路", () => {
+    const browser = buildHomeTaskSurvey(installBrowser({ hash: "#/home" }));
+    assert.equal(nav.nextNavEntry(), null, "链尾无前进条目");
+    // openIssue：应用内 push 到问题页（与 App.navigate 一致：先改 hash 再同步标记），
+    // 再原生后退回问卷——确认/取消返回与浏览器后退共用同一日志语义。
+    globalThis.window.location.hash = "#/issue?assignmentId=a&attemptId=t&questionId=q1&target=unscored";
+    nav.recordNavPush("#/issue?assignmentId=a&attemptId=t&questionId=q1&target=unscored");
+    browser.back();
+    nav.syncNavLogOnHashChange();
+    assert.equal(logCursor(), 2);
+    assert.equal(nav.nextNavEntry(), "#/issue?assignmentId=a&attemptId=t&questionId=q1&target=unscored", "后退不得丢弃 forward 记录，来路可证");
+    assert.equal(nav.previousNavEntry(), "#/task?assignmentId=a&source=home", "previous 仍是任务父页，不能作为返回证据");
+    // 问题页兜底 replace（无父页证据）：goBack 停在问题页条目上原位改写为问卷，
+    // 改写后 forward 相邻不再可证（恢复降级为不滚动）。
+    browser.forward(); // 回到问题页（已知身份，光标随动）
+    nav.syncNavLogOnHashChange();
+    assert.equal(logCursor(), 3);
+    nav.recordNavReplace("#/survey?attemptId=t&category=service");
+    assert.equal(nav.nextNavEntry(), null);
+  });
+
+  it("nextNavEntry：前进 push 截断 forward 分支后为 null；存储不可用静默", () => {
+    const browser = buildHomeTaskSurvey(installBrowser({ hash: "#/home" }));
+    globalThis.window.location.hash = "#/issue?questionId=q1";
+    nav.recordNavPush("#/issue?questionId=q1");
+    browser.back();
+    nav.syncNavLogOnHashChange();
+    globalThis.window.location.hash = "#/survey?attemptId=other"; // 自任务重进：push 截断 forward
+    nav.recordNavPush("#/survey?attemptId=other");
+    assert.equal(nav.nextNavEntry(), null, "旧问题页条目已按 push 语义作废，不得当作返回证据");
+    globalThis.sessionStorage = {
+      getItem: () => { throw new Error("quota"); },
+      setItem: () => { throw new Error("quota"); },
+      removeItem: () => {},
+    };
+    assert.doesNotThrow(() => nav.nextNavEntry());
+    assert.equal(nav.nextNavEntry(), null);
+  });
 });
 
 describe("router/nav-history.js（业务校验纯函数）", () => {
@@ -283,5 +322,78 @@ describe("store/survey-view.js（会话级分类记忆，不进草稿身份）",
     };
     assert.doesNotThrow(() => surveyView.rememberSurveyCategory("attempt-1", "service"));
     assert.equal(surveyView.recallSurveyCategory("attempt-1"), "");
+  });
+});
+
+describe("store/survey-view.js（问题页返回锚点：attempt+问卷版本隔离，读后即清）", () => {
+  const ANCHOR = {
+    questionId: "q-8",
+    offsetTop: 312,
+    category: "environment",
+    expandedIds: ["q-5", "q-8"],
+  };
+  const keyOf = (attemptId, versionId) => `junde:survey-return:${attemptId}:${versionId}`;
+
+  it("remember/recall 原样往返；forget 后读不到（恢复恰好一次的存储前提）", () => {
+    surveyView.rememberSurveyReturnAnchor("at-1", "qv-1", ANCHOR);
+    assert.deepEqual(surveyView.recallSurveyReturnAnchor("at-1", "qv-1"), ANCHOR);
+    surveyView.forgetSurveyReturnAnchor("at-1", "qv-1");
+    assert.equal(surveyView.recallSurveyReturnAnchor("at-1", "qv-1"), null);
+    assert.equal(backing.has(keyOf("at-1", "qv-1")), false, "读后即清：键不得残留");
+  });
+
+  it("键按 attempt+问卷版本隔离：其他任务/其他版本读不到（防跨任务滚动劫持）", () => {
+    surveyView.rememberSurveyReturnAnchor("at-1", "qv-1", ANCHOR);
+    assert.equal(surveyView.recallSurveyReturnAnchor("at-2", "qv-1"), null);
+    assert.equal(surveyView.recallSurveyReturnAnchor("at-1", "qv-2"), null);
+    // 空参安全：不写入、不抛出。
+    assert.doesNotThrow(() => surveyView.rememberSurveyReturnAnchor("", "qv-1", ANCHOR));
+    assert.doesNotThrow(() => surveyView.rememberSurveyReturnAnchor("at-1", "", ANCHOR));
+    assert.doesNotThrow(() => surveyView.rememberSurveyReturnAnchor("at-1", "qv-1", null));
+    assert.equal(surveyView.recallSurveyReturnAnchor("", "qv-1"), null);
+    assert.equal(surveyView.recallSurveyReturnAnchor("at-1", ""), null);
+    assert.equal(backing.has(keyOf("at-1", "qv-1")), true, "空参调用不影响既有锚点");
+  });
+
+  it("坏值安全降级：非法 JSON、缺字段、类型不符一律 recall 为 null", () => {
+    const cases = [
+      "{not-json",
+      "null",
+      "[]",
+      '"string"',
+      JSON.stringify({ offsetTop: 10, category: "c", expandedIds: [] }),
+      JSON.stringify({ questionId: "q-1", category: "c", expandedIds: [] }),
+      JSON.stringify({ questionId: "q-1", offsetTop: "312", category: "c", expandedIds: [] }),
+      JSON.stringify({ questionId: "q-1", offsetTop: Number.NaN, category: "c", expandedIds: [] }),
+      JSON.stringify({ questionId: "q-1", offsetTop: 10, expandedIds: [] }),
+      JSON.stringify({ questionId: "q-1", offsetTop: 10, category: 7, expandedIds: [] }),
+      JSON.stringify({ questionId: "q-1", offsetTop: 10, category: "c" }),
+      JSON.stringify({ questionId: "q-1", offsetTop: 10, category: "c", expandedIds: ["ok", ""] }),
+      JSON.stringify({ questionId: "q-1", offsetTop: 10, category: "c", expandedIds: "q-5" }),
+      JSON.stringify({ questionId: "", offsetTop: 10, category: "c", expandedIds: [] }),
+    ];
+    for (const [index, raw] of cases.entries()) {
+      backing.set(keyOf("at-bad", "qv-1"), raw);
+      assert.equal(surveyView.recallSurveyReturnAnchor("at-bad", "qv-1"), null, `case ${index}: ${raw}`);
+    }
+  });
+
+  it("空 expandedIds/category 合法（锚点恢复的最小形态）；forget 空参不抛出", () => {
+    const minimal = { questionId: "q-1", offsetTop: -40, category: "", expandedIds: [] };
+    surveyView.rememberSurveyReturnAnchor("at-min", "qv-1", minimal);
+    assert.deepEqual(surveyView.recallSurveyReturnAnchor("at-min", "qv-1"), minimal);
+    assert.doesNotThrow(() => surveyView.forgetSurveyReturnAnchor("", "qv-1"));
+    assert.doesNotThrow(() => surveyView.forgetSurveyReturnAnchor("at-min", ""));
+  });
+
+  it("存储不可用时读写清均不抛出，recall 恒为 null", () => {
+    globalThis.sessionStorage = {
+      getItem: () => { throw new Error("quota"); },
+      setItem: () => { throw new Error("quota"); },
+      removeItem: () => { throw new Error("quota"); },
+    };
+    assert.doesNotThrow(() => surveyView.rememberSurveyReturnAnchor("at-1", "qv-1", ANCHOR));
+    assert.equal(surveyView.recallSurveyReturnAnchor("at-1", "qv-1"), null);
+    assert.doesNotThrow(() => surveyView.forgetSurveyReturnAnchor("at-1", "qv-1"));
   });
 });
