@@ -39,8 +39,10 @@ const NAV = [
 const ENDPOINTS = {
   overview: null,
   dashboard: null,
-  // 列表端点支持 limit/order/cursor：首屏一次取 100 条，超出部分「加载更多」游标追加（order=desc 最新优先）
-  campaigns: `${API.admin.campaigns}?limit=100&order=desc`,
+  // 列表端点支持 limit/order/cursor：首屏一次取 100 条，超出部分「加载更多」游标追加（order=desc 最新优先）。
+  // 探店任务列表另带 sort=dueAt：服务端按执行窗口截止时间全局倒序（截止晚的在前，多日窗口取最终截止），
+  // 游标跨页追加仍延续同一全局序，前端不做页面内重排；概览统计/筛选下拉等其他消费者不带 sort，不受影响。
+  campaigns: `${API.admin.campaigns}?limit=100&order=desc&sort=dueAt`,
   users: null, // 用户管理三个 tab 各自独立游标，由组件自行请求
   stores: null, // 门店列表带服务端筛选（brandId/cityRegionId），由组件自行请求
   questionnaires: `${API.admin.questionnaireVersions}?limit=100&order=desc`,

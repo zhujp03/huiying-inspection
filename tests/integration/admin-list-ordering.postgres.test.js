@@ -8,8 +8,9 @@ import { seedRbac } from "../../db/seeds/rbac.mjs";
 import { assertIntegrationTestDatabase } from "../helpers/test-database-guard.mjs";
 
 // 管理列表全局排序回归：门店按店号自然序（数字段数值序 2<9<10，前导零数值相等由店号文本/id 兜底），
-// 提交记录按实际 submitted_at（非 id/创建时间，同刻并列以 id 定序，空值恒排最后）。
-// 两个列表都必须「先全局排序、再游标切片」：跨页不重不漏，且筛选/total/授权范围不受影响。
+// 提交记录按实际 submitted_at（非 id/创建时间，同刻并列以 id 定序，空值恒排最后），
+// 探店任务可选 sort=dueAt 按执行窗口截止时间倒序（多日窗口取最终 due_at；其余消费者保持 id 排序）。
+// 各列表都必须「先全局排序、再游标切片」：跨页不重不漏，且筛选/total/授权范围不受影响。
 
 assertIntegrationTestDatabase();
 
@@ -73,6 +74,27 @@ async function insertVersion(createdBy, name) {
   await pool.query("INSERT INTO questionnaire_templates (id,name,mode,created_by) VALUES ($1,$2,'secret',$3)", [templateId, name, createdBy]);
   await pool.query("INSERT INTO questionnaire_versions (id,template_id,version_number,status,created_by) VALUES ($1,$2,1,'draft',$3)", [versionId, templateId, createdBy]);
   return versionId;
+}
+
+// 直插探店任务（不经向导）：starts/due 显式指定，用于构造与 id/创建顺序不同的执行窗口序
+let campaignSequence = 0;
+async function insertCampaign({ storeId, userId, name, startsAt, dueAt }) {
+  campaignSequence += 1;
+  const campaignId = uuidv7();
+  await pool.query("INSERT INTO audit_campaigns (id,business_no,name,store_id,starts_at,due_at,status,created_by) VALUES ($1,$2,$3,$4,$5,$6,'draft',$7)",
+    [campaignId, `CAM-ORD-${String(campaignSequence).padStart(3, "0")}`, name, storeId, startsAt, dueAt, userId]);
+  return campaignId;
+}
+
+// region 范围管理员 + 登录会话：验证 sort=dueAt 与范围过滤叠加（admin 角色持有 campaign:manage）
+async function createRegionAdminSession(app, regionId, username) {
+  const userId = await insertUser(username, "排序区域管理员");
+  const adminRole = await pool.query("SELECT id FROM roles WHERE code = 'admin'");
+  await pool.query("INSERT INTO user_roles (id,user_id,role_id) VALUES ($1,$2,$3)", [uuidv7(), userId, adminRole.rows[0].id]);
+  await pool.query("INSERT INTO user_data_scopes (id,user_id,scope_type,region_id) VALUES ($1,$2,'region',$3)", [uuidv7(), userId, regionId]);
+  const login = await app.inject({ method: "POST", url: "/api/admin/auth/login", payload: { username, password: "a-secure-password" } });
+  expect(login.statusCode, login.body).toBe(200);
+  return { cookie: login.headers["set-cookie"], userId };
 }
 
 // 直插一份最小提交（不经探员全流程）：submittedAt 显式指定，用于构造与 id/创建顺序不同的提交时间序
@@ -208,6 +230,92 @@ describe("admin list global ordering", () => {
     const filteredTotal = await app.inject({ method: "GET", url: `/api/admin/submissions?storeName=${encodeURIComponent("升序甲店")}&limit=1&order=desc`, headers });
     expect(filteredTotal.json().total).toBe(2);
     expect(filteredTotal.json().items.map((row) => row.id)).toEqual([ascThird]);
+    await app.close();
+  });
+
+  test("探店任务 sort=dueAt 按执行窗口截止时间倒序（多日窗口取最终截止）跨页不重不漏", async () => {
+    const { app, headers, cityId, adminId } = await createWorld();
+    const { storeId } = await insertStore(cityId, adminId, "截止排序门店", "DUE-A");
+    // 创建（id/uuidv7）顺序与截止时间刻意相反/交错；最晚截止是多日窗口的终点（最终 due_at）
+    const earlyId = await insertCampaign({ storeId, userId: adminId, name: "最早截止任务", startsAt: "2026-03-01T08:00:00+00:00", dueAt: "2026-03-05T12:00:00+00:00" });
+    const lateId = await insertCampaign({ storeId, userId: adminId, name: "最晚截止的多日任务", startsAt: "2026-03-01T08:00:00+00:00", dueAt: "2026-03-09T18:00:00+00:00" });
+    const midId = await insertCampaign({ storeId, userId: adminId, name: "中间截止任务", startsAt: "2026-03-01T08:00:00+00:00", dueAt: "2026-03-07T09:00:00+00:00" });
+    const tieOne = await insertCampaign({ storeId, userId: adminId, name: "同刻截止甲", startsAt: "2026-03-01T08:00:00+00:00", dueAt: "2026-03-06T10:00:00+00:00" });
+    const tieTwo = await insertCampaign({ storeId, userId: adminId, name: "同刻截止乙", startsAt: "2026-03-01T08:00:00+00:00", dueAt: "2026-03-06T10:00:00+00:00" });
+    // 同刻并列以 id 定序（desc 取 id 更大者在前）；真实 id 倒序与截止序不同，证明排序键是 due_at 而非 id
+    const [tieFirst, tieSecond] = [tieOne, tieTwo].sort((a, b) => (a < b ? 1 : -1));
+    const expectedDesc = [lateId, midId, tieFirst, tieSecond, earlyId]; // 03-09, 03-07, 03-06×2(id 降序), 03-05
+    const idDesc = [earlyId, lateId, midId, tieOne, tieTwo].sort((a, b) => (a < b ? 1 : -1));
+    expect(idDesc).not.toEqual(expectedDesc);
+
+    const paged = await collectAllPages(app, headers, "/api/admin/campaigns?order=desc&sort=dueAt", 2);
+    expect(paged.collected.map((row) => row.id)).toEqual(expectedDesc);
+    expect(paged.pages.length).toBe(3);
+    // 排序只改顺序不改数据：执行窗口展示列逐行保持原 startsAt/dueAt（多日窗口不被截断改写）
+    const dueDateById = new Map([[earlyId, "2026-03-05"], [lateId, "2026-03-09"], [midId, "2026-03-07"], [tieOne, "2026-03-06"], [tieTwo, "2026-03-06"]]);
+    for (const row of paged.collected) expect(row.dueAt.startsWith(dueDateById.get(row.id))).toBe(true);
+    expect(paged.collected.every((row) => row.startsAt.startsWith("2026-03-01"))).toBe(true);
+    await app.close();
+  });
+
+  test("探店任务 sort=dueAt 游标行被删除后安全空页（不回卷不重复）", async () => {
+    const { app, headers, cityId, adminId } = await createWorld();
+    const { storeId } = await insertStore(cityId, adminId, "游标删除门店", "DUE-B");
+    const earlyId = await insertCampaign({ storeId, userId: adminId, name: "游标删除早截止", startsAt: "2026-03-01T08:00:00+00:00", dueAt: "2026-03-05T12:00:00+00:00" });
+    const lateId = await insertCampaign({ storeId, userId: adminId, name: "游标删除晚截止", startsAt: "2026-03-01T08:00:00+00:00", dueAt: "2026-03-09T18:00:00+00:00" });
+    const firstPage = await app.inject({ method: "GET", url: "/api/admin/campaigns?order=desc&sort=dueAt&limit=1", headers });
+    expect(firstPage.statusCode, firstPage.body).toBe(200);
+    expect(firstPage.json().items.map((row) => row.id)).toEqual([lateId]);
+    expect(firstPage.json().nextCursor).toBe(lateId);
+    // 删除游标行后用同一游标取下一页：安全空页（与门店列表的反查式游标同一语义），不得回卷出现更早的行
+    const deleted = await app.inject({ method: "DELETE", url: `/api/admin/campaigns/${lateId}`, headers, payload: { revision: 0 } });
+    expect(deleted.statusCode, deleted.body).toBe(200);
+    const secondPage = await app.inject({ method: "GET", url: `/api/admin/campaigns?order=desc&sort=dueAt&limit=1&cursor=${encodeURIComponent(lateId)}`, headers });
+    expect(secondPage.statusCode, secondPage.body).toBe(200);
+    expect(secondPage.json().items).toEqual([]);
+    expect(secondPage.json().nextCursor).toBeNull();
+    // 回到首页（无游标）仍只见剩余的早截止任务：删除生效且列表状态未被污染
+    const fresh = await app.inject({ method: "GET", url: "/api/admin/campaigns?order=desc&sort=dueAt&limit=5", headers });
+    expect(fresh.json().items.map((row) => row.id)).toEqual([earlyId]);
+    await app.close();
+  });
+
+  test("探店任务默认排序保持 id 序（不带 sort 的其他消费者不受 dueAt 排序影响）", async () => {
+    const { app, headers, cityId, adminId } = await createWorld();
+    const { storeId } = await insertStore(cityId, adminId, "默认排序门店", "DUE-C");
+    const earlyId = await insertCampaign({ storeId, userId: adminId, name: "默认早截止", startsAt: "2026-03-01T08:00:00+00:00", dueAt: "2026-03-05T12:00:00+00:00" });
+    const lateId = await insertCampaign({ storeId, userId: adminId, name: "默认晚截止", startsAt: "2026-03-01T08:00:00+00:00", dueAt: "2026-03-09T18:00:00+00:00" });
+    const midId = await insertCampaign({ storeId, userId: adminId, name: "默认中截止", startsAt: "2026-03-01T08:00:00+00:00", dueAt: "2026-03-07T09:00:00+00:00" });
+    const idDesc = [earlyId, lateId, midId].sort((a, b) => (a < b ? 1 : -1));
+    // order=desc 仍按 id 倒序（概览统计/筛选下拉的既有取法），即使与截止序不同
+    const desc = await collectAllPages(app, headers, "/api/admin/campaigns?order=desc", 2);
+    expect(desc.collected.map((row) => row.id)).toEqual(idDesc);
+    // 无 order 参数保持 id 升序（既有默认行为）
+    const asc = await collectAllPages(app, headers, "/api/admin/campaigns", 2);
+    expect(asc.collected.map((row) => row.id)).toEqual([...idDesc].reverse());
+    // 未知 sort 值同样回退默认 id 排序
+    const unknownSort = await collectAllPages(app, headers, "/api/admin/campaigns?order=desc&sort=name", 2);
+    expect(unknownSort.collected.map((row) => row.id)).toEqual(idDesc);
+    await app.close();
+  });
+
+  test("探店任务 sort=dueAt 与范围过滤叠加：region 管理员只见范围内任务且全局有序", async () => {
+    const { app, headers, cityId, adminId } = await createWorld();
+    const inside = await insertStore(cityId, adminId, "范围甲店", "DUE-D1");
+    const outside = await insertStore(cityId, adminId, "范围乙店", "DUE-D2");
+    // 范围外门店的任务截止最晚：过滤后范围内两任务跨页拼接仍须全局按截止倒序
+    const outsideLate = await insertCampaign({ storeId: outside.storeId, userId: adminId, name: "范围外最晚截止", startsAt: "2026-03-01T08:00:00+00:00", dueAt: "2026-03-10T18:00:00+00:00" });
+    const insideLate = await insertCampaign({ storeId: inside.storeId, userId: adminId, name: "范围内晚截止", startsAt: "2026-03-01T08:00:00+00:00", dueAt: "2026-03-08T18:00:00+00:00" });
+    const insideEarly = await insertCampaign({ storeId: inside.storeId, userId: adminId, name: "范围内早截止", startsAt: "2026-03-01T08:00:00+00:00", dueAt: "2026-03-04T12:00:00+00:00" });
+    const region = await createRegionAdminSession(app, inside.regionId, "orderregionadmin");
+    const scoped = await collectAllPages(app, { cookie: region.cookie }, "/api/admin/campaigns?order=desc&sort=dueAt", 1);
+    expect(scoped.collected.map((row) => row.id)).toEqual([insideLate, insideEarly]);
+    // 页界恰好把两条范围内任务分在两页（每页 1 条）：拼接后仍是全局截止倒序，不重不漏
+    const [scopedLateNo, scopedEarlyNo] = scoped.collected.map((row) => row.businessNo);
+    expect(scoped.pages).toEqual([[scopedLateNo], [scopedEarlyNo]]);
+    // 全量管理员同参数仍含范围外任务：过滤只随会话范围生效，排序键保持一致
+    const all = await collectAllPages(app, headers, "/api/admin/campaigns?order=desc&sort=dueAt", 2);
+    expect(all.collected.map((row) => row.id)).toEqual([outsideLate, insideLate, insideEarly]);
     await app.close();
   });
 });

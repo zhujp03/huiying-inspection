@@ -683,6 +683,17 @@ export function registerBatch2Routes(app, { pool, config }) {
   const campaignSelect = `SELECT c.*,s.name store_name,s.location_verified_at store_location_verified_at,
     count(a.id) assignment_count,count(a.id) FILTER (WHERE a.status='overdue') overdue_count
     FROM audit_campaigns c JOIN stores s ON s.id=c.store_id JOIN regions r ON r.id=s.region_id LEFT JOIN audit_assignments a ON a.campaign_id=c.id`;
+  // 「探店任务与指派」表格可选排序 sort=dueAt：按执行窗口截止时间全局排序后再切片（多日窗口即最终
+  // due_at，列为 NOT NULL 无空值分支）；其他 /campaigns 消费者（概览统计/筛选下拉）不带 sort，
+  // 保持既有 id 排序，未知 sort 值同样回退默认。游标仍为上一页最后一条 id（契约 cursor 为 uuid）：
+  // 键集条件先反查该行 due_at，再按 (due_at,id) 行比较定位（tie-break 与排序同向，否则键集错位）——
+  // 并列 due_at 由 id 兜底成全序，跨页不重不漏；游标行已删除时反查为 NULL，行比较恒不成立
+  // （安全空页，不回卷重复）。与门店列表的反查式游标同一模式。
+  const campaignDueAtCursor = "(SELECT due_at FROM audit_campaigns WHERE id = $1)";
+  const campaignListOrder = (query, order) => (query?.sort === "dueAt"
+    ? { predicate: `($1::uuid IS NULL OR (c.due_at, c.id) ${order.op} (${campaignDueAtCursor}, $1))`, sql: `c.due_at ${order.sql}, c.id` }
+    : { predicate: `($1::uuid IS NULL OR c.id${order.op}$1)`, sql: "c.id" });
+
   const campaignById = async (client, id, lock = false) => {
     const query = lock
       ? "SELECT c.*,s.name store_name,s.location_verified_at store_location_verified_at FROM audit_campaigns c JOIN stores s ON s.id=c.store_id WHERE c.id=$1 FOR UPDATE OF c"
@@ -696,11 +707,12 @@ export function registerBatch2Routes(app, { pool, config }) {
     const session = await requireCampaignAdmin(request);
     const { cursor, limit } = CursorPageSchema.parse(request.query);
     const order = listOrder(request.query);
-    const conditions = [`($1::uuid IS NULL OR c.id${order.op}$1)`];
+    const sort = campaignListOrder(request.query, order);
+    const conditions = [sort.predicate];
     const params = [cursor || null, limit + 1];
     // 范围受限管理员：campaign→store→region 静默过滤
     if (!hasFullScope(session.scopes)) { params.push(session.user_id); conditions.push(storeScopeFilter({ scopes: session.scopes, storeAlias: "s", regionAlias: "r", userParam: `$${params.length}` })); }
-    const result = await pool.query(`${campaignSelect} WHERE ${conditions.join(" AND ")} GROUP BY c.id,s.name,s.location_verified_at ORDER BY c.id ${order.sql} LIMIT $2`, params);
+    const result = await pool.query(`${campaignSelect} WHERE ${conditions.join(" AND ")} GROUP BY c.id,s.name,s.location_verified_at ORDER BY ${sort.sql} ${order.sql} LIMIT $2`, params);
     const items = result.rows.slice(0, limit).map(campaignRow);
     return { items, nextCursor: result.rows.length > limit ? items.at(-1).id : null };
   });
