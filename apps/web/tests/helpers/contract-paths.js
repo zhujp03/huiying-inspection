@@ -1,5 +1,5 @@
 // 统一的 src 模块加载入口：apps/web 下所有测试一律经 loadSrc() 加载 apps/web/src/**，
-// 禁止在用例里手写 ../src 相对路径（防拼错、防漂移）。模块清单（24 项）与
+// 禁止在用例里手写 ../src 相对路径（防拼错、防漂移）。模块清单（25 项）与
 // docs/web/module-contracts.md 钉定布局一一对应。
 //
 // TDD 红灯基线：第 2 段实现落地前 apps/web/src/** 全部不存在，loadSrc 的每个调用
@@ -26,6 +26,7 @@ export const srcPathList = [
   "utils/presentation.js",
   "utils/business.js",
   "utils/errors.js",
+  "utils/digest.js",
   "utils/coordinates.js",
   "utils/feature-flags.js",
   "utils/upload-queue.js",

@@ -1,4 +1,4 @@
-// A 结构断言：app-manifest 契约中枢 + 24 个 src 模块的存在性与导出面。
+// A 结构断言：app-manifest 契约中枢 + 25 个 src 模块的存在性与导出面。
 // 契约唯一来源：docs/web/module-contracts.md（布局为法律，不得自行增删模块或改名）。
 //
 // TDD 红灯基线：apps/web/src/** 尚未实现（第 2 段落地），本文件全部用例预期
@@ -107,7 +107,7 @@ describe("app-manifest 结构契约", () => {
   });
 });
 
-describe("src 模块加载与导出契约（srcPathList 全部 24 项）", () => {
+describe("src 模块加载与导出契约（srcPathList 全部 25 项）", () => {
   it("app-manifest.js 可加载且导出面恰为 pages/tabs/services/adapters/featureFlags", async () => {
     const mod = await loadSrc("app-manifest.js");
     assert.deepEqual(Object.keys(mod).sort(), ["adapters", "featureFlags", "pages", "services", "tabs"]);
@@ -217,6 +217,13 @@ describe("src 模块加载与导出契约（srcPathList 全部 24 项）", () =>
 
   it("utils/feature-flags.js 导出 isSelfServiceEnabled/isReceiptOcrEnabled", async () => {
     assertFunctionExports(await loadSrc("utils/feature-flags.js"), ["isSelfServiceEnabled", "isReceiptOcrEnabled"]);
+  });
+
+  it("utils/digest.js 导出 SHA256_HEX_PATTERN/hasSha256Hex/sha256Hex", async () => {
+    const mod = await loadSrc("utils/digest.js");
+    assert.equal(typeof mod.hasSha256Hex, "function");
+    assert.equal(typeof mod.sha256Hex, "function");
+    assert.deepEqual(Object.keys(mod).sort(), ["SHA256_HEX_PATTERN", "hasSha256Hex", "sha256Hex"]);
   });
 
   it("utils/upload-queue.js 导出 createCancelledUploads", async () => {

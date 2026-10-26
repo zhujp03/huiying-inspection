@@ -172,7 +172,7 @@ export const featureFlags = {
 
 ---
 
-## 5. utils（6 个）
+## 5. utils（7 个）
 
 ### 5.1 utils/presentation.js（utils/presentation.js:10-104，9 函数同名同语义）
 
@@ -217,6 +217,10 @@ export const featureFlags = {
 - **导出清单**：`export function createCancelledUploads()` → `{ has(id), add(id), delete(id), size }`。
 - **语义契约**：已取消上传 id 集合。add(id) 后 has(id) 恒为 true、size 计数；上传回调命中 has 即放弃回填（dishes js:213,220,223）；**显式重试是唯一复活通道**——retryUpload 先 `delete(id)` 再重新发起上传（dishes/index.js:235 `this.cancelledUploads?.delete(id)`，重试入口 wxml:38 `bindtap="retryUpload"`）；delete 后 has(id) 恢复 false、size 减一。小程序为页面内联 Set，H5 抽为独立纯逻辑模块。
 
+### 5.7 utils/digest.js（新增，平台差异；2026-10 小票 sha256 修复）
+
+- **导出清单**：`export const SHA256_HEX_PATTERN`；`export function hasSha256Hex(value)`；`export async function sha256Hex(file)`。
+- **语义契约**：浏览器端文件 SHA-256 摘要（crypto.subtle，安全上下文限定）。小票契约 ReceiptFileMetaSchema 在 init/complete 都强制 64-hex sha256，且服务端 complete 用它对账存储对象实测摘要——必须在 init 之前对选中文件真实字节计算一次并以同一字符串贯穿上传链（摘要字符串允许随待传项持久化，File/ArrayBuffer/摘要 Promise 不得持久化）。`sha256Hex`：file 缺失/不可读、crypto.subtle 不可用 → 抛可读中文错误（页面 safeMessage 原样透传），绝不返回占位/伪造摘要；`hasSha256Hex`：64-hex 字符串判定（重试时复用已算摘要的守卫）。小程序 wx.getCurrentInstance 侧无对应实现（小程序同链路缺陷另行处理），无小程序 file:line 对应。
 ---
 
 ## 6. features 与 router（2 个）

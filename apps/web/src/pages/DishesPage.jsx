@@ -11,6 +11,9 @@
 //    预览用 URL.createObjectURL——v1 选择「行内全屏遮罩放大」而非 window.open（部分浏览器拦截弹窗），
 //    单张移除/上传完成时即时 revoke（页面卸载不统一 revoke：SPA 内重挂载恢复待传项需沿用同一 blob URL）。
 //    上传走 uploadToSignedTarget（FormData 直传），onProgress 更新「正在上传 N%」。
+//    小票契约（ReceiptFileMetaSchema）在 init/complete 都强制 64-hex sha256：选图后先确认 File
+//    可用并对真实字节算摘要（utils/digest.js），init 与 complete 携带同一字符串；File 缺失/不可读
+//    时本地失败（可读文案引导重新选择），绝不发网络请求。
 // 2) 取消上传（R64）：cancelledUploads 集合（utils/upload-queue.createCancelledUploads）登记后放弃
 //    回填、不中断传输；uploading/confirming 项移除按钮禁用；重试先解除登记。
 // 3) 删除小票二选一（R66）：wx.showActionSheet → 两步 window.confirm 组合：先 confirm
@@ -41,6 +44,7 @@ import {
   receiptDeletionOptions, requiredReviewMessage, validateReceiptFiles,
 } from "../features/receipt-ocr.js";
 import { firstIncompleteQuestion, isBlankExtraDish, secureUuid, validateDish } from "../utils/business.js";
+import { hasSha256Hex, sha256Hex } from "../utils/digest.js";
 import { isReceiptOcrEnabled } from "../utils/feature-flags.js";
 import { createCancelledUploads } from "../utils/upload-queue.js";
 import { navEntryIsPage, sanitizeTaskSource } from "../router/nav-history.js";
@@ -522,6 +526,22 @@ export function DishesPage() {
     try {
       let current = { ...pending, status: "uploading", message: "准备上传", progressPercent: 1 };
       updatePending(current);
+      // R61 修复：小票契约（ReceiptFileMetaSchema）在 init/complete 都强制 64-hex sha256，
+      // 且服务端 complete 用它对账存储对象实测摘要——所以必须在 init 前确认 File 可用并完成
+      // 真实摘要计算（同一 File 与同一摘要字符串贯穿 init→直传→complete）。
+      // File 缺失/不可读时本地直接失败（可读文案引导重新选择），绝不发出任何网络请求。
+      const file = current.file || receiptFileCache.get(clientFileId) || null;
+      if (!file) throw new Error("图片文件已失效，请删除这张小票后重新选择上传");
+      if (!hasSha256Hex(current.sha256)) {
+        updatePending({ ...current, status: "uploading", message: "正在校验图片", progressPercent: 1 });
+        const sha256 = await sha256Hex(file);
+        if (unloadedRef.current) return;
+        if (cancelledUploadsRef.current.has(clientFileId)) return;
+        // 摘要字符串随待传项持久化（stripPendingSecrets 仅剔除 File/uploadTarget），
+        // 重试/断点恢复复用同一值，保证 init 与 complete 携带一致。
+        current = { ...current, sha256 };
+        updatePending(current);
+      }
       let target = current.uploadTarget;
       if (!target) {
         const init = await initializeReceiptUpload(routeMetaRef.current.attemptId, fileMeta(current), routeMetaRef.current.revision);
@@ -534,7 +554,6 @@ export function DishesPage() {
         target = init.uploadTarget;
         updatePending(current);
       }
-      const file = current.file || receiptFileCache.get(clientFileId);
       const uploaded = await uploadToSignedTarget(target, file, (progress) => updatePending({ ...current, status: "uploading", progressPercent: progress, message: `正在上传 ${progress}%` }));
       if (unloadedRef.current) return;
       if (cancelledUploadsRef.current.has(clientFileId)) return;
@@ -919,12 +938,8 @@ export function DishesPage() {
   };
 
   // 计算文件真实 SHA-256（浏览器 crypto.subtle）：complete 携带，与服务端 verifyObject 对账。
-  const uploadedSha = async (file, uploaded) => {
-    if (uploaded?.sha256) return uploaded.sha256;
-    const buffer = await file.arrayBuffer();
-    const digest = await crypto.subtle.digest("SHA-256", buffer);
-    return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
-  };
+  // 摘要实现统一委托 utils/digest.js（与小票上传 init 前置校验同一份实现，错误文案可读）。
+  const uploadedSha = async (file, uploaded) => (uploaded?.sha256 ? uploaded.sha256 : sha256Hex(file));
 
   const retryHighlightUpload = (highlightId, clientFileId) => {
     cancelledHighlightUploadsRef.current.delete(clientFileId);
@@ -1783,8 +1798,10 @@ function stripPendingSecrets(item) {
   return safe;
 }
 
+// fileMeta：小票 init/complete 共用载荷。sha256 由 uploadPending 在 init 前对真实字节算好
+// （缺失时本地失败，不发请求），init 与 complete 必须携带同一 64-hex 字符串。
 function fileMeta(item) {
-  return { clientFileId: item.clientFileId, fileName: item.fileName, mimeType: item.mimeType, sizeBytes: item.sizeBytes };
+  return { clientFileId: item.clientFileId, fileName: item.fileName, mimeType: item.mimeType, sizeBytes: item.sizeBytes, sha256: item.sha256 };
 }
 
 // PM 适配点 1：png（file.type 或 .png 后缀）→ image/png，否则 image/jpeg。
