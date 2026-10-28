@@ -103,26 +103,48 @@ export function registerBatch4Routes(app, { pool, cos, config }) {
     // 凭证刷新（可能的网络调用）必须先于数据库事务，事务内只做纯本地签名。
     // 测试注入的 storage 替身可以只实现业务方法，此时跳过该预检。
     if (typeof cos.assertReady === "function") await cos.assertReady();
-    const initialized = await app.jundeAuth.transaction(async (client) => {
+    // 23505 只可能是并发窗口下的约束兜底（正常路径被 attempt 行锁 + 幂等重放覆盖）：
+    // 映射为明确业务冲突，绝不裸 500。
+    let initialized;
+    try {
+      initialized = await app.jundeAuth.transaction(async (client) => {
       const attempt = await lockedAttempt(client, attemptId, session.user_id); editable(attempt);
       const existing = await client.query("SELECT * FROM receipt_attachments WHERE attempt_id=$1 AND client_file_id=$2 FOR UPDATE", [attemptId, body.fileMeta.clientFileId]);
       let attachment = existing.rows[0];
+      let replay = Boolean(attachment);
       let revision = Number(attempt.revision);
       if (attachment) {
+        // 已删行绝不复活：同 clientFileId 的过期重放按明确业务冲突拒绝（历史行零改动）。
+        if (attachment.status === "deleted") throw app.jundeAuth.businessError("RECEIPT_DELETED", "该图片已被删除，请重新选择上传", 409);
         if (attachment.original_file_name !== body.fileMeta.fileName || attachment.declared_content_type !== body.fileMeta.mimeType || Number(attachment.declared_size_bytes) !== body.fileMeta.sizeBytes) throw app.jundeAuth.businessError("RECEIPT_UPLOAD_CONFLICT", "同一文件标识的上传内容不一致", 409);
+        if (attachment.status === "failed") {
+          // 失败行是唯一可重试恢复路径（同 clientFileId 重传）：复位 uploading 并清失败/校验残留，
+          // 重签凭据；id/storage_key/元数据与 sha256 校验逻辑不变（语义同闪光点 init 的 failed 复位）。
+          const revived = await client.query("UPDATE receipt_attachments SET status='uploading',failure_code=NULL,verification_locked_by=NULL,verification_lease_expires_at=NULL,updated_at=now() WHERE id=$1 RETURNING *", [attachment.id]);
+          attachment = revived.rows[0];
+        }
       } else {
         if (revision !== body.revision) throw app.jundeAuth.businessError("REVISION_CONFLICT", "内容已更新，请刷新后重试", 409);
-        const count = await client.query("SELECT count(*)::int count FROM receipt_attachments WHERE attempt_id=$1 AND status<>'deleted'", [attemptId]);
-        if (count.rows[0].count >= 9) throw app.jundeAuth.businessError("RECEIPT_LIMIT_EXCEEDED", "最多只能上传 9 张消费小票", 422);
+        // 槽位分配取 1..9 中非删行占用的最小空闲位（与闪光点 lowestFreeDisplayOrder 同型）：
+        // 软删行释放槽位可被复用；attempt 行锁串行化并发 init，9 张上限由此天然强制。
+        const takenRows = await client.query("SELECT display_order FROM receipt_attachments WHERE attempt_id=$1 AND status<>'deleted'", [attemptId]);
+        const taken = new Set(takenRows.rows.map((row) => Number(row.display_order)));
+        let displayOrder = null;
+        for (let slot = 1; slot <= 9; slot += 1) if (!taken.has(slot)) { displayOrder = slot; break; }
+        if (!displayOrder) throw app.jundeAuth.businessError("RECEIPT_LIMIT_EXCEEDED", "最多只能上传 9 张消费小票", 422);
         const inserted = await client.query(`INSERT INTO receipt_attachments (id,attempt_id,client_file_id,display_order,storage_key,upload_nonce,declared_content_type,declared_size_bytes,original_file_name,status,created_by)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'uploading',$10) RETURNING *`, [uuidv7(), attemptId, body.fileMeta.clientFileId, count.rows[0].count + 1, `attempts/${attemptId}/receipts/${uuidv7()}/${cos.newObjectSuffix()}`, uuidv7(), body.fileMeta.mimeType, body.fileMeta.sizeBytes, body.fileMeta.fileName, session.user_id]);
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'uploading',$10) RETURNING *`, [uuidv7(), attemptId, body.fileMeta.clientFileId, displayOrder, `attempts/${attemptId}/receipts/${uuidv7()}/${cos.newObjectSuffix()}`, uuidv7(), body.fileMeta.mimeType, body.fileMeta.sizeBytes, body.fileMeta.fileName, session.user_id]);
         attachment = inserted.rows[0];
         revision = Number((await client.query("UPDATE survey_attempts SET revision=revision+1,last_saved_at=now() WHERE id=$1 RETURNING revision", [attemptId])).rows[0].revision);
       }
       const target = cos.createPostTarget({ key: attachment.storage_key, sizeBytes: Number(attachment.declared_size_bytes), uploadNonce: attachment.upload_nonce, contentType: attachment.declared_content_type });
       await client.query("UPDATE receipt_attachments SET upload_target_expires_at=$2,updated_at=now() WHERE id=$1", [attachment.id, target.expiresAt]);
-      return { statusCode: existing.rows[0] ? 200 : 201, body: { attachment: await attachmentView(cos, attachment, client), uploadTarget: target, revision } };
-    });
+      return { statusCode: replay ? 200 : 201, body: { attachment: await attachmentView(cos, attachment, client), uploadTarget: target, revision } };
+      });
+    } catch (error) {
+      if (error?.code === "23505") throw app.jundeAuth.businessError("RECEIPT_UPLOAD_CONFLICT", "同一文件标识的上传内容不一致", 409);
+      throw error;
+    }
     return reply.code(initialized.statusCode).send(initialized.body);
   });
 

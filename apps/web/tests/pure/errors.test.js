@@ -212,3 +212,20 @@ describe("utils/errors.js presentError 优先级：按 §5.3 表序命中即返�
     );
   });
 });
+
+describe("utils/errors.js presentError 服务端业务码透传（error.code，2026-10-28）", () => {
+  it("payload.error.code 原样挂到 error.code；无 code 时为 null；kind/message 口径不变", async () => {
+    const { presentError } = await loadSrc("utils/errors.js");
+    const notFound = presentError(404, { error: { code: "RECEIPT_NOT_FOUND", message: "消费小票不存在" } });
+    assert.equal(notFound.code, "RECEIPT_NOT_FOUND");
+    assert.equal(notFound.kind, "validation");
+    assert.equal(notFound.message, "操作未完成，请检查填写内容");
+    const deleted = presentError(409, { error: { code: "RECEIPT_DELETED", message: "该图片已被删除，请重新选择上传" } });
+    assert.equal(deleted.code, "RECEIPT_DELETED");
+    assert.equal(deleted.kind, "conflict");
+    assert.equal(deleted.message, "该图片已被删除，请重新选择上传");
+    const noCode = presentError(500, {});
+    assert.equal(noCode.code, null);
+    assert.equal(noCode.kind, "service");
+  });
+});

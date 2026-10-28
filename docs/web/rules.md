@@ -439,6 +439,7 @@
 - **规则陈述**：给定用户移除一张待传小票：该 clientFileId 被登记进取消集合并立即从列表移除；在途链路在 init/直传/complete 三个 await 点之后检查取消集合，命中则放弃后续步骤与回填（已删除的小票不复活）。正在 uploading/confirming 的项其移除按钮被禁用（取消登记仅覆盖 init 等待窗口）；对已取消项点"重试"会先解除取消登记再重传。
 - **来源**：`apps/miniapp/miniprogram/pages/dishes/index.js:211-223,235,237-243`；`apps/miniapp/miniprogram/pages/dishes/index.wxml:39`
 - **边界与例外**：底层 `wx.uploadFile` 任务句柄不外露、不调用 abort——取消语义是"放弃结果"而非"中断传输"。
+- **H5 适配差异（2026-10 冲突修复）**：两端共用同一后端 init（先于直传建立服务端附件行），H5 待传项移除据此按服务端事实处理：`attachmentId` 已知 → 先以当前 revision 授权软删（DELETE 端点）释放槽位，成功后才清理本地；`attachmentId` 未知但持久化 fileMeta+sha256 有效（init 已提交但响应丢失）→ 以同 clientFileId 幂等重放 init 找回行后再软删；仅真未初始化的纯本地项仅本地移除。删除失败保留待传项置 failed 可重试，仅显式业务码（RECEIPT_NOT_FOUND/RECEIPT_DELETED）按幂等清理。另：H5 失败重试一律重新 init 幂等重放（丢弃已缓存 uploadTarget，服务端将 failed 行复位 uploading 并重签凭据）。
 
 ## R65-失败小票换图重传
 - **规则陈述**：给定服务端小票项 `status === "failed"` 且 `canRetry` 为真且非 busy：可选一张新图（数量按占用−1 校验），成功后先以 `dishHandling="keep_as_manual"` 删除旧附件（服务端返回的 dishes 若有则采纳），再走 R63 上传新图。

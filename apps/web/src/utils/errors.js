@@ -21,8 +21,17 @@ export class BusinessError extends Error {
   }
 }
 
-/** 错误码→文案完整映射（R86 表序，api.js:14-28 行序一致） */
+/** 错误码→文案完整映射（R86 表序，api.js:14-28 行序一致）；服务端原始业务码透传到 error.code。 */
 export function presentError(statusCode, payload) {
+  const error = mapPresentError(statusCode, payload);
+  // kind/message 是用户口径（R86 不变）；error.code 保留服务端原始业务码，供调用方做显式
+  // 判定（如小票移除时 RECEIPT_NOT_FOUND/RECEIPT_DELETED 的幂等清理——4xx 一律映射 validation，
+  // 仅凭 kind 无法区分「行已不存在」与「其他拒绝」，绝不能凭 kind 丢弃本地状态）。
+  error.code = payload?.error?.code ?? null;
+  return error;
+}
+
+function mapPresentError(statusCode, payload) {
   const code = payload?.error?.code;
   if (code === "SMS_CODE_INVALIDATED" || code === "SMS_CODE_ATTEMPTS_EXHAUSTED") return new BusinessError("sms_invalidated", "验证码已失效，请重新发送并完成人机验证");
   if (code === "QUESTIONNAIRE_SUBMITTED") return new BusinessError("questionnaire_submitted", "任务已提交，小票不可再查看或修改");

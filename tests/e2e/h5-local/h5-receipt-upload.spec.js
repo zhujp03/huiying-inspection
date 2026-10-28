@@ -253,11 +253,12 @@ test("storage failure then retry succeeds with the same clientFileId; remove and
   expect((await receiptRows(attempt.attemptId)).filter((row) => row.original_file_name === "receipt-flaky.png")).toHaveLength(1);
   expect(log.requests.filter((item) => item.kind === "init" && item.body.fileName === "receipt-flaky.png")).toHaveLength(1);
 
-  // 重试：复用 File 与已算摘要、复用已缓存 uploadTarget（不重发 init）→ 成功；不产生重复附件行。
+  // 重试（2026-10 冲突修复语义）：failed 态丢弃已缓存 uploadTarget，走 init 幂等重放重签凭据
+  // （同 clientFileId 不产生重复行）→ 成功。
   blocker.active = false;
   await failedCard.getByRole("button", { name: "重试" }).click();
   await expect(pageRoot).toContainText("1 张已完成");
-  expect(log.requests.filter((item) => item.kind === "init" && item.body.fileName === "receipt-flaky.png")).toHaveLength(1);
+  expect(log.requests.filter((item) => item.kind === "init" && item.body.fileName === "receipt-flaky.png")).toHaveLength(2);
   const flakyCompletes = log.requests.filter((item) => item.kind === "complete" && item.body.fileName === "receipt-flaky.png");
   expect(flakyCompletes).toHaveLength(1);
   expect(flakyCompletes[0].body.sha256).toBe(sha256Of(PNG_FLAKY_BYTES));

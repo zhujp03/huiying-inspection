@@ -37,7 +37,7 @@ import {
   getReceiptOcrJob, initializeReceiptUpload, listReceiptAttachments,
 } from "../services/receipts.js";
 import { uploadToSignedTarget } from "../services/uploads.js";
-import { getDraft as getLocalDraft, markDraftSynced, saveDraft } from "../store/survey.js";
+import { getDraft as getLocalDraft, markDraftSynced, peekDraft as peekDraftLocal, saveDraft } from "../store/survey.js";
 import {
   applyOcrDishesOnce, deriveLineTotal, formatCentsToYuan, markDishEdited, nextPollDelay,
   occupiedReceiptCount, ocrStatusView, parseYuanToCents, readyReceiptCount,
@@ -134,7 +134,19 @@ export function DishesPage() {
   const applyDishes = (next) => { latestRef.current.dishes = next; setDishes(next); };
   const applyReceipts = (next) => { latestRef.current.receipts = next; setReceipts(next); };
   const applyPending = (next) => { latestRef.current.pendingReceipts = next; setPendingReceipts(next); };
-  const applyReceiptBusy = (value) => { latestRef.current.receiptBusy = value; setReceiptBusy(value); };
+  // 忙碌释放时补启动排队中的纯本地待传项：移除（2026-10 起含授权软删）等忙碌操作在途期间
+  // 选中的图片不再滞留「等待上传」。单飞由 receiptBusy 互斥保证；已开传项状态非 local_selected，
+  // 不会被重复启动。
+  const runQueuedUploads = async () => {
+    for (const item of [...latestRef.current.pendingReceipts.filter((pending) => pending.status === "local_selected")]) {
+      await uploadPending(item.clientFileId);
+    }
+  };
+  const applyReceiptBusy = (value) => {
+    latestRef.current.receiptBusy = value;
+    setReceiptBusy(value);
+    if (!value && !unloadedRef.current) void runQueuedUploads();
+  };
 
   const persistLocal = () => {
     if (!routeMetaRef.current) return;
@@ -260,7 +272,13 @@ export function DishesPage() {
       // R52：本地未同步且非空时本地优先。
       const useLocal = local.synced === false && local.dishes?.length;
       const nextDishes = (useLocal ? local.dishes : serverDishes).map((dish) => projectDish(enrichDish(dish, result.dishRequirements || [])));
-      const recovery = local.receiptRecovery || {};
+      // 待传小票恢复清单是对「已知服务端行」的唯一客户端记忆：init 响应丢失/网络失败时服务端
+      // revision 已前进而本地草稿仍钉在旧 revision，getDraft 的 revision 钉定会把它静默清空——
+      // 这里从修订版未过滤视图（peekDraft）兜底恢复。dishes/highlights 的 R52 本地优先语义不变。
+      const localRaw = peekDraftLocal(nextMeta);
+      const recovery = local.receiptRecovery?.pendingReceipts?.length
+        ? local.receiptRecovery
+        : (localRaw?.receiptRecovery?.pendingReceipts?.length ? localRaw.receiptRecovery : {});
       const nextPending = (recovery.pendingReceipts || []).filter((item) => item.localPath).map(projectPendingReceipt);
       // 闪光点：本地未同步优先；否则采用服务端结构化条目；无结构化条目时按旧单条
       // highlight 字符串兜底为一条未持久化条目（首次保存落库，历史数据不丢）。
@@ -524,7 +542,12 @@ export function DishesPage() {
     if (!pending || latestRef.current.receiptBusy) return;
     applyReceiptBusy(true);
     try {
-      let current = { ...pending, status: "uploading", message: "准备上传", progressPercent: 1 };
+      // 失败重试一律重新 init（最小可信恢复，语义同服务端 failed 复位）：已缓存的 uploadTarget
+      // 可能已过期，服务端失败态（complete 验证失败置 failed）也只在 init 幂等重放时复位为
+      // uploading 并重签凭据——绝不复用可疑目标、不伪造成功、不弱化 sha256 校验；
+      // attachmentId 保留供幂等重放（同 clientFileId 不产生重复行）。
+      const base = pending.status === "failed" && pending.uploadTarget ? { ...pending, uploadTarget: null } : pending;
+      let current = { ...base, status: "uploading", message: "准备上传", progressPercent: 1 };
       updatePending(current);
       // R61 修复：小票契约（ReceiptFileMetaSchema）在 init/complete 都强制 64-hex sha256，
       // 且服务端 complete 用它对账存储对象实测摘要——所以必须在 init 前确认 File 可用并完成
@@ -588,13 +611,70 @@ export function DishesPage() {
     uploadPending(clientFileId);
   };
 
-  // R64：移除待传项 = 登记取消 + 立即移除（不中断在途传输）。
-  const removePending = (clientFileId) => {
-    cancelledUploadsRef.current.add(clientFileId);
+  // 仅本地清理（blob URL / File 缓存 / 待传项 / 草稿）。
+  const dropPendingLocally = (clientFileId) => {
     releaseObjectUrl(clientFileId);
     applyPending(latestRef.current.pendingReceipts.filter((item) => item.clientFileId !== clientFileId));
     persistLocal();
     refreshReceiptProjection();
+  };
+
+  // R64（2026-10 冲突修复）：移除待传项——服务端可能已存在同 clientFileId 的附件行（init 先于
+  // 直传建行），本地移除必须以服务端事实为准：
+  //   - attachmentId 已知（init 响应已收到，含刷新恢复后 File 失效的项）：先以当前 revision 授权
+  //     软删释放槽位，成功后才清取消登记/本地项/blob/File 缓存并采纳 items/dishes/revision。
+  //   - attachmentId 未知但持久化 fileMeta+sha256 有效（init 已提交但响应丢失）：以同 clientFileId
+  //     幂等重放 init 找回服务端行（schema 强制 sha256，绝不需 File 字节；同 clientFileId 不产生
+  //     重复行），拿到 id 后同样授权软删。重放返回 RECEIPT_DELETED（行确已删除）按幂等清理。
+  //   - attachmentId 未知且无有效摘要（真未初始化）：保持既有仅本地移除。
+  // 失败处理（不伪造删除成功、不丢 File）：仅「显式已验证的行不存在」（RECEIPT_NOT_FOUND/
+  // RECEIPT_DELETED 业务码，presentError 透传 error.code）按幂等清理；其余一律保留待传项置
+  // failed（可读文案，可重试移除）。忙时不发删除（receiptBusy 互斥）；uploading/confirming 按钮
+  // 仍禁用，不新增传输中断；点击 × 前先登记取消，在途重试据此放弃回填。
+  const removePending = async (clientFileId) => {
+    const pending = latestRef.current.pendingReceipts.find((item) => item.clientFileId === clientFileId);
+    if (!pending) return;
+    cancelledUploadsRef.current.add(clientFileId);
+    if (!pending.attachmentId && !hasSha256Hex(pending.sha256)) { dropPendingLocally(clientFileId); return; }
+    if (latestRef.current.receiptBusy) return;
+    applyReceiptBusy(true);
+    setReceiptError("");
+    try {
+      let attachmentId = pending.attachmentId;
+      if (!attachmentId) {
+        const replay = await initializeReceiptUpload(routeMetaRef.current.attemptId, fileMeta(pending), routeMetaRef.current.revision);
+        if (unloadedRef.current) return;
+        updateRevision(replay.revision);
+        attachmentId = replay.attachment.id;
+      }
+      const removed = await deleteReceiptAttachment(routeMetaRef.current.attemptId, attachmentId, "keep_as_manual", routeMetaRef.current.revision);
+      if (unloadedRef.current) return;
+      updateRevision(removed.revision);
+      if (removed.items) setReceiptState(removed.items);
+      if (removed.dishes) acceptServerDishes(removed.dishes);
+      dropPendingLocally(clientFileId);
+    } catch (removeError) {
+      if (unloadedRef.current) return;
+      if (handleSessionError(removeError)) return;
+      // 仅显式业务码判定「行确已不存在」（404 RECEIPT_NOT_FOUND / 重放遇 RECEIPT_DELETED）；
+      // 400/其他 404/422 同样映射为 validation kind（R86），绝不能凭 kind 丢弃本地状态。
+      if (removeError?.code === "RECEIPT_NOT_FOUND" || removeError?.code === "RECEIPT_DELETED") {
+        // 刷新授权列表对齐服务端视图（清掉其他会话删除留下的陈旧服务端卡片），再清理本地。
+        try {
+          const list = await listReceiptAttachments(routeMetaRef.current.attemptId);
+          if (unloadedRef.current) return;
+          updateRevision(list.revision);
+          setReceiptState(list.items);
+        } catch { /* 列表刷新失败不影响已验证的本地清理 */ }
+        dropPendingLocally(clientFileId);
+        return;
+      }
+      const failed = latestRef.current.pendingReceipts.find((item) => item.clientFileId === clientFileId);
+      if (failed) updatePending({ ...failed, status: "failed", message: safeMessage(removeError, "暂时无法删除小票，请重试") });
+    } finally {
+      applyReceiptBusy(false);
+      if (!unloadedRef.current) refreshReceiptProjection();
+    }
   };
 
   // R65：失败小票换图——先删旧附件（keep_as_manual，采纳 dishes）再走完整上传链。
