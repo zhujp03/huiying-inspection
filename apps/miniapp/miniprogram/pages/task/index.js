@@ -83,6 +83,12 @@ Page({
   continueDraft() {
     const { task, assignmentId, navigating } = this.data;
     if (!task?.attempt?.id || navigating) return; // 防重复跳转
+    // 聚合状态滞后窗口：attempt 已 submitted 时不进问卷，toast 后重拉聚合刷新终态。
+    if (task.attempt.status === "submitted") {
+      wx.showToast({ title: "该任务已提交", icon: "none" });
+      this.load();
+      return;
+    }
     this.setData({ navigating: true });
     this.openSurvey({ assignmentId, attemptId: task.attempt.id, questionnaireVersionId: task.questionnaireVersion.id, revision: task.attempt.revision });
   },
