@@ -39,6 +39,7 @@
       <text>{{message}}</text>
       <button wx:if="{{!meta && message}}" class="retry-button" bindtap="retryLoad">重新加载</button>
       <button wx:if="{{submitState === 'retryable_failed' || submitState === 'processing'}}" class="retry-button" bindtap="retrySubmit">重试提交</button>
+      <button wx:if="{{submitState === 'refresh_required'}}" class="retry-button" bindtap="retryLoad">刷新</button>
     </view>
 
     <view class="other-actions">
