@@ -12,7 +12,7 @@ export class BusinessError extends Error {
 }
 
 // kind/message 是用户口径；error.code 保留服务端原始业务码（无业务码为 null），供调用方显式判定。
-export function presentError(statusCode, payload) {
+function presentError(statusCode, payload) {
   const error = mapPresentError(statusCode, payload);
   error.code = payload?.error?.code ?? null;
   return error;

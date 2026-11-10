@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash, randomBytes } from "node:crypto";
 import { hasSha256Hex, sha256HexOfFile, sha256HexOfArrayBuffer } from "../../apps/miniapp/miniprogram/utils/digest.js";
-import { BusinessError, presentError } from "../../apps/miniapp/miniprogram/services/api.js";
+import { BusinessError, checkIn } from "../../apps/miniapp/miniprogram/services/api.js";
 
 function sha256OfBytes(bytes) {
   return createHash("sha256").update(Buffer.from(bytes)).digest("hex");
@@ -92,43 +92,60 @@ describe("miniapp digest sha256HexOfFile（mock wx.getFileSystemManager）", () 
   });
 });
 
-describe("miniapp presentError（与 H5 errors.js 对齐）", () => {
-  it("409 带出 retryable 与 requiresNewToken，文案透传后端 message", () => {
-    const retryableError = presentError(409, { error: { code: "SUBMIT_PROCESSING", message: "提交处理中，请稍后查看结果", retryable: true } });
+describe("miniapp presentError（经公开接口 checkIn + mock wx.request 驱动；与 H5 errors.js 对齐）", () => {
+  // 401 分支会触发 clearSessionAndUserCache + setTimeout(reLaunch)，fake 掉 setTimeout
+  // 并在 afterEach 补跑，避免 unstub 后 timer 触发 uncaught。
+  beforeEach(() => { vi.useFakeTimers({ toFake: ["setTimeout"] }); });
+  afterEach(() => { vi.runAllTimers(); vi.useRealTimers(); delete globalThis.wx; delete globalThis.getApp; });
+
+  async function errorFromApi(statusCode, payload) {
+    globalThis.wx = {
+      getStorageSync: () => null,
+      setStorageSync: () => {},
+      removeStorageSync: () => {},
+      reLaunch: () => {},
+      request: (options) => options.success({ statusCode, data: payload }),
+    };
+    globalThis.getApp = () => ({ globalData: { apiBase: "https://api.test" } });
+    return checkIn("assignment-error-case", {}).then((value) => { throw new Error(`预期 reject，实际成功返回：${JSON.stringify(value)}`); }, (error) => error);
+  }
+
+  it("409 带出 retryable 与 requiresNewToken，文案透传后端 message", async () => {
+    const retryableError = await errorFromApi(409, { error: { code: "SUBMIT_PROCESSING", message: "提交处理中，请稍后查看结果", retryable: true } });
     expect(retryableError).toBeInstanceOf(BusinessError);
     expect(retryableError.kind).toBe("conflict");
     expect(retryableError.message).toBe("提交处理中，请稍后查看结果");
     expect(retryableError.retryable).toBe(true);
     expect(retryableError.requiresNewToken).toBe(false);
 
-    const tokenError = presentError(409, { error: { code: "TASK_OVERDUE", message: "任务已超时", requiresNewToken: true } });
+    const tokenError = await errorFromApi(409, { error: { code: "TASK_OVERDUE", message: "任务已超时", requiresNewToken: true } });
     expect(tokenError.kind).toBe("conflict");
     expect(tokenError.requiresNewToken).toBe(true);
     expect(tokenError.retryable).toBe(false);
   });
 
-  it("任意错误都带出 code：有业务码透传服务端原始码，无业务码为 null", () => {
-    expect(presentError(404, { error: { code: "RECEIPT_NOT_FOUND", message: "小票不存在" } }).code).toBe("RECEIPT_NOT_FOUND");
-    expect(presentError(409, { error: { code: "QUESTIONNAIRE_SUBMITTED" } }).code).toBe("QUESTIONNAIRE_SUBMITTED");
-    expect(presentError(500, null).code).toBeNull();
-    expect(presentError(400, { error: { message: "仅 message 无 code" } }).code).toBeNull();
-    expect(presentError(400, undefined).code).toBeNull();
+  it("任意错误都带出 code：有业务码透传服务端原始码，无业务码为 null", async () => {
+    expect((await errorFromApi(404, { error: { code: "RECEIPT_NOT_FOUND", message: "小票不存在" } })).code).toBe("RECEIPT_NOT_FOUND");
+    expect((await errorFromApi(409, { error: { code: "QUESTIONNAIRE_SUBMITTED" } })).code).toBe("QUESTIONNAIRE_SUBMITTED");
+    expect((await errorFromApi(500, null)).code).toBeNull();
+    expect((await errorFromApi(400, { error: { message: "仅 message 无 code" } })).code).toBeNull();
+    expect((await errorFromApi(400, undefined)).code).toBeNull();
   });
 
-  it("回归：除 409 外各分支 kind 与文案一字不改（码判断先于状态码）", () => {
-    expect(presentError(401, { error: { code: "SMS_CODE_INVALIDATED" } })).toMatchObject({ kind: "sms_invalidated", message: "验证码已失效，请重新发送并完成人机验证" });
-    expect(presentError(400, { error: { code: "SMS_CODE_ATTEMPTS_EXHAUSTED" } })).toMatchObject({ kind: "sms_invalidated", message: "验证码已失效，请重新发送并完成人机验证" });
-    expect(presentError(409, { error: { code: "QUESTIONNAIRE_SUBMITTED" } })).toMatchObject({ kind: "questionnaire_submitted", message: "任务已提交，小票不可再查看或修改" });
-    expect(presentError(400, { error: { code: "CAPTCHA_EXPIRED" } })).toMatchObject({ kind: "captcha_rejected", message: "验证已过期，请重新验证" });
-    expect(presentError(400, { error: { code: "CAPTCHA_REJECTED" } })).toMatchObject({ kind: "captcha_rejected", message: "验证未通过，请重新验证" });
-    expect(presentError(400, { error: { code: "CAPTCHA_CANCELLED" } })).toMatchObject({ kind: "captcha_rejected", message: "验证未通过，请重新验证" });
-    expect(presentError(401, {})).toMatchObject({ kind: "session", message: "登录已失效，请重新登录" });
-    expect(presentError(403, {})).toMatchObject({ kind: "forbidden", message: "你没有权限进行此操作" });
-    expect(presentError(409, {})).toMatchObject({ kind: "conflict", message: "内容已更新，请刷新后重试" });
-    expect(presentError(500, {})).toMatchObject({ kind: "service", message: "服务暂时不可用，请稍后重试", retryable: true });
-    expect(presentError(503, null)).toMatchObject({ kind: "service", message: "服务暂时不可用，请稍后重试" });
-    expect(presentError(400, { error: { code: "RECEIPT_LIMIT_EXCEEDED" } })).toMatchObject({ kind: "validation", message: "最多只能上传 9 张消费小票" });
-    expect(presentError(400, { error: { code: "RECEIPT_FILE_INVALID" } })).toMatchObject({ kind: "validation", message: "请选择 10MB 以内的图片" });
-    expect(presentError(404, {})).toMatchObject({ kind: "validation", message: "操作未完成，请检查填写内容" });
+  it("回归：除 409 外各分支 kind 与文案一字不改（码判断先于状态码）", async () => {
+    expect(await errorFromApi(401, { error: { code: "SMS_CODE_INVALIDATED" } })).toMatchObject({ kind: "sms_invalidated", message: "验证码已失效，请重新发送并完成人机验证" });
+    expect(await errorFromApi(400, { error: { code: "SMS_CODE_ATTEMPTS_EXHAUSTED" } })).toMatchObject({ kind: "sms_invalidated", message: "验证码已失效，请重新发送并完成人机验证" });
+    expect(await errorFromApi(409, { error: { code: "QUESTIONNAIRE_SUBMITTED" } })).toMatchObject({ kind: "questionnaire_submitted", message: "任务已提交，小票不可再查看或修改" });
+    expect(await errorFromApi(400, { error: { code: "CAPTCHA_EXPIRED" } })).toMatchObject({ kind: "captcha_rejected", message: "验证已过期，请重新验证" });
+    expect(await errorFromApi(400, { error: { code: "CAPTCHA_REJECTED" } })).toMatchObject({ kind: "captcha_rejected", message: "验证未通过，请重新验证" });
+    expect(await errorFromApi(400, { error: { code: "CAPTCHA_CANCELLED" } })).toMatchObject({ kind: "captcha_rejected", message: "验证未通过，请重新验证" });
+    expect(await errorFromApi(401, {})).toMatchObject({ kind: "session", message: "登录已失效，请重新登录" });
+    expect(await errorFromApi(403, {})).toMatchObject({ kind: "forbidden", message: "你没有权限进行此操作" });
+    expect(await errorFromApi(409, {})).toMatchObject({ kind: "conflict", message: "内容已更新，请刷新后重试" });
+    expect(await errorFromApi(500, {})).toMatchObject({ kind: "service", message: "服务暂时不可用，请稍后重试", retryable: true });
+    expect(await errorFromApi(503, null)).toMatchObject({ kind: "service", message: "服务暂时不可用，请稍后重试" });
+    expect(await errorFromApi(400, { error: { code: "RECEIPT_LIMIT_EXCEEDED" } })).toMatchObject({ kind: "validation", message: "最多只能上传 9 张消费小票" });
+    expect(await errorFromApi(400, { error: { code: "RECEIPT_FILE_INVALID" } })).toMatchObject({ kind: "validation", message: "请选择 10MB 以内的图片" });
+    expect(await errorFromApi(404, {})).toMatchObject({ kind: "validation", message: "操作未完成，请检查填写内容" });
   });
 });
