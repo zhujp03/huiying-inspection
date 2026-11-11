@@ -116,6 +116,9 @@ async function loadPage(tag) {
   else if (tag === "onload-config-late") await import("../../apps/miniapp/miniprogram/pages/dishes/index.js?parity-dishes-onload-config-late");
   else if (tag === "onload-config-ready") await import("../../apps/miniapp/miniprogram/pages/dishes/index.js?parity-dishes-onload-config-ready");
   else if (tag === "onload-config-unload") await import("../../apps/miniapp/miniprogram/pages/dishes/index.js?parity-dishes-onload-config-unload");
+  else if (tag === "onload-config-parallel") await import("../../apps/miniapp/miniprogram/pages/dishes/index.js?parity-dishes-onload-config-parallel");
+  else if (tag === "onload-config-gate-loading") await import("../../apps/miniapp/miniprogram/pages/dishes/index.js?parity-dishes-onload-config-gate-loading");
+  else if (tag === "onload-config-fail") await import("../../apps/miniapp/miniprogram/pages/dishes/index.js?parity-dishes-onload-config-fail");
   else if (tag === "persist-sha") await import("../../apps/miniapp/miniprogram/pages/dishes/index.js?parity-dishes-persist-sha");
   else throw new Error(`unknown page tag: ${tag}`);
   return pageConfig;
@@ -492,6 +495,82 @@ describe("配置晚到（onLoad publicConfig 兜底补拉）", () => {
     await flush();
     expect(app.loadPublicConfig).toHaveBeenCalledTimes(1);
     expect(context.data.ocrEnabled).toBe(false);
+  });
+
+  it("配置请求在途：getAssignment/getDraft 已并行发出，不被配置阻塞", async () => {
+    pageConfig = await loadPage("onload-config-parallel");
+    const app = installApp({});
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    app.loadPublicConfig = vi.fn(async () => { await gate; app.globalData.publicConfig = { features: {} }; });
+    installWx();
+    apiMocks.getAssignment.mockResolvedValue({ status: "draft", receiptRequired: false });
+    apiMocks.getDraft.mockResolvedValue({
+      attempt: { id: "attempt-1", status: "draft", revision: 7 },
+      questionnaireVersion: { id: "qv-1" },
+      questions: [], answers: {}, dishes: [], dishRequirements: [], otherRecords: {},
+    });
+    apiMocks.listReceiptAttachments.mockResolvedValue({ revision: 7, items: [] });
+    const context = makeContext({}, { routeMeta: metaFixture() });
+    const onLoadPromise = pageConfig.onLoad.call(context, { assignmentId: "assignment-1", attemptId: "attempt-1", questionnaireVersionId: "qv-1", revision: "7" });
+    await flush();
+    expect(app.loadPublicConfig).toHaveBeenCalledTimes(1);
+    expect(apiMocks.getAssignment).toHaveBeenCalledTimes(1);
+    expect(apiMocks.getDraft).toHaveBeenCalledTimes(1);
+    release();
+    await onLoadPromise;
+    expect(context.data.loading).toBe(false);
+  });
+
+  it("数据已返回而配置未到：loading 保持 true；放行后 loading 置 false 且入口按新配置求值", async () => {
+    pageConfig = await loadPage("onload-config-gate-loading");
+    const app = installApp({});
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    app.loadPublicConfig = vi.fn(async () => { await gate; app.globalData.publicConfig = { features: { receiptOcr: true, dishRecords: true } }; });
+    installWx();
+    apiMocks.getAssignment.mockResolvedValue({ status: "draft", receiptRequired: false });
+    apiMocks.getDraft.mockResolvedValue({
+      attempt: { id: "attempt-1", status: "draft", revision: 7 },
+      questionnaireVersion: { id: "qv-1" },
+      questions: [], answers: {}, dishes: [], dishRequirements: [], otherRecords: {},
+    });
+    apiMocks.listReceiptAttachments.mockResolvedValue({ revision: 7, items: [] });
+    const context = makeContext({}, { routeMeta: metaFixture() });
+    const onLoadPromise = pageConfig.onLoad.call(context, { assignmentId: "assignment-1", attemptId: "attempt-1", questionnaireVersionId: "qv-1", revision: "7" });
+    await flush();
+    await flush();
+    expect(context.data.loading).toBe(true);
+    release();
+    await onLoadPromise;
+    expect(context.data.loading).toBe(false);
+    expect(context.data.ocrEnabled).toBe(true);
+    expect(context.data.dishEnabled).toBe(true);
+  });
+
+  it("loadPublicConfig reject 或返回 null：loading 照常解除，不卡住", async () => {
+    pageConfig = await loadPage("onload-config-fail");
+    installWx();
+    apiMocks.getAssignment.mockResolvedValue({ status: "draft", receiptRequired: false });
+    apiMocks.getDraft.mockResolvedValue({
+      attempt: { id: "attempt-1", status: "draft", revision: 7 },
+      questionnaireVersion: { id: "qv-1" },
+      questions: [], answers: {}, dishes: [], dishRequirements: [], otherRecords: {},
+    });
+    apiMocks.listReceiptAttachments.mockResolvedValue({ revision: 7, items: [] });
+    const rejectApp = installApp({});
+    rejectApp.loadPublicConfig = vi.fn(async () => { throw new Error("config request failed"); });
+    const rejectContext = makeContext({}, { routeMeta: metaFixture() });
+    await pageConfig.onLoad.call(rejectContext, { assignmentId: "assignment-1", attemptId: "attempt-1", questionnaireVersionId: "qv-1", revision: "7" });
+    expect(rejectContext.data.loading).toBe(false);
+    expect(rejectContext.data.error).toBe("");
+    apiMocks.getAssignment.mockClear();
+    const nullApp = installApp({});
+    nullApp.loadPublicConfig = vi.fn(async () => null);
+    const nullContext = makeContext({}, { routeMeta: metaFixture() });
+    await pageConfig.onLoad.call(nullContext, { assignmentId: "assignment-1", attemptId: "attempt-1", questionnaireVersionId: "qv-1", revision: "7" });
+    expect(nullContext.data.loading).toBe(false);
+    expect(nullContext.data.error).toBe("");
   });
 });
 

@@ -53,8 +53,9 @@ Page({
     this.syncOcrEntry();
     // 配置晚到：publicConfig 尚未到达时补拉一次并重新求值入口显隐（页面已卸载则跳过）。
     if (!getApp()?.globalData?.publicConfig) {
-      await getApp()?.loadPublicConfig?.();
-      if (!this.unloaded) this.syncOcrEntry();
+      this.configReady = Promise.resolve(getApp()?.loadPublicConfig?.())
+        .catch(() => null)
+        .then(() => { if (!this.unloaded) this.syncOcrEntry(); });
     }
     if (!options.assignmentId || !options.attemptId || !options.questionnaireVersionId) {
       this.setData({ loading: false, error: "未找到菜品记录，请从问卷重新进入" }); return;
@@ -100,6 +101,7 @@ Page({
       this.routeMeta = meta;
       this.dirty = Boolean(useLocal) || !(result.dishes || []).length;
       this.recovery = { jobId: recovery.jobId || null, applyKey: recovery.applyKey || null, appliedJobId: recovery.appliedJobId || null };
+      if (this.configReady) await this.configReady;
       this.setData({ meta, dishes, pendingReceipts, highlights, receiptRequired: Boolean(assignment.receiptRequired), loading: false });
       await this.loadReceipts();
       if (this.recovery.jobId) await this.resumeOcr();
