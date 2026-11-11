@@ -34,14 +34,16 @@ Page({
     // 草稿同步时序：尚未补发到服务端的 scored 题；补发成功前草稿不得整体置已同步。
     this.pendingResync = new Set();
     // 网络恢复自动补发：重新走 load()（拉取+合并+补发），并发由 load 互斥兜底。
+    this.pageVisible = true;
     this.networkListener = (result) => {
-      if (this.unloaded || !result.isConnected) return;
+      if (this.unloaded || !this.pageVisible || !result.isConnected) return;
       this.load();
     };
     if (typeof wx.onNetworkStatusChange === "function") wx.onNetworkStatusChange(this.networkListener);
     await this.load();
   },
-  async onShow() { if (this.routeMeta && !this.data.loading) await this.load(); },
+  async onShow() { this.pageVisible = true; if (this.routeMeta && !this.data.loading) await this.load(); },
+  onHide() { this.pageVisible = false; },
   onUnload() {
     this.unloaded = true;
     if (typeof wx.offNetworkStatusChange === "function") wx.offNetworkStatusChange(this.networkListener);

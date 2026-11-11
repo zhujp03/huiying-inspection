@@ -430,6 +430,24 @@ describe("问卷页网络恢复自动补发（对齐 SurveyPage online 监听）
     expect(context.unloaded).toBe(true);
   });
 
+  it("onHide 被盖住期间网络恢复不重拉；onShow 回前台正常重拉", async () => {
+    const requests = [];
+    const wx = installRouter(requests);
+    const pageConfig = await loadSurveyPage("parity-survey-online-hide");
+    const context = makeContext(pageConfig);
+    await pageConfig.onLoad.call(context, onLoadOptions);
+    expect(requests.length).toBe(1);
+    const listener = wx.onNetworkStatusChange.mock.calls[0][0];
+    pageConfig.onHide.call(context);
+    listener({ isConnected: true });
+    await flush();
+    expect(requests.length).toBe(1); // 被盖住期间网络恢复：不重新加载
+    await pageConfig.onShow.call(context); // 返回问卷页：onShow 正常重拉
+    await until(() => requests.length === 2);
+    await flush();
+    expect(context.data.loading).toBe(false);
+  });
+
   it("wx.offNetworkStatusChange 不存在时 onUnload 不抛错", async () => {
     const requests = [];
     const wx = installRouter(requests);
