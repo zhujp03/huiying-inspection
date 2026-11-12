@@ -69,7 +69,9 @@ Page({
         markDraftSynced(meta, meta.revision);
       }
       this.routeMeta = meta;
-      this.assignmentRevision = assignment.revision ?? result.assignment?.revision ?? meta.revision;
+      // assignmentRevision 只取任务 revision：提交 409 以它校验；attempt revision 绝不能兜底。
+      if (!Number.isInteger(assignment.revision)) throw new Error("任务信息已过期，请刷新后重试");
+      this.assignmentRevision = assignment.revision;
       this.dirty = useLocal;
       this.setData({
         meta,
@@ -174,7 +176,7 @@ Page({
       const meta = { ...this.routeMeta, revision: saved.revision };
       markDraftSynced(meta, saved.revision);
       this.routeMeta = meta;
-      this.assignmentRevision = saved.assignmentRevision ?? this.assignmentRevision ?? saved.revision;
+      this.assignmentRevision = saved.assignmentRevision ?? this.assignmentRevision;
       this.dirty = false;
       this.setData({ meta, suggestion });
       return saved;
@@ -187,8 +189,39 @@ Page({
     }
   },
 
+  // 任务 revision 守卫：非整数绝不发提交请求，也绝不回退问卷 attempt revision。
+  requireFreshAssignment() {
+    if (Number.isInteger(this.assignmentRevision)) return true;
+    this.submitToken = null;
+    this.setData({ submitState: "refresh_required", message: "任务信息已过期，请刷新后重试" });
+    return false;
+  },
+
+  // 提交错误三态映射：已提交终态 > 可重试（保 token）> 需刷新换 token（清 token）> 终态失败（清 token）。
+  handleSubmitError(error) {
+    if (error?.kind === "questionnaire_submitted") {
+      clearDraft(this.routeMeta);
+      this.submitToken = null;
+      wx.showToast({ title: "该任务已提交", icon: "none" });
+      wx.redirectTo({ url: `/pages/task/index?assignmentId=${encodeURIComponent(this.routeMeta.assignmentId)}&source=${this.source || ""}` });
+      return;
+    }
+    if (error?.retryable === true) {
+      this.setData({ submitState: "retryable_failed", message: `${error.message}，可以重试提交` });
+      return;
+    }
+    if (error?.requiresNewToken === true) {
+      this.submitToken = null;
+      this.setData({ submitState: "refresh_required", message: error.message || "任务信息已更新，请刷新后重试" });
+      return;
+    }
+    this.submitToken = null;
+    this.setData({ submitState: "terminal_failed", message: error?.message || "提交未完成" });
+  },
+
   async submit() {
     if (this.locked()) return;
+    if (!this.requireFreshAssignment()) return;
     if (!this.submitToken) {
       try { this.submitToken = secureUuid(); }
       catch { this.setData({ message: "当前环境不支持安全提交，请升级微信后重试" }); return; }
@@ -197,7 +230,7 @@ Page({
     try {
       const result = await submitQuestionnaire(this.routeMeta.attemptId, {
         submitToken: this.submitToken,
-        assignmentRevision: this.assignmentRevision ?? this.routeMeta.revision,
+        assignmentRevision: this.assignmentRevision,
         confirmation: true,
       });
       if (result.status === "processing") {
@@ -207,12 +240,7 @@ Page({
       }
       this.complete(result);
     } catch (error) {
-      if (error.retryable) {
-        this.setData({ submitState: "retryable_failed", message: `${error.message}，可以重试提交` });
-      } else {
-        this.submitToken = null;
-        this.setData({ submitState: "terminal_failed", message: error.message });
-      }
+      this.handleSubmitError(error);
     }
   },
 
@@ -222,11 +250,12 @@ Page({
 
   async submitWithExistingToken() {
     if (!this.submitToken) { this.setData({ submitState: "draft" }); return; }
+    if (!this.requireFreshAssignment()) return;
     this.setData({ submitState: "submitting", message: "正在确认提交结果…" });
     try {
       const result = await submitQuestionnaire(this.routeMeta.attemptId, {
         submitToken: this.submitToken,
-        assignmentRevision: this.assignmentRevision ?? this.routeMeta.revision,
+        assignmentRevision: this.assignmentRevision,
         confirmation: true,
       });
       if (result.status === "processing") {
@@ -234,8 +263,7 @@ Page({
         this.poll();
       } else this.complete(result);
     } catch (error) {
-      if (error.retryable) this.setData({ submitState: "retryable_failed", message: `${error.message}，可以重试提交` });
-      else { this.submitToken = null; this.setData({ submitState: "terminal_failed", message: error.message }); }
+      this.handleSubmitError(error);
     }
   },
 

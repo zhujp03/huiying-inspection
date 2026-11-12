@@ -4,7 +4,8 @@ import {
   initHighlightPhotoUpload, initializeReceiptUpload, listReceiptAttachments, saveDishes,
   saveOtherRecords, uploadToSignedTarget,
 } from "../../services/api.js";
-import { getDraft as getLocalDraft, markDraftSynced, saveDraft as saveLocalDraft } from "../../store/survey.js";
+import { getDraft as getLocalDraft, markDraftSynced, peekDraft as peekDraftLocal, saveDraft as saveLocalDraft } from "../../store/survey.js";
+import { hasSha256Hex, sha256HexOfFile } from "../../utils/digest.js";
 import { parentIsPage, sanitizeSource } from "../../utils/navigation.js";
 import { firstIncompleteQuestion, isBlankExtraDish, secureUuid, validateDish } from "../../utils/business.js";
 import {
@@ -47,8 +48,15 @@ Page({
   },
 
   async onLoad(options) {
+    this.unloaded = false;
     this.setData(navigationMetrics());
     this.syncOcrEntry();
+    // 配置晚到：publicConfig 尚未到达时补拉一次并重新求值入口显隐（页面已卸载则跳过）。
+    if (!getApp()?.globalData?.publicConfig) {
+      this.configReady = Promise.resolve(getApp()?.loadPublicConfig?.())
+        .catch(() => null)
+        .then(() => { if (!this.unloaded) this.syncOcrEntry(); });
+    }
     if (!options.assignmentId || !options.attemptId || !options.questionnaireVersionId) {
       this.setData({ loading: false, error: "未找到菜品记录，请从问卷重新进入" }); return;
     }
@@ -76,7 +84,11 @@ Page({
       const serverDishes = buildServerDishes(result);
       const useLocal = local.synced === false && local.dishes?.length;
       const dishes = (useLocal ? local.dishes : serverDishes).map((dish) => projectDish(enrichDish(dish, result.dishRequirements || [])));
-      const recovery = local.receiptRecovery || {};
+      // 待传小票恢复清单是对「已知服务端行」的唯一客户端记忆：init 响应丢失/网络失败时服务端
+      // revision 已前进，getDraft 的 revision 钉定会把本地草稿静默清空——从修订版未过滤视图
+      // （peekDraft）兜底恢复。dishes/highlights 的本地优先语义不变。
+      const localRaw = peekDraftLocal(meta);
+      const recovery = local.receiptRecovery?.pendingReceipts?.length ? local.receiptRecovery : (localRaw?.receiptRecovery?.pendingReceipts?.length ? localRaw.receiptRecovery : {});
       const pendingReceipts = (recovery.pendingReceipts || []).filter((item) => item.localPath).map(projectPendingReceipt);
       // 闪光点：本地未同步优先；否则采用服务端结构化条目；无结构化条目时按旧单条
       // highlight 字符串兜底为一条未持久化条目（首次保存落库，历史数据不丢）。
@@ -89,6 +101,7 @@ Page({
       this.routeMeta = meta;
       this.dirty = Boolean(useLocal) || !(result.dishes || []).length;
       this.recovery = { jobId: recovery.jobId || null, applyKey: recovery.applyKey || null, appliedJobId: recovery.appliedJobId || null };
+      if (this.configReady) await this.configReady;
       this.setData({ meta, dishes, pendingReceipts, highlights, receiptRequired: Boolean(assignment.receiptRequired), loading: false });
       await this.loadReceipts();
       if (this.recovery.jobId) await this.resumeOcr();
@@ -224,8 +237,21 @@ Page({
     if (!pending || this.data.receiptBusy) return;
     this.setData({ receiptBusy: true });
     try {
-      let current = { ...pending, status: "uploading", message: "准备上传", progressPercent: 1 };
+      // 失败重试一律重新 init：已缓存的 uploadTarget 可能已过期，服务端失败态只在 init 幂等重放时
+      // 复位并重签凭据；attachmentId/clientFileId 保留供服务端幂等重放（同 clientFileId 不产生重复行）。
+      const base = pending.status === "failed" && pending.uploadTarget ? { ...pending, uploadTarget: null } : pending;
+      let current = { ...base, status: "uploading", message: "准备上传", progressPercent: 1 };
       this.updatePending(current);
+      // 小票契约在 init/complete 都强制 64-hex sha256：init 前对真实文件字节算摘要，同一摘要
+      // 字符串贯穿 init→直传→complete；读文件失败本地直接失败（可读文案），不发任何网络请求。
+      if (!hasSha256Hex(current.sha256)) {
+        this.updatePending({ ...current, status: "uploading", message: "正在校验图片", progressPercent: 1 });
+        const sha256 = await sha256HexOfFile(current.localPath);
+        // 用户可能在校验期间移除该图片：取消后放弃回填，避免已删除的小票复活。
+        if (this.cancelledUploads?.has(clientFileId)) return;
+        current = { ...current, sha256 };
+        this.updatePending(current);
+      }
       let target = current.uploadTarget;
       if (!target) {
         const init = await initializeReceiptUpload(this.routeMeta.attemptId, fileMeta(current), this.routeMeta.revision);
@@ -249,17 +275,70 @@ Page({
     } catch (error) {
       const current = this.data.pendingReceipts.find((item) => item.clientFileId === clientFileId);
       if (current) this.updatePending({ ...current, status: "failed", message: safeMessage(error, "暂时无法上传小票，请重试") });
-    } finally { this.setData({ receiptBusy: false }); this.refreshReceiptProjection(); }
+    } finally { this.setData({ receiptBusy: false }); this.runQueuedUploads(); this.refreshReceiptProjection(); }
   },
 
   retryUpload(event) { const id = event.currentTarget.dataset.id; this.cancelledUploads?.delete(id); this.uploadPending(id); },
-  // 移除待上传图片时登记取消：仍在途的上传完成回调检查该集合后放弃回填。
-  removePending(event) {
+  // 忙碌释放时补启动排队中的纯本地待传项：忙碌操作在途期间选中的图片不再滞留「等待上传」。
+  // 串行由 uploadPending 自身的 receiptBusy 互斥保证；实例标志防止重入；卸载后不再启动。
+  async runQueuedUploads() {
+    if (this.queuedUploadsRunning || this.unloaded) return;
+    this.queuedUploadsRunning = true;
+    try {
+      for (const item of [...this.data.pendingReceipts.filter((pending) => pending.status === "local_selected")]) {
+        await this.uploadPending(item.clientFileId);
+      }
+    } finally { this.queuedUploadsRunning = false; }
+  },
+  // 仅本地清理（待传项/草稿/占用计数）。
+  dropPendingLocally(clientFileId) {
+    this.setData({ pendingReceipts: this.data.pendingReceipts.filter((item) => item.clientFileId !== clientFileId) });
+    this.persistLocal(); this.refreshReceiptProjection();
+  },
+  // 移除待传项——服务端可能已存在同 clientFileId 的附件行（init 先于直传建行），本地移除必须
+  // 以服务端事实为准（对齐 H5 removePending）：
+  //   - attachmentId 已知：先软删释放槽位，成功后才清理本地并采纳 items/dishes/revision。
+  //   - attachmentId 未知但持久化 sha256 有效（init 已提交但响应丢失）：以同 clientFileId 幂等
+  //     重放 init 找回服务端行（摘要已持久化，无需文件字节），拿到 id 后同样授权软删。
+  //   - attachmentId 未知且无有效摘要（真未初始化）：仅本地移除。
+  // 失败处理：仅「显式已验证的行不存在」（RECEIPT_NOT_FOUND/RECEIPT_DELETED 业务码）在尽力刷新
+  // 一次列表后按幂等清理；其余一律保留待传项置 failed（可读文案，可重试移除）。忙时不发删除；
+  // 点击 × 前先登记取消，在途上传据此放弃回填。
+  async removePending(event) {
     const id = event.currentTarget.dataset.id;
+    const pending = this.data.pendingReceipts.find((item) => item.clientFileId === id);
+    if (!pending) return;
     this.cancelledUploads = this.cancelledUploads || new Set();
     this.cancelledUploads.add(id);
-    this.setData({ pendingReceipts: this.data.pendingReceipts.filter((item) => item.clientFileId !== id) });
-    this.persistLocal(); this.refreshReceiptProjection();
+    if (!pending.attachmentId && !hasSha256Hex(pending.sha256)) { this.dropPendingLocally(id); return; }
+    if (this.data.receiptBusy) return;
+    this.setData({ receiptBusy: true, receiptError: "" });
+    try {
+      let attachmentId = pending.attachmentId;
+      if (!attachmentId) {
+        const replay = await initializeReceiptUpload(this.routeMeta.attemptId, fileMeta(pending), this.routeMeta.revision);
+        this.updateRevision(replay.revision);
+        attachmentId = replay.attachment.id;
+      }
+      const removed = await deleteReceiptAttachment(this.routeMeta.attemptId, attachmentId, "keep_as_manual", this.routeMeta.revision);
+      this.updateRevision(removed.revision);
+      if (removed.items) this.setReceiptState(removed.items);
+      if (removed.dishes) this.acceptServerDishes(removed.dishes);
+      this.dropPendingLocally(id);
+    } catch (error) {
+      if (error?.code === "RECEIPT_NOT_FOUND" || error?.code === "RECEIPT_DELETED") {
+        // 刷新授权列表对齐服务端视图（清掉其他会话删除留下的陈旧服务端卡片），刷新失败忽略。
+        try {
+          const list = await listReceiptAttachments(this.routeMeta.attemptId);
+          this.updateRevision(list.revision);
+          this.setReceiptState(list.items);
+        } catch { /* 列表刷新失败不影响已验证的本地清理 */ }
+        this.dropPendingLocally(id);
+        return;
+      }
+      const current = this.data.pendingReceipts.find((item) => item.clientFileId === id);
+      if (current) this.updatePending({ ...current, status: "failed", message: safeMessage(error, "暂时无法删除小票，请重试") });
+    } finally { this.setData({ receiptBusy: false }); this.runQueuedUploads(); }
   },
 
   replaceFailedReceipt(event) {
@@ -280,7 +359,7 @@ Page({
         this.setData({ pendingReceipts: [...this.data.pendingReceipts, pending] }); this.persistLocal();
         this.setData({ receiptBusy: false }); await this.uploadPending(pending.clientFileId);
       } catch (error) { this.setData({ receiptError: safeMessage(error, "暂时无法重新上传小票，请重试") }); }
-      finally { this.setData({ receiptBusy: false }); this.refreshReceiptProjection(); }
+      finally { this.setData({ receiptBusy: false }); this.runQueuedUploads(); this.refreshReceiptProjection(); }
     } });
   },
 
@@ -310,7 +389,7 @@ Page({
       this.setReceiptState(result.items || this.data.receipts.filter((item) => item.id !== attachment.id));
       if (result.dishes) this.acceptServerDishes(result.dishes);
     } catch (error) { this.setData({ receiptError: safeMessage(error, "暂时无法删除小票，请重试") }); }
-    finally { this.setData({ receiptBusy: false }); }
+    finally { this.setData({ receiptBusy: false }); this.runQueuedUploads(); }
   },
 
   async startOcr() {
@@ -624,7 +703,7 @@ Page({
   closeSubmitted() { wx.showToast({ title: "该问卷已关闭编辑", icon: "none" }); wx.redirectTo({ url: `/pages/task/index?assignmentId=${encodeURIComponent(this.routeMeta.assignmentId)}&source=${this.source || ""}` }); },
   onShow() { this.pageVisible = true; this.syncOcrEntry(); if (!this.data.loading && this.recovery?.jobId && !this.data.ocrView?.terminal) this.resumeOcr(); },
   onHide() { this.pageVisible = false; this.stopOcrPolling(); this.persistLocal(); },
-  onUnload() { this.pageVisible = false; this.stopOcrPolling(); if (this.dirty || this.data.pendingReceipts.length || this.recovery?.jobId) this.persistLocal(); },
+  onUnload() { this.unloaded = true; this.pageVisible = false; this.stopOcrPolling(); if (this.dirty || this.data.pendingReceipts.length || this.recovery?.jobId) this.persistLocal(); },
 });
 
 function buildServerDishes(result) {
@@ -689,7 +768,9 @@ function buildServerHighlights(otherRecords) {
   return [{ id: secureUuid(), text: legacy, persisted: false, photos: [], pending: [] }];
 }
 function stripPendingSecrets(item) { const { uploadTarget, ...safe } = item; return safe; }
-function fileMeta(item) { return { clientFileId: item.clientFileId, fileName: item.fileName, mimeType: item.mimeType, sizeBytes: item.sizeBytes }; }
+// fileMeta：小票 init/complete 共用载荷。sha256 由 uploadPending 在 init 前对真实字节算好
+// （缺失时本地失败，不发请求），init 与 complete 必须携带同一 64-hex 字符串。
+function fileMeta(item) { return { clientFileId: item.clientFileId, fileName: item.fileName, mimeType: item.mimeType, sizeBytes: item.sizeBytes, sha256: item.sha256 }; }
 function receiptMime(file) { return String(file.detectedType || "").toLowerCase() === "png" || String(file.tempFilePath).toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg"; }
 function receiptName(path) { return String(path).split("/").pop() || "receipt.jpg"; }
 function inspectReceiptFiles(files) { return Promise.all(files.map((file) => new Promise((resolve) => wx.getImageInfo({ src: file.tempFilePath, success: (info) => resolve({ ...file, fileType: info.type, detectedType: info.type }), fail: () => resolve(file) })))); }

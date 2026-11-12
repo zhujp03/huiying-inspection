@@ -37,4 +37,12 @@ export function markDraftSynced(meta, revision) {
   registerDraftKey(userId, key);
 }
 
+export function advanceDraftRevision(meta, revision) {
+  const nextMeta = { ...meta, revision };
+  const { userId, key } = identity(nextMeta);
+  const current = wx.getStorageSync(key) || {};
+  wx.setStorageSync(key, { ...current, revision });
+  registerDraftKey(userId, key);
+}
+
 export function clearDraft(meta) { const { key } = identity(meta); wx.removeStorageSync(key); }

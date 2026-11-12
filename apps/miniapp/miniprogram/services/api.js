@@ -11,7 +11,14 @@ export class BusinessError extends Error {
   constructor(kind, message, details = {}) { super(message); this.name = "BusinessError"; this.kind = kind; this.retryable = Boolean(details.retryable); this.requiresNewToken = Boolean(details.requiresNewToken); }
 }
 
+// kind/message 是用户口径；error.code 保留服务端原始业务码（无业务码为 null），供调用方显式判定。
 function presentError(statusCode, payload) {
+  const error = mapPresentError(statusCode, payload);
+  error.code = payload?.error?.code ?? null;
+  return error;
+}
+
+function mapPresentError(statusCode, payload) {
   const code = payload?.error?.code;
   if (code === "SMS_CODE_INVALIDATED" || code === "SMS_CODE_ATTEMPTS_EXHAUSTED") return new BusinessError("sms_invalidated", "验证码已失效，请重新发送并完成人机验证");
   if (code === "QUESTIONNAIRE_SUBMITTED") return new BusinessError("questionnaire_submitted", "任务已提交，小票不可再查看或修改");
@@ -19,8 +26,9 @@ function presentError(statusCode, payload) {
   if (code === "CAPTCHA_REJECTED" || code === "CAPTCHA_CANCELLED") return new BusinessError("captcha_rejected", "验证未通过，请重新验证");
   if (statusCode === 401) return new BusinessError("session", "登录已失效，请重新登录");
   if (statusCode === 403) return new BusinessError("forbidden", "你没有权限进行此操作");
-  // 409 的具体原因由服务端给出（未到开始时间 / 需先打卡 / 内容已更新等），直接透出后端中文文案。
-  if (statusCode === 409) return new BusinessError("conflict", payload?.error?.message || "内容已更新，请刷新后重试", { requiresNewToken: payload?.error?.requiresNewToken });
+  // 409 的具体原因由服务端给出（未到开始时间 / 需先打卡 / 内容已更新等），直接透出后端中文文案；
+  // retryable（SUBMIT_PROCESSING）与 requiresNewToken（TASK_OVERDUE）双标志布尔透传，页面提交三态分流的唯一依据。
+  if (statusCode === 409) return new BusinessError("conflict", payload?.error?.message || "内容已更新，请刷新后重试", { retryable: payload?.error?.retryable, requiresNewToken: payload?.error?.requiresNewToken });
   if (statusCode >= 500) return new BusinessError("service", "服务暂时不可用，请稍后重试", { retryable: true });
   if (code === "RECEIPT_LIMIT_EXCEEDED") return new BusinessError("validation", "最多只能上传 9 张消费小票");
   if (code === "RECEIPT_FILE_INVALID") return new BusinessError("validation", "请选择 10MB 以内的图片");

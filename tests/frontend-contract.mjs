@@ -60,8 +60,8 @@ for (const fixtureLeak of ["contract-server", "fixture adapter", "fixture://", "
 const comparisonView = readFileSync(join(root, "apps/admin/src/components/ReceiptComparison.jsx"), "utf8");
 assert.ok(comparisonView.includes("已锁定") && comparisonView.includes("小票识别原始结果") && comparisonView.includes("探店员最终菜品"), "管理员详情必须包含只读小票比对");
 assert.equal(/<(input|textarea|select|button)\b/.test(comparisonView), false, "管理员小票比对不得提供编辑控件");
-assert.ok(otherPage.indexOf("saveRecords()") < otherPage.indexOf("wx.showModal"), "其他记录必须保存成功后再显示不可逆确认");
-assert.ok(otherView.includes("输入闪光点") && otherView.includes("请填写问卷中未列出但您认为可以改进的地方"), "其他记录占位文案必须符合阶段规格");
+assert.ok(otherPage.indexOf("await this.saveRecords()") > -1 && otherPage.indexOf("await this.saveRecords()") < otherPage.indexOf("confirmOpen: true"), "其他记录必须保存成功后再显示不可逆确认");
+assert.ok(otherView.includes("请填写问卷中未列出但您认为可以改进的地方") && dishesView.includes("描述这条闪光点"), "其他记录占位文案必须符合阶段规格");
 
 const visibleFiles = [
   ...collectFiles(join(root, "apps/miniapp/miniprogram/pages")).filter((file) => extname(file) === ".wxml"),

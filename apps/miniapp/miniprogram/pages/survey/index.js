@@ -1,5 +1,5 @@
 import { getQuestionnaire, saveAnswer } from "../../services/api.js";
-import { markDraftSynced, peekDraft, saveDraft as saveLocalDraft } from "../../store/survey.js";
+import { advanceDraftRevision, markDraftSynced, peekDraft, saveDraft as saveLocalDraft } from "../../store/survey.js";
 import { mergeSurveyAnswers } from "../../store/survey-merge.js";
 import { sanitizeSource } from "../../utils/navigation.js";
 import { firstIncompleteQuestion } from "../../utils/business.js";
@@ -8,6 +8,19 @@ import { firstIncompleteQuestion } from "../../utils/business.js";
 const FALLBACK_CATEGORIES = [
   { id: "environment", label: "环境卫生" }, { id: "service", label: "为客服务" }, { id: "product", label: "产品品质" },
 ];
+
+// 补发顺序：pendingResync 按题号升序；找不到题号的排最后。
+const pendingQuestionOrder = (pendingIds, questions) => {
+  const numbers = new Map((questions || []).map((question) => [question.id, question.number]));
+  return [...pendingIds].sort((a, b) => {
+    const left = numbers.get(a);
+    const right = numbers.get(b);
+    if (left === undefined && right === undefined) return 0;
+    if (left === undefined) return 1;
+    if (right === undefined) return -1;
+    return left - right;
+  });
+};
 
 Page({
   data: { categories: FALLBACK_CATEGORIES, category: FALLBACK_CATEGORIES[0].id, isLastCategory: false, meta: null, questions: [], visible: [], answers: {}, expanded: {}, answeredCount: 0, loading: true, error: "", syncMessage: "" },
@@ -18,9 +31,23 @@ Page({
     this.source = sanitizeSource(options.source);
     // 路由指定的分类要等服务端分类列表返回后再校验（分类可由管理员扩展）
     this.pendingCategory = options.category || "";
+    // 草稿同步时序：尚未补发到服务端的 scored 题；补发成功前草稿不得整体置已同步。
+    this.pendingResync = new Set();
+    // 网络恢复自动补发：重新走 load()（拉取+合并+补发），并发由 load 互斥兜底。
+    this.pageVisible = true;
+    this.networkListener = (result) => {
+      if (this.unloaded || !this.pageVisible || !result.isConnected) return;
+      this.load();
+    };
+    if (typeof wx.onNetworkStatusChange === "function") wx.onNetworkStatusChange(this.networkListener);
     await this.load();
   },
-  async onShow() { if (this.routeMeta && !this.data.loading) await this.load(); },
+  async onShow() { this.pageVisible = true; if (this.routeMeta && !this.data.loading) await this.load(); },
+  onHide() { this.pageVisible = false; },
+  onUnload() {
+    this.unloaded = true;
+    if (typeof wx.offNetworkStatusChange === "function") wx.offNetworkStatusChange(this.networkListener);
+  },
   // 用服务端分类列表替换兜底：路由指定的分类有效则优先，否则落在当前有效分类或第一个分类上。
   applyCategories(result) {
     const categories = Array.isArray(result.categories) && result.categories.length ? result.categories : FALLBACK_CATEGORIES;
@@ -31,8 +58,10 @@ Page({
     return { categories, category };
   },
   async load() {
-    this.setData({ loading: true, error: "" });
+    if (this.loadInProgress) return; // 进行中互斥：防网络恢复/初始加载/重试并发同题双发
+    this.loadInProgress = true;
     try {
+      this.setData({ loading: true, error: "" });
       const result = await getQuestionnaire(this.routeMeta.assignmentId);
       if (result.attempt.status === "submitted") { wx.showToast({ title: "该任务已提交，不能回看问卷内容", icon: "none" }); wx.redirectTo({ url: `/pages/task/index?assignmentId=${encodeURIComponent(this.routeMeta.assignmentId)}&source=${this.source}` }); return; }
       if (result.attempt.id !== this.routeMeta.attemptId || result.questionnaireVersion.id !== this.routeMeta.questionnaireVersionId) throw new Error("问卷信息已更新，请从任务详情重新进入");
@@ -54,22 +83,35 @@ Page({
         return;
       }
       saveLocalDraft(meta, { answers, dishes, highlight, suggestion });
-      markDraftSynced(meta, meta.revision);
+      // 补发成功前不得标记已同步——仍有待补发题时草稿保持 synced:false（刷新后可续补）。
+      this.pendingResync = new Set(merged.pendingResync);
+      if (this.pendingResync.size === 0) markDraftSynced(meta, meta.revision);
       this.setData({ meta, questions: result.questions, answers, ...categoryState, conflict: false, loading: false, syncMessage: "" });
       this.project();
-      // 逐项补发：同 revision 合并后仍有本地未同步的得分答案时，按顺序重新保存到服务端。
+      // 逐项补发：同 revision 合并后仍有本地未同步的得分答案时，按题号升序重新保存到服务端。
       if (merged.pendingResync.length > 0) {
-        for (const questionId of merged.pendingResync) {
+        let conflictDuringResync = false;
+        for (const questionId of pendingQuestionOrder(merged.pendingResync, result.questions)) {
           try {
             const saved = await saveAnswer(meta.attemptId, questionId, { answer: "scored", revision: this.routeMeta.revision });
             this.routeMeta = { ...this.routeMeta, revision: saved.revision };
-            markDraftSynced(this.routeMeta, saved.revision);
+            this.pendingResync.delete(questionId);
+            if (this.pendingResync.size === 0) markDraftSynced(this.routeMeta, saved.revision); // 全部补发完成才整体置已同步
+            else advanceDraftRevision(this.routeMeta, saved.revision); // 部分成功：仅推进已知 revision
             this.setData({ meta: this.routeMeta, syncMessage: "正在恢复未保存的答案…" });
-          } catch { /* 单题补发失败保留本地草稿，下次进入再补发 */ }
+          } catch (resyncError) {
+            if (resyncError?.kind === "conflict") {
+              // revision 冲突不得继续用旧 revision 硬发：转既有冲突横幅链路（retry() 重新 load）。
+              conflictDuringResync = true;
+              this.setData({ conflict: true, syncMessage: "内容已更新，请刷新后重试" });
+              break;
+            }
+            /* 其他失败保留本地草稿（synced:false），下次进入或网络恢复再补发 */
+          }
         }
-        this.setData({ syncMessage: "" });
+        if (!conflictDuringResync) this.setData({ syncMessage: "" });
       }
-    } catch (error) { this.setData({ loading: false, error: error.message }); }
+    } catch (error) { this.setData({ loading: false, error: error.message }); } finally { this.loadInProgress = false; }
   },
   retry() { this.setData({ conflict: false }); this.load(); },
   project() {
@@ -90,8 +132,12 @@ Page({
     this.setData({ answers, syncMessage: "正在保存…" }); saveLocalDraft(this.routeMeta, { answers }); this.project();
     try {
       const result = await saveAnswer(this.routeMeta.attemptId, id, { answer: "scored", revision: this.routeMeta.revision });
-      this.routeMeta = { ...this.routeMeta, revision: result.revision }; markDraftSynced(this.routeMeta, result.revision); this.setData({ meta: this.routeMeta, syncMessage: "已保存" });
-    } catch (error) { const reverted = { ...answers }; previous ? reverted[id] = previous : delete reverted[id]; this.setData({ answers: reverted, syncMessage: "保存失败，请重试" }); this.project(); wx.showToast({ title: error.message, icon: "none" }); }
+      this.routeMeta = { ...this.routeMeta, revision: result.revision };
+      // 无遗留待补发题才整体置已同步；有遗留仅推进已知 revision。
+      if (this.pendingResync.size === 0) markDraftSynced(this.routeMeta, result.revision);
+      else advanceDraftRevision(this.routeMeta, result.revision);
+      this.setData({ meta: this.routeMeta, syncMessage: "已保存" });
+    } catch (error) { this.pendingResync.add(id); const reverted = { ...answers }; previous ? reverted[id] = previous : delete reverted[id]; this.setData({ answers: reverted, syncMessage: "保存失败，请重试" }); this.project(); wx.showToast({ title: error.message, icon: "none" }); }
   },
   issue(event) {
     const id = event.currentTarget.dataset.id;

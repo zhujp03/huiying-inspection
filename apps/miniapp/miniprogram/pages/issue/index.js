@@ -3,7 +3,7 @@ import { backToParentOrRedirect, sanitizeSource } from "../../utils/navigation.j
 import { secureUuid } from "../../utils/business.js";
 
 Page({
-  data: { meta: null, question: null, editSessionId: "", target: "unscored", remark: "", images: [], audios: [], recording: false, saving: false, loading: true, error: "" },
+  data: { meta: null, question: null, editSessionId: "", target: "unscored", remark: "", remarkMissing: false, images: [], audios: [], recording: false, saving: false, loading: true, error: "" },
   async onLoad(options) {
     if (!options.assignmentId || !options.attemptId || !options.questionnaireVersionId || !options.questionId) { this.setData({ loading: false, error: "未找到题目，请返回问卷重试" }); return; }
     const meta = { assignmentId: options.assignmentId, attemptId: options.attemptId, questionnaireVersionId: options.questionnaireVersionId, revision: Number(options.revision || 0) };
@@ -13,15 +13,19 @@ Page({
     this.setData({ meta, target: options.target || "unscored" });
     try {
       const draft = await getQuestionnaire(meta.assignmentId);
+      // revision 以服务端为准（URL 携带的可能已过期）：建会话前就地前移，后续 update/confirm 用新值。
+      const draftRevision = Number(draft.attempt?.revision);
+      if (Number.isSafeInteger(draftRevision)) { meta.revision = draftRevision; this.setData({ meta }); }
       const question = draft.questions.find((item) => item.id === options.questionId);
       if (!question) throw new Error("题目已更新，请刷新问卷后重试");
       const current = draft.answers?.[question.id];
       const session = await createEditSession(meta.attemptId, question.id, { baseAnswerRevision: current?.revision || 0, targetAnswer: this.data.target });
       const attachments = session.activeAttachments || current?.attachments || [];
-      this.setData({ question, editSessionId: session.id, remark: session.draftIssueRemark ?? current?.remark ?? "", images: attachments.filter((item) => item.type === "image"), audios: attachments.filter((item) => item.type === "audio"), loading: false });
+      const initialRemark = session.draftIssueRemark ?? current?.remark ?? "";
+      this.setData({ question, editSessionId: session.id, remark: initialRemark, remarkMissing: this.data.target === "unscored" && !initialRemark.trim(), images: attachments.filter((item) => item.type === "image"), audios: attachments.filter((item) => item.type === "audio"), loading: false });
     } catch (error) { this.setData({ loading: false, error: error.message }); }
   },
-  remark(event) { this.setData({ remark: event.detail.value }); },
+  remark(event) { const value = event.detail.value; this.setData({ remark: value, remarkMissing: this.data.target === "unscored" && !value.trim() }); },
   chooseImage() {
     // 问题照片所有题可选、选填；上限默认 4 张（服务端未配置 imageMaxCount 时同值）。
     const maxCount = this.data.question.evidence.imageMaxCount || 4;
@@ -31,10 +35,11 @@ Page({
   },
   toggleRecord() {
     const recorder = wx.getRecorderManager();
-    // 全局 recorder 是单例，onStop 只在首次使用时注册一次，避免每次开始录音都追加监听导致重复上传。
+    // 全局 recorder 是单例，onStop/onError 只在首次使用时注册一次，避免每次开始录音都追加监听导致重复上传/重复提示。
     if (!this.recorderBound) {
       this.recorderBound = true;
-      recorder.onStop((result) => { this.setData({ recording: false }); if (result.duration < 1000) this.message("录音至少需要 1 秒"); else this.stageFile({ type: "audio", path: result.tempFilePath, size: result.fileSize, durationSeconds: Math.ceil(result.duration / 1000) }); });
+      recorder.onStop((result) => { this.setData({ recording: false }); if (this.unloaded) return; if (result.duration < 1000) this.message("录音至少需要 1 秒"); else this.stageFile({ type: "audio", path: result.tempFilePath, size: result.fileSize, durationSeconds: Math.ceil(result.duration / 1000) }); });
+      recorder.onError?.(() => { this.setData({ recording: false }); this.message("录音失败，请重试"); });
     }
     if (!this.data.recording) {
       if (this.data.audios.length >= 3) return this.message("每题最多上传 3 段音频");
@@ -44,7 +49,8 @@ Page({
   },
   async stageFile(file) {
     if (file.size > 10 * 1024 * 1024) return this.message("单个文件不能超过 10MB");
-    const tempId = `local-${this.data.images.length + this.data.audios.length}`;
+    this.evidenceSeq = (this.evidenceSeq || 0) + 1;
+    const tempId = `local-${this.evidenceSeq}`;
     const clientFileId = file.clientFileId || secureUuid();
     this.append(file.type, { id: tempId, clientFileId, type: file.type, path: file.path, size: file.size, durationSeconds: file.durationSeconds, status: "uploading", progressLabel: "正在上传" });
     try {
@@ -52,14 +58,19 @@ Page({
       await uploadToSignedTarget(init.uploadTarget, file.path);
       const completed = await completeEvidenceUpload(this.data.meta.attemptId, this.data.question.id, this.data.editSessionId, init.attachmentId, { uploadToken: init.uploadToken, sizeBytes: file.size, durationSeconds: file.durationSeconds });
       if (completed.status !== "staged_ready") throw new Error("附件尚未确认，请重试");
+      // complete 响应携带上传后的最新 attempt revision：只前进不回退，并发乱序完成时各读最新 this.data.meta。
+      const nextRevision = Number(completed.revision);
+      if (Number.isSafeInteger(nextRevision) && nextRevision > Number(this.data.meta.revision || 0)) this.setData({ meta: { ...this.data.meta, revision: nextRevision } });
       this.replace(file.type, tempId, { ...completed, id: init.attachmentId, clientFileId, type: file.type, path: file.path, size: file.size, durationSeconds: file.durationSeconds, status: "staged_ready", progressLabel: "上传成功" });
     } catch (error) { this.replace(file.type, tempId, { id: tempId, type: file.type, path: file.path, status: "failed", progressLabel: error.message }); }
   },
   retryUpload(event) { const item = [...this.data.images, ...this.data.audios].find((entry) => entry.id === event.currentTarget.dataset.id); if (item) { this.removeLocal(item.type, item.id); this.stageFile({ type: item.type, path: item.path, size: item.size || 0, durationSeconds: item.durationSeconds }); } },
   async deleteEvidence(event) { const { id, type } = event.currentTarget.dataset; const item = [...this.data.images, ...this.data.audios].find((entry) => entry.id === id); if (!item) return; if (!id.startsWith("local-")) { try { await removeEvidence(this.data.meta.attemptId, this.data.question.id, this.data.editSessionId, id); } catch (error) { return this.message(error.message); } } this.removeLocal(type, id); },
   play(event) { const item = this.data.audios.find((entry) => entry.id === event.currentTarget.dataset.id); if (!item?.path && !item?.previewUrl) return; // 音频实例复用单例，页面卸载时统一销毁，避免每次播放泄漏一个 InnerAudioContext。
-    this.audio = this.audio || wx.createInnerAudioContext(); this.audio.src = item.path || item.previewUrl; this.audio.play(); },
-  onUnload() { if (this.audio) { this.audio.destroy(); this.audio = null; } if (!this.sessionSettled && this.data.editSessionId) cancelIssue(this.data.meta.attemptId, this.data.question.id, this.data.editSessionId).catch(() => {}); },
+    this.audio = this.audio || wx.createInnerAudioContext();
+    if (!this.audioErrorBound) { this.audioErrorBound = true; this.audio.onError?.(() => this.message("音频播放失败，请重试")); }
+    this.audio.src = item.path || item.previewUrl; this.audio.play(); },
+  onUnload() { this.unloaded = true; if (this.data.recording) wx.getRecorderManager().stop(); if (this.audio) { this.audio.destroy(); this.audio = null; } if (!this.sessionSettled && this.data.editSessionId) cancelIssue(this.data.meta.attemptId, this.data.question.id, this.data.editSessionId).catch(() => {}); },
   // 返回问卷：紧邻父页确为同任务问卷才原生返回；直达进入/无关栈不算证据，
   // 此时 redirectTo 携全量参数（含分类）的规范问卷页，绝不落到无关任务或空栈报错。
   backToSurvey() {
